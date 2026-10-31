@@ -24,7 +24,7 @@ export default function RootLayout({
           href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&family=Sarabun:wght@400;500;600;700&display=swap"
           rel="stylesheet"
         />
-        <link rel="stylesheet" href="/style.css?v=web2" />
+          <link rel="stylesheet" href="/style.css?v=web3" />
       </head>
       <body>{children}</body>
     </html>

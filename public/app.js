@@ -55,9 +55,12 @@ const state = {
  *   showLogs?: boolean,
  *   progress?: { step: number, total: number, label: string },
  *   startedAt?: number,
+ *   mode?: 'single' | 'batch',
  * }}
  */
 let sourceMapSession = null;
+/** @type {AbortController | null} */
+let sourceMapAbort = null;
 /** @type {{ connected: boolean, maskedKey?: string|null, model?: string, models?: {id:string,label:string}[], defaultModel?: string, studioUrl?: string }} */
 let aiStatus = { connected: false, models: [], defaultModel: "gemini-3.8-flash" };
 
@@ -261,66 +264,183 @@ function formatDraftDate(iso) {
   }
 }
 
-async function buildDraftPayload() {
+/**
+ * @param {typeof multiSlots[number]} slot
+ */
+async function serializeSlotForDraft(slot) {
+  if (!slot?.file) return null;
   /** @type {Record<string, any>} */
   const images = {};
-  for (const [name, file] of Object.entries(state.images)) {
+  for (const [name, file] of Object.entries(slot.images || {})) {
     images[name] = file ? await fileToDraftBlob(file) : null;
   }
-  const fileBlob = await fileToDraftBlob(state.file);
-  const templateFingerprint = state.file ? await computeTemplateFingerprint(state.file) : "";
   return {
-    v: 1,
-    savedAt: new Date().toISOString(),
-    filename: state.filename,
-    templateFingerprint,
-    fields: state.fields,
-    values: state.values,
-    skip: state.skip,
-    rowSkip: state.rowSkip,
-    showFullContent: state.showFullContent,
-    fileContent: state.fileContent,
-    fileLayout: state.fileLayout,
-    viewColWidths: Object.fromEntries(viewTableColWidths),
-    file: fileBlob,
+    id: slot.id,
+    filename: slot.filename,
+    fields: slot.fields,
+    values: slot.values,
+    skip: slot.skip,
+    rowSkip: slot.rowSkip,
+    fileContent: slot.fileContent || "",
+    fileLayout: Array.isArray(slot.fileLayout) ? slot.fileLayout : [],
+    file: await fileToDraftBlob(slot.file),
     images,
   };
 }
 
 /**
+ * @param {any} raw
+ * @returns {typeof multiSlots[number] | null}
+ */
+function deserializeSlotFromDraft(raw) {
+  if (!raw?.file?.buffer || !Array.isArray(raw.fields) || !raw.fields.length) {
+    return null;
+  }
+  const file = draftBlobToFile(raw.file);
+  if (!file) return null;
+  /** @type {Record<string, File | null>} */
+  const images = {};
+  if (raw.images && typeof raw.images === "object") {
+    for (const [name, blob] of Object.entries(raw.images)) {
+      images[name] = draftBlobToFile(blob);
+    }
+  }
+  return {
+    id: typeof raw.id === "string" && raw.id ? raw.id : newSlotId(),
+    file,
+    filename: raw.filename || file.name || "template.docx",
+    fields: raw.fields,
+    values: raw.values && typeof raw.values === "object" ? raw.values : {},
+    skip: raw.skip && typeof raw.skip === "object" ? raw.skip : {},
+    rowSkip: raw.rowSkip && typeof raw.rowSkip === "object" ? raw.rowSkip : {},
+    fileContent: typeof raw.fileContent === "string" ? raw.fileContent : "",
+    fileLayout: Array.isArray(raw.fileLayout) ? raw.fileLayout : [],
+    images,
+  };
+}
+
+async function buildDraftPayload() {
+  // Flush the open tab into multiSlots before snapshotting.
+  persistActiveSlot();
+  if (!multiSlots.length && state.file) {
+    const id = multiActiveId || newSlotId();
+    multiActiveId = id;
+    multiSlots = [
+      {
+        id,
+        file: state.file,
+        filename: state.filename,
+        fields: state.fields,
+        values: structuredClone(state.values),
+        images: { ...state.images },
+        skip: structuredClone(state.skip),
+        rowSkip: structuredClone(state.rowSkip),
+        fileContent: state.fileContent,
+        fileLayout: state.fileLayout,
+      },
+    ];
+  }
+
+  /** @type {any[]} */
+  const multi = [];
+  for (const slot of multiSlots) {
+    const ser = await serializeSlotForDraft(slot);
+    if (ser?.file) multi.push(ser);
+  }
+  if (!multi.length) {
+    throw new Error("no templates to draft");
+  }
+
+  const activeSer =
+    multi.find((s) => s.id === multiActiveId) || multi[0];
+  const activeFile = draftBlobToFile(activeSer.file);
+  const templateFingerprint = activeFile
+    ? await computeTemplateFingerprint(activeFile)
+    : "";
+
+  return {
+    v: 2,
+    savedAt: new Date().toISOString(),
+    filename: activeSer.filename,
+    templateFingerprint,
+    fields: activeSer.fields,
+    values: activeSer.values,
+    skip: activeSer.skip,
+    rowSkip: activeSer.rowSkip,
+    showFullContent: state.showFullContent,
+    fileContent: activeSer.fileContent,
+    fileLayout: activeSer.fileLayout,
+    viewColWidths: Object.fromEntries(viewTableColWidths),
+    file: activeSer.file,
+    images: activeSer.images || {},
+    multiSlots: multi,
+    multiActiveId: activeSer.id,
+  };
+}
+
+/**
  * Apply a draft payload into form state (auto or named).
+ * Restores every template tab when draft.v>=2 / draft.multiSlots is present.
  * @param {any} draft
  * @returns {Promise<boolean>}
  */
 async function applyDraftPayload(draft) {
-  if (!draft?.file?.buffer || !Array.isArray(draft.fields) || !draft.fields.length) {
-    return false;
-  }
   draftRestoring = true;
   try {
     revokeObjectUrls();
-    state.file = draftBlobToFile(draft.file);
-    state.filename = draft.filename || state.file?.name || "";
-    state.fields = draft.fields;
-    state.values = draft.values && typeof draft.values === "object" ? draft.values : {};
-    state.skip = draft.skip && typeof draft.skip === "object" ? draft.skip : {};
-    state.rowSkip = draft.rowSkip && typeof draft.rowSkip === "object" ? draft.rowSkip : {};
-    state.showFullContent = draft.showFullContent !== false;
-    state.fileContent = typeof draft.fileContent === "string" ? draft.fileContent : "";
-    state.fileLayout = Array.isArray(draft.fileLayout) ? draft.fileLayout : [];
-    state.images = {};
-    if (draft.images && typeof draft.images === "object") {
-      for (const [name, blob] of Object.entries(draft.images)) {
-        state.images[name] = draftBlobToFile(blob);
+    contentHydratedIds.clear();
+    sourceMapSession = null;
+
+    /** @type {typeof multiSlots} */
+    const slots = [];
+    if (Array.isArray(draft?.multiSlots) && draft.multiSlots.length) {
+      for (const raw of draft.multiSlots) {
+        const slot = deserializeSlotFromDraft(raw);
+        if (slot) slots.push(slot);
       }
     }
+
+    // Legacy v1 drafts: single template only.
+    if (!slots.length) {
+      if (!draft?.file?.buffer || !Array.isArray(draft.fields) || !draft.fields.length) {
+        return false;
+      }
+      const slot = deserializeSlotFromDraft({
+        id: draft.multiActiveId || newSlotId(),
+        filename: draft.filename,
+        fields: draft.fields,
+        values: draft.values,
+        skip: draft.skip,
+        rowSkip: draft.rowSkip,
+        fileContent: draft.fileContent,
+        fileLayout: draft.fileLayout,
+        file: draft.file,
+        images: draft.images,
+      });
+      if (!slot) return false;
+      slots.push(slot);
+    }
+
+    multiSlots = slots;
+    const active =
+      slots.find((s) => s.id === draft.multiActiveId) || slots[0];
+    applySlotToState(active);
+    for (const f of state.fields) {
+      if (f.type === "list") ensureListRows(f.name, f.itemFields);
+    }
+    state.showFullContent = draft.showFullContent !== false;
+
     viewTableColWidths.clear();
     if (draft.viewColWidths && typeof draft.viewColWidths === "object") {
       for (const [k, widths] of Object.entries(draft.viewColWidths)) {
         if (Array.isArray(widths)) viewTableColWidths.set(k, widths.map(Number));
       }
     }
-    sourceMapSession = null;
+
+    // Mark hydrated tabs so we don't refetch layout that was saved.
+    for (const s of slots) {
+      if (s.fileLayout?.length || s.fileContent) contentHydratedIds.add(s.id);
+    }
     return !!state.file;
   } finally {
     draftRestoring = false;
@@ -635,14 +755,68 @@ async function openNamedDraftPicker() {
   document.body.appendChild(overlay);
 }
 
+/**
+ * Popup when some selected .docx files are skipped (usually no {{vars}}).
+ * @param {{
+ *   ok: number,
+ *   total: number,
+ *   failures: { name: string, reason: string }[],
+ *   mode?: 'open' | 'add',
+ * }} opts
+ */
+function explainSkippedTemplates(opts) {
+  const { ok, total, failures, mode = "open" } = opts;
+  if (!failures?.length) return Promise.resolve("ok");
+  const verb = mode === "add" ? "เพิ่ม" : "เปิด";
+  const names = failures.map((f) => f.name).filter(Boolean);
+  const nameLine = names.length
+    ? names.map((n) => `「${n}」`).join(" ")
+    : "(ไม่ทราบชื่อไฟล์)";
+  const okLine =
+    ok > 0
+      ? `ระบบ${verb}เฉพาะไฟล์ที่มี {{ตัวแปร}} — ตอนนี้บนหน้าจอมี ${ok} จาก ${total} ไฟล์`
+      : `ไม่มีไฟล์ไหน${verb}ได้จากที่เลือก ${total} ไฟล์`;
+  const detailLines = failures
+    .map((f) => {
+      const reason = String(f.reason || "อ่านไม่สำเร็จ").replace(/\s+/g, " ").trim();
+      const short =
+        reason.length > 120 ? `${reason.slice(0, 117)}…` : reason;
+      return `• ${f.name}\n  ${short}`;
+    })
+    .join("\n");
+  return askDialog({
+    title:
+      names.length === 1
+        ? `ข้ามไฟล์ ${names[0]}`
+        : `ข้าม ${names.length} ไฟล์ที่มีปัญหา`,
+    body:
+      `${okLine}\n\n` +
+      `ชื่อไฟล์ที่มีปัญหา:\n${nameLine}\n\n` +
+      `รายละเอียด:\n${detailLines}\n\n` +
+      `เทมเพลตต้องมี {{ชื่อ}} หรือแท็กรูป หรือ {{#รายการ}}` +
+      (ok > 0
+        ? `\nสลับแท็บด้านบนได้ หรือกด 「+ เพิ่ม」 เพื่อเลือกไฟล์ใหม่`
+        : `\nใส่ตัวแปรใน Word แล้วเลือกใหม่อีกครั้ง`),
+    actions: [{ id: "ok", label: "เข้าใจแล้ว", kind: "primary" }],
+  });
+}
+
+function hideBanner() {
+  banner.hidden = true;
+  banner.textContent = "";
+  banner.classList.remove("success", "progress");
+  banner.removeAttribute("aria-busy");
+}
+
 function showBanner(message, kind = "error") {
   banner.hidden = !message;
   banner.classList.remove("success", "progress");
   if (!message) {
-    banner.textContent = "";
-    banner.removeAttribute("aria-busy");
+    hideBanner();
     return;
   }
+  const closeBtn =
+    `<button type="button" class="banner-close" data-banner-close title="ปิดข้อความ" aria-label="ปิดข้อความ">×</button>`;
   if (kind === "progress") {
     banner.classList.add("progress");
     banner.setAttribute("aria-busy", "true");
@@ -650,11 +824,15 @@ function showBanner(message, kind = "error") {
   } else if (kind === "success") {
     banner.classList.add("success");
     banner.removeAttribute("aria-busy");
-    banner.textContent = message;
+    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${closeBtn}`;
   } else {
     banner.removeAttribute("aria-busy");
-    banner.textContent = message;
+    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${closeBtn}`;
   }
+  banner.querySelector("[data-banner-close]")?.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    hideBanner();
+  });
   // Only scroll for errors — success/progress must not jump the viewport.
   if (kind === "error") {
     banner.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -855,6 +1033,54 @@ function clearFieldErrors() {
     if (el.classList.contains("field-error")) el.remove();
     else el.classList.remove("has-error");
   });
+  app.querySelectorAll("[aria-invalid='true']").forEach((el) => {
+    el.removeAttribute("aria-invalid");
+  });
+}
+
+/**
+ * @param {string} [inputSelector]
+ * @param {string} [name]
+ * @param {{ list: string, row: number, item: string } | null} [listRef]
+ */
+function markFieldError(inputSelector, name, listRef = null) {
+  /** @type {Element | null} */
+  let input = inputSelector ? app.querySelector(inputSelector) : null;
+  if (!input && name) {
+    input = app.querySelector(`[data-doc-field="${cssAttrSelector(name)}"]`);
+  }
+  if (!input && listRef) {
+    input = app.querySelector(
+      `[data-list="${cssAttrSelector(listRef.list)}"][data-row="${listRef.row}"][data-item="${cssAttrSelector(listRef.item)}"]`,
+    );
+  }
+  if (!input) return;
+
+  input.setAttribute("aria-invalid", "true");
+  const field =
+    input.closest(".field") ||
+    input.closest(".doc-blank-wrap") ||
+    input.closest(".doc-list") ||
+    input.parentElement;
+  if (field) field.classList.add("has-error");
+
+  // Compact highlight in table cells — full hint text is too wide for td.
+  const inTableCell = !!input.closest(".doc-table-cell-wrap, td");
+  if (!inTableCell && field && !field.querySelector(".field-error")) {
+    input.insertAdjacentHTML(
+      "afterend",
+      `<p class="field-error">ยังไม่ได้กรอก — กรอกค่า หรือติ๊ก “ข้าม”</p>`,
+    );
+  }
+}
+
+/** Scroll first highlighted empty field into view. */
+function scrollToFirstFieldError() {
+  const target =
+    app.querySelector(".has-error") ||
+    app.querySelector("[aria-invalid='true']");
+  if (!target || typeof target.scrollIntoView !== "function") return;
+  target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
 }
 
 /** Highlight empty required fields and return their display names. */
@@ -879,10 +1105,12 @@ function validateBeforeSubmit() {
         const wrap = app.querySelector(`[data-image-field="${cssAttrSelector(f.name)}"]`);
         if (wrap) {
           wrap.classList.add("has-error");
-          wrap.insertAdjacentHTML(
-            "beforeend",
-            `<p class="field-error">กรุณาเลือกไฟล์ หรือติ๊ก “ข้าม”</p>`,
-          );
+          if (!wrap.querySelector(".field-error")) {
+            wrap.insertAdjacentHTML(
+              "beforeend",
+              `<p class="field-error">กรุณาเลือกไฟล์ หรือติ๊ก “ข้าม”</p>`,
+            );
+          }
         }
       }
     } else if (f.type === "list") {
@@ -892,10 +1120,12 @@ function validateBeforeSubmit() {
         const rep = app.querySelector(`[data-list-field="${cssAttrSelector(f.name)}"]`);
         if (rep) {
           rep.classList.add("has-error");
-          rep.insertAdjacentHTML(
-            "beforeend",
-            `<p class="field-error">เพิ่มแถว หรือติ๊ก “ข้าม”</p>`,
-          );
+          if (!rep.querySelector(".field-error")) {
+            rep.insertAdjacentHTML(
+              "beforeend",
+              `<p class="field-error">เพิ่มแถว หรือติ๊ก “ข้าม”</p>`,
+            );
+          }
         }
         continue;
       }
@@ -909,6 +1139,7 @@ function validateBeforeSubmit() {
             markFieldError(
               `#l-${cssId(f.name)}-${idx}-${cssId(item.name)}`,
               item.name,
+              { list: f.name, row: idx, item: item.name },
             );
           }
         }
@@ -916,26 +1147,8 @@ function validateBeforeSubmit() {
     }
   }
 
+  if (missing.length) scrollToFirstFieldError();
   return missing;
-}
-
-function markFieldError(inputSelector, name) {
-  let input = app.querySelector(inputSelector);
-  if (!input && name) {
-    input = app.querySelector(`[data-doc-field="${cssAttrSelector(name)}"]`);
-  }
-  if (!input) return;
-  const field =
-    input.closest(".field") ||
-    input.closest(".doc-blank-wrap") ||
-    input.parentElement;
-  if (field) field.classList.add("has-error");
-  if (!field?.querySelector(".field-error")) {
-    input.insertAdjacentHTML(
-      "afterend",
-      `<p class="field-error">ยังไม่ได้กรอก — กรอกค่า หรือติ๊ก “ข้าม”</p>`,
-    );
-  }
 }
 
 function cssAttrSelector(value) {
@@ -1469,6 +1682,7 @@ function renderEmpty() {
       </button>
       <section class="draft-entry-panel" id="emptyDraftPanel" aria-label="โหลดดราฟ">
         <div class="draft-entry-head">
+          <span class="draft-entry-mark" aria-hidden="true"></span>
           <div>
             <p class="dropzone-kicker">ทำต่อจากเดิม</p>
             <h2 class="draft-entry-title">โหลดดราฟ</h2>
@@ -1524,6 +1738,7 @@ function renderEmpty() {
         </div>
       </aside>
       <section class="tagger-entry-card" aria-labelledby="taggerEntryTitle">
+        <span class="tagger-entry-mark" aria-hidden="true"></span>
         <p class="dropzone-kicker">ทางลัด</p>
         <h2 class="tagger-entry-title" id="taggerEntryTitle">สร้างเทมเพลตจากเอกสาร</h2>
         <p class="tagger-entry-sub">ไฮไลต์ข้อความในไฟล์ตัวอย่าง แล้วแทนด้วย <code>{{ตัวแปร}}</code> — คงเลย์เอาต์ Word เดิม</p>
@@ -4427,7 +4642,7 @@ function getTaggerFlatContent() {
 }
 
 /**
- * For run-number tags, replace only the digits (e.g. "1" in "จำเลยที่1" / "ที่ 1"),
+ * For run-number tags, replace only the digits (e.g. "1" in "รายการที่1" / "ที่ 1"),
  * not the whole selection, line, or cell — otherwise the surrounding labels disappear.
  * @param {string} spanText
  * @param {number} spanOccurrence
@@ -4448,7 +4663,7 @@ function resolveAutoReplaceTarget(spanText, spanOccurrence) {
     needle = trimmed;
     localIdx = spanText.indexOf(trimmed);
   } else {
-    // Prefer the number right after «ที่» (จำเลยที่1 / จำเลยที่ 1).
+    // Prefer the number right after «ที่» (รายการที่1 / ที่ 1).
     const afterThi = /ที่\s*(\d+)/u.exec(spanText);
     if (afterThi) {
       needle = afterThi[1];
@@ -4476,29 +4691,155 @@ function resolveAutoReplaceTarget(spanText, spanOccurrence) {
   return { plainText: needle, occurrence: occ };
 }
 
+/** True when pos sits after more {{#…}} than {{/…}} (inside an open list loop). */
+function isOffsetInsideOpenListLoop(content, pos) {
+  if (!content || pos < 0) return false;
+  const head = content.slice(0, pos);
+  const opens = (head.match(/\{\{#[^{}]*\}\}/g) || []).length;
+  const closes = (head.match(/\{\{\/[^{}]*\}\}/g) || []).length;
+  return opens > closes;
+}
+
+/**
+ * Existing file list ops store only the open marker as plainText ({{#name}}),
+ * so substring containment cannot cover sibling field tags in the same loop.
+ */
+function isExistingOpenListMarker(r) {
+  return (
+    !!r &&
+    r.source === "existing" &&
+    String(r.plainText || "") === String(r.tag || "") &&
+    /^\{\{#/.test(String(r.tag || ""))
+  );
+}
+
+/**
+ * Whether a replacement/chip already lives inside a list or table loop.
+ * Prefer DOM (chip in framed list row) — matches what the user sees.
+ * @param {NonNullable<typeof taggerSession>['replacements'][number]} r
+ */
+function isReplacementInsideListLoop(r) {
+  if (!taggerSession || !r) return false;
+  if (
+    r.kind === "list" ||
+    r.kind === "list-table" ||
+    r.mode === "wrap" ||
+    r.mode === "wrap-row"
+  ) {
+    return false;
+  }
+  if (r.wrapTag) return true;
+
+  // DOM: {{ที่}} chip sits in the same framed row as {{#เอกสารสิทธิ์}}
+  try {
+    const safeId =
+      typeof CSS !== "undefined" && typeof CSS.escape === "function"
+        ? CSS.escape(String(r.id))
+        : String(r.id).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const chip =
+      document.querySelector(`#taggerSelectRoot .tagger-chip[data-tag-id="${safeId}"]`) ||
+      document.querySelector(`.tagger-chip[data-tag-id="${safeId}"]`);
+    if (chip) {
+      if (
+        chip.closest(
+          ".tagger-list-frame-row, .tagger-list-frame, .tagger-row-group.is-list-table, tr.is-list-table",
+        )
+      ) {
+        return true;
+      }
+      const tr = chip.closest("tr");
+      if (tr && findTaggerWrapRepForRow(tr)) return true;
+    }
+  } catch {
+    /* ignore selector issues */
+  }
+
+  const original = taggerSession.originalPlainText || "";
+  const fieldStart = ensureTaggerPlainStart(r, original);
+  if (typeof fieldStart === "number" && fieldStart >= 0) {
+    const fieldEnd = fieldStart + String(r.plainText || "").length;
+    for (const w of taggerSession.replacements) {
+      if (w === r) continue;
+      const isList =
+        w.kind === "list" ||
+        w.kind === "list-table" ||
+        w.mode === "wrap" ||
+        w.mode === "wrap-row";
+      if (!isList || isExistingOpenListMarker(w)) continue;
+      const wStart = ensureTaggerPlainStart(w, original);
+      if (typeof wStart !== "number" || wStart < 0) continue;
+      const wEnd = wStart + String(w.plainText || "").length;
+      if (fieldStart >= wStart && fieldEnd <= wEnd) return true;
+    }
+    // Pre-tagged .docx: original still has {{#…}}…{{/}} around this field tag.
+    if (isOffsetInsideOpenListLoop(original, fieldStart)) return true;
+  }
+
+  const content = getTaggerFlatContent() || original;
+  const needles = [];
+  if (r.tag) needles.push(String(r.tag));
+  if (r.plainText && r.plainText !== r.tag) needles.push(String(r.plainText));
+  for (const needle of needles) {
+    const pos = nthOccurrenceStart(content, needle, r.occurrence || 0);
+    if (pos < 0) continue;
+    if (isOffsetInsideOpenListLoop(content, pos)) return true;
+  }
+  return false;
+}
+
 /**
  * True when the selection sits inside a list/table loop (session wrap or existing {{#…}} in content).
  * Auto/runno only makes sense inside loops (engine fills 1, 2, 3… per row).
- * @param {{ plainText: string, occurrence: number }} sel
+ * @param {{ plainText: string, occurrence: number, inTableRow?: boolean }} sel
  */
 function isSelectionInsideListLoop(sel) {
   if (!taggerSession || !sel?.plainText) return false;
   const original = taggerSession.originalPlainText || "";
   const start = nthOccurrenceStart(original, sel.plainText, sel.occurrence);
-  if (start < 0) return false;
-  const end = start + sel.plainText.length;
+  if (start >= 0) {
+    const end = start + sel.plainText.length;
 
-  for (const r of taggerSession.replacements) {
-    const isList =
-      r.kind === "list" ||
-      r.kind === "list-table" ||
-      r.mode === "wrap" ||
-      r.mode === "wrap-row";
-    if (!isList) continue;
-    const rStart = nthOccurrenceStart(original, r.plainText, r.occurrence);
-    if (rStart < 0) continue;
-    const rEnd = rStart + r.plainText.length;
-    if (start >= rStart && end <= rEnd) return true;
+    for (const r of taggerSession.replacements) {
+      const isList =
+        r.kind === "list" ||
+        r.kind === "list-table" ||
+        r.mode === "wrap" ||
+        r.mode === "wrap-row";
+      if (!isList || isExistingOpenListMarker(r)) continue;
+      const rStart =
+        typeof r.plainStart === "number" && r.plainStart >= 0
+          ? r.plainStart
+          : nthOccurrenceStart(original, r.plainText, r.occurrence);
+      if (rStart < 0) continue;
+      const rEnd = rStart + r.plainText.length;
+      if (start >= rStart && end <= rEnd) return true;
+    }
+
+    // File already has {{#…}}…{{/}} around this prose / tag.
+    if (isOffsetInsideOpenListLoop(original, start)) return true;
+  }
+
+  // Live DOM: selection inside a framed list table row
+  if (sel.inTableRow) {
+    try {
+      const range = window.getSelection?.()?.rangeCount
+        ? window.getSelection().getRangeAt(0)
+        : null;
+      const node = range?.commonAncestorContainer;
+      const el =
+        node && node.nodeType === Node.TEXT_NODE ? node.parentElement : /** @type {Element|null} */ (node);
+      if (
+        el?.closest?.(
+          ".tagger-list-frame-row, .tagger-list-frame, .tagger-row-group.is-list-table, tr.is-list-table",
+        )
+      ) {
+        return true;
+      }
+      const tr = el?.closest?.("tr");
+      if (tr && findTaggerWrapRepForRow(/** @type {HTMLTableRowElement} */ (tr))) return true;
+    } catch {
+      /* ignore */
+    }
   }
 
   // Already-tagged sample: scan current preview text for open list containers around needle.
@@ -4510,9 +4851,10 @@ function isSelectionInsideListLoop(sel) {
   while (from <= content.length) {
     const idx = content.indexOf(sel.plainText, from);
     if (idx < 0) break;
-    // Skip matches that are inside tag markup itself.
+    // Skip matches that are the start of a longer {{…}} only when needle is bare text.
     const before = content.slice(Math.max(0, idx - 2), idx);
-    if (before !== "{{") {
+    const needleIsTag = sel.plainText.startsWith("{{");
+    if (needleIsTag || before !== "{{") {
       found += 1;
       // Prefer remaining occurrence index when possible; fall back to first usable hit.
       if (found === sel.occurrence || (sel.occurrence === 0 && pos < 0)) {
@@ -4523,10 +4865,7 @@ function isSelectionInsideListLoop(sel) {
     from = idx + Math.max(1, sel.plainText.length);
   }
   if (pos < 0) return false;
-  const head = content.slice(0, pos);
-  const opens = (head.match(/\{\{#[^{}]*\}\}/g) || []).length;
-  const closes = (head.match(/\{\{\/[^{}]*\}\}/g) || []).length;
-  return opens > closes;
+  return isOffsetInsideOpenListLoop(content, pos);
 }
 
 function syncTaggerKindFields() {
@@ -4564,7 +4903,7 @@ function syncTaggerKindFields() {
         taggerPendingSelection.occurrence,
       );
       if (narrowed && narrowed.plainText !== taggerPendingSelection.plainText.trim()) {
-        kindHint.textContent = `รันเลขจะแทนที่เฉพาะ “${narrowed.plainText}” ในข้อความที่เลือก (ไม่ลบคำว่าจำเลยที่ / ป้ายข้างๆ)`;
+        kindHint.textContent = `รันเลขจะแทนที่เฉพาะ “${narrowed.plainText}” ในข้อความที่เลือก (ไม่ลบคำนำหน้าอย่าง「ที่」/ป้ายข้างๆ)`;
       } else {
         kindHint.textContent =
           "รันเลข ({{+ชื่อ}}) ใช้ในลูป — เลือกเฉพาะตัวเลข หรือข้อความที่มีเลขหลัง «ที่»";
@@ -4674,7 +5013,7 @@ function renderTaggerListItemFields() {
   if (kind === "list") {
     if (hint) {
       hint.textContent =
-        "ห่อย่อหน้า/บล็อกที่เลือกด้วย {{#ชื่อ}} … {{/}} (ไม่ต้องอยู่ในตาราง) — ใช้กับรายการซ้ำ เช่น จำเลย · แท็กฟิลด์ในลูปทีหลังได้ หรือตั้งชื่อทีละบรรทัดด้านล่าง";
+        "ห่อย่อหน้า/บล็อกที่เลือกด้วย {{#ชื่อ}} … {{/}} (ไม่ต้องอยู่ในตาราง) — ใช้กับรายการซ้ำ · แท็กฟิลด์ในลูปทีหลังได้ หรือตั้งชื่อทีละบรรทัดด้านล่าง";
     }
     const lines = taggerPendingSelection.lines || [];
     if (lines.length > 1) {
@@ -5408,7 +5747,7 @@ async function confirmTaggerVariable() {
         occ = narrowed.occurrence;
       } else if (!/^\d+$/.test(plain.trim())) {
         showTaggerDialogError(
-          "รันเลขต้องเลือกตัวเลข (เช่น 1) หรือข้อความที่มีเลขหลัง «ที่» เช่น จำเลยที่1",
+          "รันเลขต้องเลือกตัวเลข (เช่น 1) หรือข้อความที่มีเลขหลัง «ที่» เช่น รายการที่1",
         );
         return;
       }
@@ -5654,12 +5993,9 @@ async function saveTaggerEdit() {
           : "text";
 
   if (nextKind === "auto") {
-    const sel = {
-      plainText: r.plainText,
-      occurrence: r.occurrence,
-      inTableRow: true,
-    };
-    if (!isSelectionInsideListLoop(sel)) {
+    // Use the chip/replacement itself — plainText span of an existing {{#}} marker
+    // does not cover sibling fields like {{ที่}} in the same list cell.
+    if (!isReplacementInsideListLoop(r)) {
       showErr(
         "รันเลข ({{+ชื่อ}}) ใช้ได้เฉพาะภายในลูป {{#…}} — แท็กนี้อยู่นอกลูป หรือสร้างตาราง/ลิสต์ก่อน",
       );
@@ -5931,8 +6267,11 @@ async function hydrateTemplateContent(slot, opts = {}) {
     } else {
       persistActiveSlot();
     }
-    if (!opts.silent) {
-      showBanner("");
+    // Never wipe a warning/error from multi-upload — only clear our own progress line.
+    if (!opts.silent && banner.classList.contains("progress")) {
+      showBanner(typeof opts.afterMessage === "string" ? opts.afterMessage : "");
+    } else if (!opts.silent && typeof opts.afterMessage === "string" && opts.afterMessage) {
+      showBanner(opts.afterMessage);
     }
   } catch (err) {
     console.warn("hydrateTemplateContent", err);
@@ -5965,7 +6304,8 @@ async function parseFile(file, errorEl) {
     if (errorEl) {
       errorEl.hidden = false;
       errorEl.textContent = msg;
-    } else showBanner(msg);
+    }
+    showBanner(msg);
     return;
   }
   if (!lower.endsWith(".docx")) {
@@ -5973,15 +6313,17 @@ async function parseFile(file, errorEl) {
     if (errorEl) {
       errorEl.hidden = false;
       errorEl.textContent = msg;
-    } else showBanner(msg);
+    }
+    showBanner(msg);
     return;
   }
 
-  // Same as npm CLI UI: one /api/parse (fields + optional layout) — no double round-trip.
-  app.setAttribute("aria-busy", "true");
+  // Fields first (fast) → paint form → hydrate layout in background.
+  // Waiting on includeContent blocked the UI and felt frozen after ZIP-era work.
+  showBanner(`กำลังอ่าน ${file.name}…`, "progress");
   try {
     const preferContent = state.showFullContent;
-    const parsed = await parseTemplatePayload(file, preferContent);
+    const parsed = await parseTemplatePayload(file, false);
     resetFormState();
     state.showFullContent = preferContent;
     state.file = parsed.file;
@@ -5991,8 +6333,8 @@ async function parseFile(file, errorEl) {
     state.images = parsed.images;
     state.skip = parsed.skip;
     state.rowSkip = parsed.rowSkip;
-    state.fileContent = parsed.fileContent;
-    state.fileLayout = parsed.fileLayout;
+    state.fileContent = "";
+    state.fileLayout = [];
     for (const f of state.fields) {
       if (f.type === "list") ensureListRows(f.name, f.itemFields);
     }
@@ -6008,24 +6350,24 @@ async function parseFile(file, errorEl) {
         images: { ...state.images },
         skip: structuredClone(state.skip),
         rowSkip: structuredClone(state.rowSkip),
-        fileContent: state.fileContent,
-        fileLayout: state.fileLayout,
+        fileContent: "",
+        fileLayout: [],
       },
     ];
     contentHydratedIds.clear();
-    if (preferContent && (parsed.fileLayout.length || parsed.fileContent)) {
-      contentHydratedIds.add(id);
-    }
+    showBanner("");
     renderForm();
     scheduleSaveDraft();
+    if (preferContent) {
+      void hydrateTemplateContent(multiSlots[0]);
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : "เชื่อมต่อเซิร์ฟเวอร์ไม่ได้";
     if (errorEl) {
       errorEl.hidden = false;
       errorEl.textContent = msg;
-    } else showBanner(msg);
-  } finally {
-    app.removeAttribute("aria-busy");
+    }
+    showBanner(msg);
   }
 }
 
@@ -6085,38 +6427,77 @@ async function appendTemplateFiles(files, errorEl = null) {
     showBanner(`เพิ่มได้สูงสุด ${room} ไฟล์จากชุดนี้ (รวมแล้วไม่เกิน 12)`);
   }
 
-  app.setAttribute("aria-busy", "true");
+  showBanner(`กำลังเพิ่มเทมเพลต ${toAdd.length} ไฟล์…`, "progress");
   try {
     const preferContent = state.showFullContent;
     const addedNames = [];
     /** @type {typeof multiSlots} */
     const addedSlots = [];
+    /** @type {{ name: string, reason: string }[]} */
+    const failures = [];
     for (const file of toAdd) {
-      const parsed = await parseTemplatePayload(file, false);
-      for (const f of parsed.fields) {
-        if (f.type === "list" && !Array.isArray(parsed.values[f.name])) {
-          parsed.values[f.name] = [];
+      try {
+        const parsed = await parseTemplatePayload(file, false);
+        for (const f of parsed.fields) {
+          if (f.type === "list" && !Array.isArray(parsed.values[f.name])) {
+            parsed.values[f.name] = [];
+          }
         }
+        const id = newSlotId();
+        const slot = {
+          id,
+          ...parsed,
+          fileContent: "",
+          fileLayout: [],
+        };
+        multiSlots.push(slot);
+        addedSlots.push(slot);
+        addedNames.push(parsed.filename);
+      } catch (err) {
+        failures.push({
+          name: file.name,
+          reason: err instanceof Error ? err.message : String(err),
+        });
       }
-      const id = newSlotId();
-      const slot = {
-        id,
-        ...parsed,
-        fileContent: "",
-        fileLayout: [],
-      };
-      multiSlots.push(slot);
-      addedSlots.push(slot);
-      addedNames.push(parsed.filename);
+    }
+    if (!addedSlots.length) {
+      const msg = failures[0]
+        ? `${failures[0].name}: ${failures[0].reason}`
+        : "เพิ่มเทมเพลตไม่สำเร็จ";
+      if (errorEl) {
+        errorEl.hidden = false;
+        errorEl.textContent = msg;
+      }
+      showBanner(msg);
+      await explainSkippedTemplates({
+        ok: 0,
+        total: toAdd.length,
+        failures,
+        mode: "add",
+      });
+      return;
     }
     persistActiveSlot();
-    showBanner(
+    const okMsg =
       addedNames.length === 1
         ? `เพิ่มเทมเพลต「${addedNames[0]}」แล้ว · รวม ${multiSlots.length} ไฟล์ — สลับแท็บด้านบนได้`
-        : `เพิ่ม ${addedNames.length} เทมเพลตแล้ว · รวม ${multiSlots.length} ไฟล์ — สลับแท็บด้านบนได้`,
-      "success",
-    );
+        : `เพิ่ม ${addedNames.length} เทมเพลตแล้ว · รวม ${multiSlots.length} ไฟล์ — สลับแท็บด้านบนได้`;
+    const failNames = failures.map((f) => f.name).join(", ");
+    const failNote = failures.length
+      ? `${okMsg} · ข้าม: ${failNames}`
+      : okMsg;
+    showBanner(failNote, failures.length ? undefined : "success");
     renderForm();
+    scheduleSaveDraft();
+    if (failures.length) {
+      await explainSkippedTemplates({
+        ok: addedSlots.length,
+        total: toAdd.length,
+        failures,
+        mode: "add",
+      });
+      hideBanner();
+    }
     if (preferContent) {
       for (const slot of addedSlots) void hydrateTemplateContent(slot, { silent: true });
     }
@@ -6125,9 +6506,8 @@ async function appendTemplateFiles(files, errorEl = null) {
     if (errorEl) {
       errorEl.hidden = false;
       errorEl.textContent = msg;
-    } else showBanner(msg);
-  } finally {
-    app.removeAttribute("aria-busy");
+    }
+    showBanner(msg);
   }
 }
 
@@ -6163,12 +6543,11 @@ async function parseMultipleTemplates(files, errorEl) {
     return;
   }
 
-  app.setAttribute("aria-busy", "true");
-  // Multi is new vs npm CLI (1 file). Parse fields in parallel first; layout only for active tab.
+  // Fields-only for every file → paint tabs immediately → hydrate open tab.
   showBanner(`กำลังอ่าน ${docx.length} เทมเพลต…`, "progress");
   try {
     const preferContent = state.showFullContent;
-    const parsedList = await Promise.all(
+    const settled = await Promise.allSettled(
       docx.map(async (file, index) => {
         const parsed = await parseTemplatePayload(file, false);
         for (const f of parsed.fields) {
@@ -6185,9 +6564,39 @@ async function parseMultipleTemplates(files, errorEl) {
         };
       }),
     );
-    parsedList.sort((a, b) => a.order - b.order);
     /** @type {typeof multiSlots} */
-    const slots = parsedList.map(({ order: _order, ...slot }) => slot);
+    const slots = [];
+    /** @type {{ name: string, reason: string }[]} */
+    const failures = [];
+    settled.forEach((result, index) => {
+      if (result.status === "fulfilled") {
+        const { order: _order, ...slot } = result.value;
+        slots.push(slot);
+      } else {
+        const reason = result.reason;
+        failures.push({
+          name: docx[index].name,
+          reason: reason instanceof Error ? reason.message : String(reason),
+        });
+      }
+    });
+    if (!slots.length) {
+      const msg = failures[0]
+        ? `${failures[0].name}: ${failures[0].reason}`
+        : "อ่านหลายเทมเพลตไม่สำเร็จ";
+      if (errorEl) {
+        errorEl.hidden = false;
+        errorEl.textContent = msg;
+      }
+      showBanner(msg);
+      await explainSkippedTemplates({
+        ok: 0,
+        total: docx.length,
+        failures,
+        mode: "open",
+      });
+      return;
+    }
     resetFormState();
     state.showFullContent = preferContent;
     multiSlots = slots;
@@ -6197,25 +6606,217 @@ async function parseMultipleTemplates(files, errorEl) {
       if (f.type === "list") ensureListRows(f.name, f.itemFields);
     }
     persistActiveSlot();
-    showBanner("");
+    const failNames = failures.map((f) => f.name).join(", ");
+    const failNote = failures.length
+      ? `เปิดเฉพาะไฟล์ที่มีตัวแปร · ${slots.length}/${docx.length} · ข้าม: ${failNames}`
+      : "";
+    if (failNote) showBanner(failNote);
+    else showBanner("");
     renderForm();
-    app.removeAttribute("aria-busy");
-    // Only the open tab — like npm CLI loading one preview, not N layouts at once.
-    if (preferContent) void hydrateTemplateContent(slots[0]);
+    scheduleSaveDraft();
+    // Popup first (intentional filter), then hydrate preview in background.
+    if (failures.length) {
+      await explainSkippedTemplates({
+        ok: slots.length,
+        total: docx.length,
+        failures,
+        mode: "open",
+      });
+      // Dialog already explained — don't leave the red strip stuck on screen.
+      hideBanner();
+    }
+    if (preferContent) {
+      void hydrateTemplateContent(slots[0], {
+        silent: !!failures.length,
+        afterMessage: failNote,
+      });
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : "อ่านหลายเทมเพลตไม่สำเร็จ";
     if (errorEl) {
       errorEl.hidden = false;
       errorEl.textContent = msg;
-    } else showBanner(msg);
-  } finally {
-    app.removeAttribute("aria-busy");
+    }
+    showBanner(msg);
   }
 }
 
 /**
+ * Write one Import-JSON payload into a multi-slot without relying on global
+ * state mid-loop (avoids wiping later tabs when switching active slot).
+ * @param {typeof multiSlots[number]} slot
+ * @param {any} payload
+ */
+function writeImportPayloadIntoSlot(slot, payload) {
+  if (!slot || !payload || typeof payload !== "object") {
+    throw new Error("invalid slot/payload");
+  }
+  const valuesIn =
+    payload.values && typeof payload.values === "object" ? payload.values : {};
+  const skipIn =
+    payload.skip && typeof payload.skip === "object" ? payload.skip : {};
+  const rowSkipIn =
+    payload.rowSkip && typeof payload.rowSkip === "object" ? payload.rowSkip : {};
+
+  /** @type {Record<string, any>} */
+  const values = structuredClone(slot.values || {});
+  /** @type {Record<string, boolean>} */
+  const skip = structuredClone(slot.skip || {});
+  /** @type {Record<string, Record<string, boolean>[]>} */
+  const rowSkip = structuredClone(slot.rowSkip || {});
+
+  for (const f of slot.fields || []) {
+    if (f.type === "auto") continue;
+    if (f.type === "image") {
+      skip[f.name] = true;
+      continue;
+    }
+    if (!Object.prototype.hasOwnProperty.call(valuesIn, f.name)) {
+      // Keep skeleton skip if AI omitted the key.
+      if (f.type === "bool") {
+        values[f.name] = false;
+        skip[f.name] = Object.prototype.hasOwnProperty.call(skipIn, f.name)
+          ? !!skipIn[f.name]
+          : false;
+      } else if (f.type === "list") {
+        values[f.name] = [];
+        skip[f.name] = true;
+        rowSkip[f.name] = [];
+      } else {
+        values[f.name] = "";
+        skip[f.name] = true;
+      }
+      continue;
+    }
+    const val = valuesIn[f.name];
+    if (f.type === "bool") {
+      values[f.name] = coerceBoolValue(val);
+      skip[f.name] = Object.prototype.hasOwnProperty.call(skipIn, f.name)
+        ? !!skipIn[f.name]
+        : false;
+      continue;
+    }
+    if (f.type === "list") {
+      const rows = Array.isArray(val) ? val : [];
+      values[f.name] = rows.map((row) => {
+        if (!row || typeof row !== "object") return row;
+        const next = { ...row };
+        for (const item of f.itemFields || []) {
+          if (
+            item.type === "bool" &&
+            Object.prototype.hasOwnProperty.call(next, item.name)
+          ) {
+            next[item.name] = coerceBoolValue(next[item.name]);
+          }
+        }
+        return next;
+      });
+      const empty = rows.length === 0;
+      skip[f.name] = Object.prototype.hasOwnProperty.call(skipIn, f.name)
+        ? !!skipIn[f.name]
+        : empty;
+      if (Array.isArray(rowSkipIn[f.name])) {
+        rowSkip[f.name] = structuredClone(rowSkipIn[f.name]);
+      } else {
+        rowSkip[f.name] = rows.map((row) => {
+          /** @type {Record<string, boolean>} */
+          const rs = {};
+          for (const item of f.itemFields || []) {
+            if (item.type === "auto") {
+              rs[item.name] = false;
+              continue;
+            }
+            if (!row || typeof row !== "object") {
+              rs[item.name] = true;
+              continue;
+            }
+            const cell = row[item.name];
+            if (item.type === "bool") rs[item.name] = false;
+            else rs[item.name] = cell == null || String(cell).trim() === "";
+          }
+          return rs;
+        });
+      }
+      continue;
+    }
+    const str = val == null ? "" : String(val);
+    values[f.name] = str;
+    skip[f.name] = Object.prototype.hasOwnProperty.call(skipIn, f.name)
+      ? !!skipIn[f.name]
+      : !str.trim();
+  }
+
+  slot.values = values;
+  slot.skip = skip;
+  slot.rowSkip = rowSkip;
+}
+
+/**
+ * Apply batch-from-source results onto multiSlots (Import JSON path).
+ * @param {{ results?: any[] }} data
+ */
+function applyBatchFromSourceResults(data) {
+  const n = multiSlots.length;
+  let applied = 0;
+  const failNames = [];
+  const resumeId = multiActiveId;
+  for (const r of data.results || []) {
+    if (!r || !r.ok) {
+      if (r?.filename) failNames.push(r.filename);
+      continue;
+    }
+    const slot =
+      (r.id && multiSlots.find((s) => s.id === r.id)) ||
+      multiSlots.find((s) => s.filename === r.filename);
+    if (!slot) {
+      failNames.push(r.filename || r.id || "?");
+      continue;
+    }
+    const payload =
+      r.valuesJson && typeof r.valuesJson === "object"
+        ? r.valuesJson
+        : {
+            values: r.values,
+            skip: r.skip,
+            rowSkip: r.rowSkip,
+          };
+    try {
+      writeImportPayloadIntoSlot(slot, payload);
+      applied += 1;
+    } catch (err) {
+      console.warn(err);
+      failNames.push(slot.filename || r.filename || "?");
+    }
+  }
+
+  const active =
+    multiSlots.find((s) => s.id === resumeId) ||
+    multiSlots.find((s) => s.id === multiActiveId) ||
+    multiSlots[0];
+  if (active) {
+    applySlotToState(active);
+    for (const f of state.fields) {
+      if (f.type === "list") ensureListRows(f.name, f.itemFields);
+    }
+  }
+  persistActiveSlot();
+  scheduleSaveDraft();
+  sourceMapSession = null;
+  renderForm();
+
+  const failMsg = failNames.length
+    ? ` · ไม่สำเร็จ ${failNames.length}: ${failNames.slice(0, 3).join(", ")}`
+    : "";
+  showBanner(
+    `Import JSON จาก AI ลงหน้าจอแล้ว ${applied}/${n} เทมเพลต — ตรวจทานแล้วค่อยกดสร้างเอกสาร${failMsg}`,
+    "success",
+  );
+  setTimeout(() => hideBanner(), 4200);
+}
+
+/**
  * AI maps source → docx-form-values JSON per template, then Import ลงหน้าจอ.
- * Does NOT create/fill .docx files.
+ * Does NOT create/fill .docx files. Shows detailed log panel + cancel.
  * @param {File[]} sourceFiles
  */
 async function runBatchFromSource(sourceFiles) {
@@ -6229,6 +6830,41 @@ async function runBatchFromSource(sourceFiles) {
     if (!aiStatus.connected && !getClientAiKey()) return;
   }
   persistActiveSlot();
+  if (sourceMapAbort) sourceMapAbort.abort();
+  sourceMapAbort = new AbortController();
+  const abortSignal = sourceMapAbort.signal;
+  const n = multiSlots.length;
+
+  sourceMapSession = {
+    proposals: [],
+    extracted: [],
+    values: {},
+    skip: {},
+    rowSkip: {},
+    status: "loading",
+    statusText: `อัปโหลดต้นทาง ${sourceFiles.length} ไฟล์ · เทมเพลต ${n}`,
+    logs: [],
+    showLogs: true,
+    mode: "batch",
+    progress: {
+      step: 0,
+      total: sourceFiles.length + n + 1,
+      label: "เตรียมส่งต้นทาง",
+    },
+    startedAt: Date.now(),
+  };
+  appendSourceMapLog(
+    `เลือกต้นทาง ${sourceFiles.length} ไฟล์: ${sourceFiles.map((f) => f.name).join(", ")}`,
+  );
+  appendSourceMapLog(
+    `เทมเพลต ${n} ไฟล์: ${multiSlots.map((s) => s.filename).join(", ")}`,
+  );
+  appendSourceMapLog(
+    `ระบบสร้างโครง Export JSON แยก ${n} ไฟล์ + ส่งไฟล์ต้นทางจริง (PDF/รูป) ให้ AI อ่านเอง · รับ JSON กลับ ${n} ชุด`,
+  );
+  renderForm();
+  showBanner("");
+
   const fd = new FormData();
   fd.append(
     "schemas",
@@ -6237,7 +6873,6 @@ async function runBatchFromSource(sourceFiles) {
         id: s.id,
         filename: s.filename,
         fields: s.fields,
-        // Build Export JSON only now (send-to-AI) — not at template load time.
         valuesJson: buildExportJsonNow(s, { blank: true }),
       })),
     ),
@@ -6248,106 +6883,106 @@ async function runBatchFromSource(sourceFiles) {
   if (byokKey) fd.append("geminiApiKey", byokKey);
   if (byokModel) fd.append("geminiModel", byokModel);
 
-  const n = multiSlots.length;
-  showBanner(
-    `กำลังให้ AI สร้าง docx-form-values JSON สำหรับ ${n} เทมเพลต — จากนั้น Import ลงจอ`,
-    "progress",
-  );
-  app.setAttribute("aria-busy", "true");
-  const progressHints = [
-    `กำลังดึงข้อความจากเอกสารต้นทาง…`,
-    `กำลังให้ AI สร้าง JSON รูปแบบเดียวกับ Export…`,
-    `กำลัง Import JSON ลงแต่ละเทมเพลตบนหน้าจอ…`,
-  ];
-  let hintIdx = 0;
-  const hintTimer = setInterval(() => {
-    hintIdx = (hintIdx + 1) % progressHints.length;
-    showBanner(progressHints[hintIdx], "progress");
-  }, 4200);
   try {
-    const res = await fetch("/api/batch-from-source", {
+    appendSourceMapLog("ส่งคำขอ batch-from-source (สตรีมล็อกละเอียด)…");
+    const res = await fetch("/api/batch-from-source?stream=1", {
       method: "POST",
       body: fd,
-      headers: aiAuthHeaders(),
+      headers: aiAuthHeaders({ Accept: "application/x-ndjson" }),
+      signal: abortSignal,
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      let msg = data.error || "แมป JSON ไม่สำเร็จ";
-      if (
-        Array.isArray(data.results) &&
-        data.results.some((r) => r && !r.ok) &&
-        !String(msg).includes(": ")
-      ) {
-        const detail = data.results
-          .filter((r) => r && !r.ok)
-          .map((r) => `${r.filename || "?"}: ${r.error || "ไม่สำเร็จ"}`)
-          .slice(0, 3)
-          .join(" · ");
-        if (detail) msg = `${msg} — ${detail}`;
-      }
-      showBanner(msg);
+    const contentType = (res.headers.get("content-type") || "").toLowerCase();
+    if (!res.ok && !contentType.includes("ndjson")) {
+      const data = await res.json().catch(() => ({}));
+      sourceMapSession = null;
+      renderForm();
+      showBanner(data.error || "แมป JSON ไม่สำเร็จ");
       return;
     }
 
-    let applied = 0;
-    const failNames = [];
-    const resumeId = multiActiveId;
-    for (const r of data.results || []) {
-      if (!r || !r.ok) {
-        if (r?.filename) failNames.push(r.filename);
-        continue;
+    if (!res.body || !contentType.includes("ndjson")) {
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        sourceMapSession = null;
+        renderForm();
+        showBanner(data.error || "แมป JSON ไม่สำเร็จ");
+        return;
       }
-      const slot =
-        (r.id && multiSlots.find((s) => s.id === r.id)) ||
-        multiSlots.find((s) => s.filename === r.filename);
-      if (!slot) continue;
-      const payload =
-        r.valuesJson && typeof r.valuesJson === "object"
-          ? r.valuesJson
-          : buildValuesExportPayloadFrom(slot, {
-              values: r.values,
-              skip: r.skip,
-              rowSkip: r.rowSkip,
-              images: {},
-            });
-      try {
-        applySlotToState(slot);
-        importValuesPayload(payload);
-        persistActiveSlot();
-        applied += 1;
-      } catch (err) {
-        console.warn(err);
-        failNames.push(slot.filename || r.filename || "?");
+      applyBatchFromSourceResults(data);
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    /** @type {null | Record<string, any>} */
+    let finalResult = null;
+    /** @type {string | null} */
+    let streamError = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        let evt;
+        try {
+          evt = JSON.parse(trimmed);
+        } catch {
+          appendSourceMapLog(`(อ่านบรรทัดล็อกไม่ได้) ${trimmed.slice(0, 120)}`);
+          continue;
+        }
+        if (evt.type === "log" && evt.message) {
+          appendSourceMapLog(evt.message);
+          if (sourceMapSession) sourceMapSession.statusText = evt.message;
+          patchSourceMapLoadingUi();
+        } else if (evt.type === "progress") {
+          if (sourceMapSession) {
+            sourceMapSession.progress = {
+              step: Number(evt.step) || 0,
+              total: Number(evt.total) || 1,
+              label: String(evt.label || ""),
+            };
+            if (evt.label) sourceMapSession.statusText = evt.label;
+          }
+          patchSourceMapLoadingUi();
+        } else if (evt.type === "batch-result") {
+          finalResult = evt;
+          appendSourceMapLog(evt.message || "แมปเสร็จ");
+        } else if (evt.type === "error") {
+          streamError = evt.error || evt.message || "แมป JSON ไม่สำเร็จ";
+          appendSourceMapLog(`ข้อผิดพลาด: ${streamError}`);
+        }
       }
     }
 
-    const active =
-      multiSlots.find((s) => s.id === resumeId) ||
-      multiSlots.find((s) => s.id === multiActiveId) ||
-      multiSlots[0];
-    if (active) {
-      applySlotToState(active);
-      for (const f of state.fields) {
-        if (f.type === "list") ensureListRows(f.name, f.itemFields);
-      }
+    if (streamError) {
+      sourceMapSession = null;
+      renderForm();
+      showBanner(streamError);
+      return;
     }
-    persistActiveSlot();
-    scheduleSaveDraft();
+    if (!finalResult) {
+      sourceMapSession = null;
+      renderForm();
+      showBanner("แมป JSON ไม่สำเร็จ — ไม่ได้รับผลลัพธ์จากเซิร์ฟเวอร์");
+      return;
+    }
+    applyBatchFromSourceResults(finalResult);
+  } catch (err) {
+    console.warn(err);
+    const cancelled =
+      (err && typeof err === "object" && "name" in err && err.name === "AbortError") ||
+      abortSignal.aborted;
+    sourceMapSession = null;
     renderForm();
-
-    const failMsg = failNames.length
-      ? ` · ไม่สำเร็จ ${failNames.length}: ${failNames.slice(0, 3).join(", ")}`
-      : "";
-    showBanner(
-      `Import JSON จาก AI ลงหน้าจอแล้ว ${applied}/${n} เทมเพลต — ตรวจทานแล้วค่อยกดสร้างเอกสาร${failMsg}`,
-      "success",
-    );
-    setTimeout(() => showBanner(""), 4200);
-  } catch {
-    showBanner("เชื่อมต่อเซิร์ฟเวอร์ไม่ได้");
+    showBanner(cancelled ? "ยกเลิกการแมปต้นทางแล้ว" : "เชื่อมต่อเซิร์ฟเวอร์ไม่ได้");
   } finally {
-    clearInterval(hintTimer);
-    app.removeAttribute("aria-busy");
+    if (sourceMapAbort?.signal === abortSignal) sourceMapAbort = null;
   }
 }
 
@@ -6388,12 +7023,12 @@ function renderForm() {
   app.innerHTML = `
     ${renderMultiTabs()}
     <div class="file-chip">
-      <span class="file-meta">${escapeHtml(summaryText(state.fields))}${isMultiMode() ? " · แนบต้นทาง → AI คืน JSON → ใส่ลงหน้าจอ" : ""}</span>
+      <span class="file-meta">${escapeHtml(summaryText(state.fields))}${isMultiMode() ? " · แนบต้นทาง → ระบบสร้างโครง JSON → AI กรอกค่า → ใส่ลงหน้าจอ" : ""}</span>
       <div class="file-chip-actions">
         <button type="button" class="btn-secondary btn-compact ${aiStatus.connected ? "is-ai-on" : ""}" id="googleAiBtn" title="${aiStatus.connected ? `คีย์ของคุณ · ${aiStatus.model || ""} — เปลี่ยนโมเดล / ลบคีย์` : "ใส่ Gemini API key ของคุณ (เก็บในเบราว์เซอร์ ไม่ใช่คีย์ของแอป)"}">
           ${aiStatus.connected ? `AI · ${escapeHtml(String(aiStatus.model || "Gemini").replace(/^gemini-/i, ""))}` : "ใส่ Gemini key"}
         </button>
-        <button type="button" class="btn-secondary btn-compact" id="attachSource" ${aiStatus.connected ? "" : "disabled"} title="${aiStatus.connected ? (isMultiMode() ? "แนบต้นทาง ให้ AI แมปเป็น JSON ต่อเทมเพลต แล้วใส่ลงหน้าจอ (ยังไม่สร้าง Word)" : "แนบ PDF / Word / รูป แล้วแมปด้วย Gemini") : "ต้องใส่ Gemini key ของคุณก่อน"}">${isMultiMode() ? "ต้นทาง → แมป JSON" : "แนบเอกสารต้นทาง"}</button>
+        <button type="button" class="btn-secondary btn-compact" id="attachSource" ${aiStatus.connected ? "" : "disabled"} title="${aiStatus.connected ? (isMultiMode() ? "แนบต้นทาง — ระบบสร้างโครง Export JSON เอง ส่งให้ AI กรอกค่า แล้วนำ JSON กลับมาใส่จอ (ยังไม่สร้าง Word)" : "แนบ PDF / Word / รูป — ระบบสร้างโครง JSON ส่งให้ Gemini กรอกค่า") : "ต้องใส่ Gemini key ของคุณก่อน"}">${isMultiMode() ? "ต้นทาง → ให้ AI กรอก JSON" : "แนบเอกสารต้นทาง"}</button>
         <input class="sr-only" type="file" id="attachSourceInput" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple />
         <button type="button" class="btn-secondary btn-compact" id="exportJson" title="ส่งออกค่าที่กรอกเป็น JSON">Export JSON</button>
         <button type="button" class="btn-secondary btn-compact" id="importJson" title="นำเข้าค่าจากไฟล์ JSON">Import JSON</button>
@@ -6495,6 +7130,7 @@ function renderForm() {
         if (f.type === "list") ensureListRows(f.name, f.itemFields);
       }
       renderForm();
+      scheduleSaveDraft();
       if (state.showFullContent) void hydrateTemplateContent(slot);
     });
   });
@@ -7035,7 +7671,7 @@ function patchSourceMapLoadingUi() {
   const toggle = document.getElementById("toggleSourceMapLog");
   if (toggle) {
     toggle.setAttribute("aria-expanded", sourceMapSession.showLogs ? "true" : "false");
-    toggle.textContent = sourceMapSession.showLogs ? "ซ่อนล็อก" : "ดูล็อก / ความคืบหน้า";
+    toggle.textContent = sourceMapSession.showLogs ? "ซ่อนล็อก" : "ดูล็อกละเอียด";
   }
   const logWrap = document.getElementById("sourceMapLogWrap");
   if (logWrap) logWrap.hidden = !sourceMapSession.showLogs;
@@ -7054,10 +7690,14 @@ function renderSourceMapPanel() {
           `<div class="source-map-log-line"><time>${escapeHtml(formatSourceMapLogTime(l.t))}</time><span>${escapeHtml(l.message)}</span></div>`,
       )
       .join("");
+    const batchHint =
+      sourceMapSession.mode === "batch"
+        ? "หลายเทมเพลต · ส่งไฟล์ต้นทางจริง + Export JSON แยก → AI กรอก → Import ลงจอ"
+        : "รันบนเครื่องนี้ · ส่งไฟล์ต้นทางจริง (PDF/รูป) ให้ Gemini อ่านเอง ไม่ดึงข้อความก่อน";
     return `<div class="source-map-panel is-loading" id="sourceMapPanel">
       <div class="source-map-head">
-        <strong>กำลังอ่านเอกสารต้นทาง…</strong>
-        <span class="source-map-status" id="sourceMapStatusText">${escapeHtml(sourceMapSession.statusText || "OCR / แมปค่า")}</span>
+        <strong>${sourceMapSession.mode === "batch" ? "กำลังแนบต้นทาง → JSON หลายเทมเพลต…" : "กำลังแนบเอกสารต้นทางให้ AI…"}</strong>
+        <span class="source-map-status" id="sourceMapStatusText">${escapeHtml(sourceMapSession.statusText || "แนบไฟล์ / แมปค่า")}</span>
       </div>
       <div class="source-map-progress" aria-hidden="false">
         <div class="source-map-progress-track">
@@ -7065,12 +7705,13 @@ function renderSourceMapPanel() {
         </div>
         <p class="source-map-progress-label" id="sourceMapProgressLabel">${escapeHtml(prog.label || "")}</p>
       </div>
-      <p class="dropzone-hint" style="margin:0">รันบนเครื่องนี้ · ข้อความต้นทางอยู่บนเครื่อง · ส่งเฉพาะข้อความที่ดึงได้ไป Gemini</p>
+      <p class="dropzone-hint" style="margin:0">${batchHint}</p>
       <div class="source-map-log-actions">
-        <button type="button" class="btn-secondary btn-compact" id="toggleSourceMapLog" aria-expanded="${sourceMapSession.showLogs ? "true" : "false"}">${sourceMapSession.showLogs ? "ซ่อนล็อก" : "ดูล็อก / ความคืบหน้า"}</button>
+        <button type="button" class="btn-secondary btn-compact" id="toggleSourceMapLog" aria-expanded="${sourceMapSession.showLogs ? "true" : "false"}">${sourceMapSession.showLogs ? "ซ่อนล็อก" : "ดูล็อกละเอียด"}</button>
+        <button type="button" class="btn-ghost btn-compact source-map-cancel" id="cancelSourceMapBtn">ยกเลิก</button>
       </div>
       <div class="source-map-log-wrap" id="sourceMapLogWrap" ${sourceMapSession.showLogs ? "" : "hidden"}>
-        <div class="source-map-log" id="sourceMapLog" role="log" aria-live="polite">${logHtml}</div>
+        <div class="source-map-log source-map-log-tall" id="sourceMapLog" role="log" aria-live="polite">${logHtml}</div>
       </div>
     </div>`;
   }
@@ -7189,6 +7830,18 @@ function renderSourceMapPanel() {
   </div>`;
 }
 
+function cancelActiveSourceMap() {
+  if (sourceMapAbort) {
+    sourceMapAbort.abort();
+    sourceMapAbort = null;
+  }
+  if (sourceMapSession?.status === "loading") {
+    appendSourceMapLog("ผู้ใช้กดยกเลิก — หยุดคำขอ");
+    sourceMapSession.statusText = "ยกเลิกแล้ว";
+    patchSourceMapLoadingUi();
+  }
+}
+
 function wireSourceMapPanelEvents() {
   const panel = document.getElementById("sourceMapPanel");
   if (!panel || !sourceMapSession) return;
@@ -7197,6 +7850,10 @@ function wireSourceMapPanelEvents() {
     if (!sourceMapSession || sourceMapSession.status !== "loading") return;
     sourceMapSession.showLogs = !sourceMapSession.showLogs;
     patchSourceMapLoadingUi();
+  });
+
+  document.getElementById("cancelSourceMapBtn")?.addEventListener("click", () => {
+    cancelActiveSourceMap();
   });
 
   panel.querySelectorAll("input[data-sm-path]").forEach((el) => {
@@ -7263,6 +7920,9 @@ async function runSourceMap(files) {
     await connectGoogleAi();
     if (!aiStatus.connected && !getClientAiKey()) return;
   }
+  if (sourceMapAbort) sourceMapAbort.abort();
+  sourceMapAbort = new AbortController();
+  const abortSignal = sourceMapAbort.signal;
   sourceMapSession = {
     proposals: [],
     extracted: [],
@@ -7272,11 +7932,13 @@ async function runSourceMap(files) {
     status: "loading",
     statusText: `กำลังอัปโหลด ${files.length} ไฟล์…`,
     logs: [],
-    showLogs: false,
+    showLogs: true,
+    mode: "single",
     progress: { step: 0, total: files.length + 2, label: "อัปโหลดไฟล์ต้นทาง" },
     startedAt: Date.now(),
   };
   appendSourceMapLog(`เลือก ${files.length} ไฟล์: ${files.map((f) => f.name).join(", ")}`);
+  appendSourceMapLog("ระบบสร้างโครง Export JSON แล้ว — จะส่งไฟล์ต้นทางจริง (PDF/รูป) ให้ AI อ่านเอง");
   renderForm();
   showBanner("");
 
@@ -7291,11 +7953,12 @@ async function runSourceMap(files) {
     );
     for (const f of files) form.append("files", f, f.name);
 
-    appendSourceMapLog("ส่งคำขอไปเซิร์ฟเวอร์ localhost…");
+    appendSourceMapLog("ส่งคำขอไปเซิร์ฟเวอร์ (สตรีมล็อกละเอียด)…");
     const res = await fetch("/api/source-map?stream=1", {
       method: "POST",
       body: form,
       headers: aiAuthHeaders({ Accept: "application/x-ndjson" }),
+      signal: abortSignal,
     });
 
     const contentType = (res.headers.get("content-type") || "").toLowerCase();
@@ -7386,9 +8049,19 @@ async function runSourceMap(files) {
     finishSourceMapResult(finalResult);
   } catch (err) {
     console.warn(err);
+    const cancelled =
+      (err && typeof err === "object" && "name" in err && err.name === "AbortError") ||
+      abortSignal.aborted;
     sourceMapSession = null;
+    sourceMapAbort = null;
     renderForm();
-    showBanner("แมปเอกสารต้นทางไม่สำเร็จ — เชื่อมต่อเซิร์ฟเวอร์ไม่ได้");
+    showBanner(
+      cancelled
+        ? "ยกเลิกการแมปเอกสารต้นทางแล้ว"
+        : "แมปเอกสารต้นทางไม่สำเร็จ — เชื่อมต่อเซิร์ฟเวอร์ไม่ได้",
+    );
+  } finally {
+    if (sourceMapAbort?.signal === abortSignal) sourceMapAbort = null;
   }
 }
 
@@ -7845,6 +8518,19 @@ function maybeMorphTextControl(el) {
 }
 
 /** @param {HTMLInputElement | HTMLTextAreaElement} el */
+/** Clear validation highlight on one control when the user fills it. */
+function clearOneFieldError(el) {
+  if (!el || !String(el.value ?? "").trim()) return;
+  el.removeAttribute("aria-invalid");
+  const wrap =
+    el.closest(".doc-blank-wrap") ||
+    el.closest(".field") ||
+    el.parentElement;
+  if (!wrap?.classList.contains("has-error")) return;
+  wrap.classList.remove("has-error");
+  wrap.querySelectorAll(".field-error").forEach((n) => n.remove());
+}
+
 function wireOneTextValueControl(el) {
   if (el.dataset.textWired === "1") return;
   el.dataset.textWired = "1";
@@ -7857,6 +8543,7 @@ function wireOneTextValueControl(el) {
       if (!state.values[list]) state.values[list] = [];
       if (!state.values[list][row]) state.values[list][row] = {};
       state.values[list][row][item] = el.value;
+      clearOneFieldError(el);
       scheduleSaveDraft();
       maybeMorphTextControl(el);
       return;
@@ -7864,6 +8551,7 @@ function wireOneTextValueControl(el) {
     const name = el.name || el.dataset.docField;
     if (!name) return;
     state.values[name] = el.value;
+    clearOneFieldError(el);
     scheduleSaveDraft();
     maybeMorphTextControl(el);
   });
@@ -8337,7 +9025,7 @@ function renderField(field) {
       state.objectUrls.push(url);
       preview = `<img class="thumb" src="${url}" alt="พรีวิว ${escapeAttr(field.name)}" />`;
     } else {
-      preview = `<div class="thumb" aria-hidden="true"></div>`;
+      preview = `<div class="thumb thumb-empty" aria-hidden="true" title="ยังไม่มีรูป"></div>`;
     }
     return `
       <div class="field ${skipped ? "is-skipped" : ""}" data-image-field="${escapeAttr(field.name)}">
@@ -8699,7 +9387,13 @@ async function createAllTemplatesZip() {
   persistActiveSlot();
   /** @type {string[]} */
   const missing = [];
-  for (const slot of multiSlots) missing.push(...missingFieldsForSlot(slot));
+  /** @type {typeof multiSlots[number] | null} */
+  let firstBad = null;
+  for (const slot of multiSlots) {
+    const slotMissing = missingFieldsForSlot(slot);
+    if (slotMissing.length && !firstBad) firstBad = slot;
+    missing.push(...slotMissing);
+  }
   if (missing.length) {
     const listed =
       missing.length <= 8
@@ -8708,6 +9402,14 @@ async function createAllTemplatesZip() {
     showBanner(
       `ยังมีช่องว่างในบางเทมเพลต (${missing.length}): ${listed} — กรอก/ข้ามให้ครบก่อนสร้างทั้งหมด`,
     );
+    // Jump to the first incomplete template and paint empty cells.
+    if (firstBad && firstBad.id !== multiActiveId) {
+      persistActiveSlot();
+      multiActiveId = firstBad.id;
+      applySlotToState(firstBad);
+      renderForm();
+    }
+    validateBeforeSubmit();
     return;
   }
 
@@ -8915,7 +9617,13 @@ async function boot() {
     if (restored) {
       try {
         renderForm();
-        showBanner("กู้คืนข้อมูลหลังรีเฟรชแล้ว", "success");
+        const n = multiSlots.length;
+        showBanner(
+          n > 1
+            ? `กู้คืน ${n} เทมเพลตหลังรีเฟรชแล้ว — สลับแท็บด้านบนได้`
+            : "กู้คืนข้อมูลหลังรีเฟรชแล้ว",
+          "success",
+        );
         setTimeout(() => showBanner(""), 2800);
         return;
       } catch (err) {

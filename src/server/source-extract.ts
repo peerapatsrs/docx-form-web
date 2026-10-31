@@ -99,7 +99,7 @@ function extractDocxFromXml(xml: string): { lines: string[]; tables: ExtractedTa
         const headers = rows[0];
         const dataRows = rows.slice(1);
         tables.push({ headers, rows: dataRows.length ? dataRows : [] });
-        // Preserve empty cells — dropping them shifts "ปัจจุบัน" values into "ภูมิลำเนา" columns.
+        // Preserve empty cells — dropping them shifts later-column values into earlier columns.
         lines.push(...formatTableBlock(rows, tables.length - 1));
       }
     } else {
@@ -218,7 +218,7 @@ async function extractImage(buffer: Buffer, filename: string): Promise<Extracted
   }
 }
 
-function detectKind(
+export function detectKind(
   filename: string,
   mimeType?: string,
 ): ExtractedSource["kind"] {

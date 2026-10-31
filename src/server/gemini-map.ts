@@ -371,16 +371,196 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Original source file bytes for multimodal Gemini (PDF / image / Word). */
+export type GeminiSourceFile = {
+  filename: string;
+  mimeType?: string;
+  buffer: Buffer;
+};
+
+type GeminiPart =
+  | { text: string }
+  | { inlineData: { mimeType: string; data: string } }
+  | { fileData: { mimeType: string; fileUri: string } };
+
+/** Prefer Files API above this raw size (base64 bloats ~33%). */
+const INLINE_RAW_MAX = 12 * 1024 * 1024;
+
+function imageMimeFromName(filename: string): string {
+  const n = filename.toLowerCase();
+  if (n.endsWith(".png")) return "image/png";
+  if (n.endsWith(".webp")) return "image/webp";
+  if (n.endsWith(".gif")) return "image/gif";
+  if (n.endsWith(".bmp")) return "image/bmp";
+  if (n.endsWith(".jpg") || n.endsWith(".jpeg")) return "image/jpeg";
+  return "image/jpeg";
+}
+
+async function uploadGeminiFile(
+  apiKey: string,
+  buffer: Buffer,
+  mimeType: string,
+  displayName: string,
+): Promise<{ uri: string; mimeType: string }> {
+  const startRes = await fetch(
+    `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodeURIComponent(apiKey)}`,
+    {
+      method: "POST",
+      headers: {
+        "X-Goog-Upload-Protocol": "resumable",
+        "X-Goog-Upload-Command": "start",
+        "X-Goog-Upload-Header-Content-Length": String(buffer.length),
+        "X-Goog-Upload-Header-Content-Type": mimeType,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ file: { display_name: displayName } }),
+    },
+  );
+  const uploadUrl = startRes.headers.get("x-goog-upload-url");
+  if (!startRes.ok || !uploadUrl) {
+    const errText = await startRes.text().catch(() => "");
+    throw new Error(
+      formatGeminiHttpError(startRes.status || 400, errText || "เริ่มอัปโหลดไฟล์ไม่สำเร็จ"),
+    );
+  }
+  const finishRes = await fetch(uploadUrl, {
+    method: "POST",
+    headers: {
+      "Content-Length": String(buffer.length),
+      "X-Goog-Upload-Offset": "0",
+      "X-Goog-Upload-Command": "upload, finalize",
+    },
+    body: new Uint8Array(buffer),
+  });
+  if (!finishRes.ok) {
+    const errText = await finishRes.text().catch(() => "");
+    throw new Error(formatGeminiHttpError(finishRes.status, errText));
+  }
+  const data = (await finishRes.json()) as {
+    file?: { uri?: string; mimeType?: string };
+  };
+  const uri = data.file?.uri;
+  if (!uri) throw new Error("อัปโหลดไฟล์ไป Gemini ไม่สำเร็จ (ไม่มี file URI)");
+  return { uri, mimeType: data.file?.mimeType || mimeType };
+}
+
+async function docxDocumentXml(buffer: Buffer): Promise<string> {
+  const JSZip = (await import("jszip")).default;
+  const zip = await JSZip.loadAsync(buffer);
+  const docFile = zip.file("word/document.xml");
+  if (!docFile) {
+    throw new Error("ไฟล์ .docx ไม่มี word/document.xml");
+  }
+  return docFile.async("string");
+}
+
+/**
+ * Build Gemini parts from original source files (not OCR/plain text).
+ * - PDF / images → binary (inline or Files API)
+ * - DOCX → document.xml from the package (Gemini has no DOCX mime; XML keeps table cells)
+ */
+async function buildSourceFileParts(
+  apiKey: string,
+  files: GeminiSourceFile[],
+): Promise<{ parts: GeminiPart[]; labels: string[] }> {
+  if (!files.length) {
+    throw new Error("ไม่มีไฟล์ต้นทางให้ส่งเข้า AI");
+  }
+  const parts: GeminiPart[] = [];
+  const labels: string[] = [];
+
+  for (const file of files) {
+    const name = file.filename || "source";
+    const lower = name.toLowerCase();
+    const mime = (file.mimeType || "").toLowerCase();
+    const buf = file.buffer;
+    if (!buf?.length) {
+      throw new Error(`ไฟล์ต้นทางว่าง: ${name}`);
+    }
+
+    parts.push({ text: `SOURCE_FILE_NAME: ${name}` });
+
+    if (lower.endsWith(".pdf") || mime === "application/pdf") {
+      const mimeType = "application/pdf";
+      if (buf.length <= INLINE_RAW_MAX) {
+        parts.push({
+          inlineData: { mimeType, data: buf.toString("base64") },
+        });
+      } else {
+        const uploaded = await uploadGeminiFile(apiKey, buf, mimeType, name);
+        parts.push({
+          fileData: { mimeType: uploaded.mimeType, fileUri: uploaded.uri },
+        });
+      }
+      labels.push(`${name} (PDF ไฟล์จริง)`);
+      continue;
+    }
+
+    if (
+      mime.startsWith("image/") ||
+      /\.(png|jpe?g|webp|gif|bmp)$/i.test(lower)
+    ) {
+      const mimeType = mime.startsWith("image/")
+        ? mime
+        : imageMimeFromName(name);
+      if (buf.length <= INLINE_RAW_MAX) {
+        parts.push({
+          inlineData: { mimeType, data: buf.toString("base64") },
+        });
+      } else {
+        const uploaded = await uploadGeminiFile(apiKey, buf, mimeType, name);
+        parts.push({
+          fileData: { mimeType: uploaded.mimeType, fileUri: uploaded.uri },
+        });
+      }
+      labels.push(`${name} (รูปไฟล์จริง)`);
+      continue;
+    }
+
+    if (lower.endsWith(".docx") || mime.includes("wordprocessingml")) {
+      // Gemini generateContent does not accept DOCX mime — send package XML (tables intact).
+      const xml = await docxDocumentXml(buf);
+      const xmlBuf = Buffer.from(xml, "utf8");
+      parts.push({
+        inlineData: {
+          mimeType: "text/xml",
+          data: xmlBuf.toString("base64"),
+        },
+      });
+      labels.push(`${name} (Word document.xml จากไฟล์)`);
+      continue;
+    }
+
+    throw new Error(
+      `ชนิดไฟล์ต้นทางไม่รองรับสำหรับส่งเข้า AI: ${name} (ใช้ PDF / รูป / .docx)`,
+    );
+  }
+
+  return { parts, labels };
+}
+
 async function callGeminiJson(
   prompt: string,
-  opts?: { apiKey?: string | null; model?: string | null },
+  opts?: {
+    apiKey?: string | null;
+    model?: string | null;
+    /** Original source files — preferred over plain-text corpus. */
+    sourceFiles?: GeminiSourceFile[];
+  },
 ): Promise<Record<string, unknown> | null> {
   const apiKey = getGeminiApiKey(opts?.apiKey);
   if (!apiKey) throw new Error("ยังไม่ได้เชื่อมต่อ Google AI — ใส่ Gemini API key ก่อน");
   const model = getGeminiModel(opts?.model);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+  const parts: GeminiPart[] = [{ text: prompt }];
+  if (opts?.sourceFiles?.length) {
+    const built = await buildSourceFileParts(apiKey, opts.sourceFiles);
+    parts.push(...built.parts);
+  }
+
   const requestBody = JSON.stringify({
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    contents: [{ role: "user", parts }],
     generationConfig: {
       temperature: 0.1,
       responseMimeType: "application/json",
@@ -488,8 +668,7 @@ HARD RULES:
 - Prefer exact values from sources; do not invent IDs/names/case numbers.
 - Bool values must be true or false (not strings).
 - Tables use "—" for empty cells — column order matters. Do NOT shift values left across empty cells.
-- Thai legal tables often have: ภูมิลำเนา ณ วันฟ้อง (earlier columns) vs ภูมิลำเนาปัจจุบัน (later columns).
-  Keys containing ปัจจุบัน map to the CURRENT-domicile columns; keys containing ภูมิลำเนา (without ปัจจุบัน) map to filing-domicile columns.
+- If similar headers appear twice (earlier vs later columns), map keys containing 「ปัจจุบัน」/current to the later set; keys for the unmarked pair to the earlier set.
 - Keys พบ / ไม่ are checkbox columns (true if √/✓ present in that cell).
 
 scalars:
@@ -579,47 +758,265 @@ ${corpus}`;
   });
 }
 
-/**
- * Lean path: system owns the Export JSON skeleton; AI fills values once.
- * No gap-fill second call — Import JSON handles the rest.
- */
-export async function geminiFillDocxFormValues(
-  skeleton: DocxFormValuesJson,
-  sources: ExtractedSource[],
-  opts?: { apiKey?: string | null; model?: string | null },
-): Promise<DocxFormValuesJson> {
-  const corpus = corpusFromSources(sources);
-  if (!corpus.trim()) {
-    throw new Error("ไม่มีข้อความจากเอกสารต้นทางให้ AI อ่าน");
-  }
-  if (!getGeminiApiKey(opts?.apiKey)) {
-    throw new Error("ยังไม่ได้เชื่อมต่อ Google AI — ใส่ Gemini API key ของคุณก่อน");
-  }
+/** Compact field hints (bool labels / list keys) — small vs a second full AI pass. */
+function fieldHintsForPrompt(fields: FormField[]): string {
+  const { scalars, lists } = buildSchema(fields);
+  if (!scalars.length && !lists.length) return "";
+  return JSON.stringify({
+    scalars: scalars.map((s) => ({
+      path: s.path,
+      type: s.type,
+      hint: s.hint,
+    })),
+    lists: lists.map((l) => ({
+      name: l.name,
+      itemKeys: l.keys.map((k) => ({
+        key: k.name,
+        type: k.type,
+        hint: k.hint,
+      })),
+    })),
+  });
+}
 
-  const slim = {
-    format: "docx-form-values",
-    version: 1,
+function slimExportSkeleton(skeleton: DocxFormValuesJson) {
+  return {
+    format: "docx-form-values" as const,
+    version: 1 as const,
     template: skeleton.template,
     fields: skeleton.fields,
     values: skeleton.values,
     skip: skeleton.skip,
     rowSkip: skeleton.rowSkip,
   };
+}
 
-  const prompt = `You fill a Thai Word form values JSON from source documents.
-Return ONLY valid JSON in the SAME shape as "templateJson" below (docx-form-values).
-Do not invent keys. Keep "format", "version", "template", "fields" unchanged.
-Fill "values" from the sources. Set skip=true when a value is unknown/empty.
-For bool fields use true/false. For lists return an array of row objects (0+ rows).
-Do not invent IDs/names/case numbers; prefer exact source text.
-Thai tables: empty cells are "—"; do not shift values across empty cells.
+const FILL_RULES = `Fill values from Source text. Set skip=true when unknown/empty (bool false is a real value → skip=false).
+For lists: values[listName] = array of row objects with ALL item keys (0+ rows); empty list → [] and skip=true.
+Bool must be true/false. Prefer exact source text; do not invent IDs/names/case numbers.
+Tables: "—" means empty cell; column order matters — do NOT shift values left across empty cells.
+If similar headers appear twice (earlier vs later), keys with 「ปัจจุบัน」/current → later set; unmarked pair → earlier set.
+Checkbox-style keys (e.g. พบ / ไม่) → true when √/✓ is in that cell.`;
 
+/**
+ * Like the user Export → AI fill → Import path (token-lean, one Gemini call):
+ * 1) Client builds blank Export JSON skeleton
+ * 2) We send that skeleton + original source files (PDF/image binary; DOCX→XML)
+ * 3) AI returns the same docx-form-values shape filled
+ * 4) Caller Import-applies the result
+ */
+export async function geminiFillDocxFormValues(
+  skeleton: DocxFormValuesJson,
+  sourceFiles: GeminiSourceFile[],
+  opts?: {
+    apiKey?: string | null;
+    model?: string | null;
+    /** Full FormField[] — adds compact bool/list hints without a second AI round. */
+    fields?: FormField[];
+  },
+): Promise<DocxFormValuesJson> {
+  if (!sourceFiles.length) {
+    throw new Error("ไม่มีไฟล์ต้นทางให้ AI อ่าน");
+  }
+  if (!getGeminiApiKey(opts?.apiKey)) {
+    throw new Error("ยังไม่ได้เชื่อมต่อ Google AI — ใส่ Gemini API key ของคุณก่อน");
+  }
+
+  const fields = Array.isArray(opts?.fields) ? opts.fields : [];
+  const hints = fields.length ? fieldHintsForPrompt(fields) : "";
+  const slim = slimExportSkeleton(skeleton);
+
+  const prompt = `You fill a Thai Word form values JSON exactly like a user Export JSON file.
+Return ONLY valid JSON in the SAME shape as templateJson (docx-form-values).
+Do not invent keys. Keep format, version, template, fields unchanged.
+Read the attached SOURCE FILES yourself (PDF pages, images, or Word document.xml).
+Do NOT rely on any OCR/plain-text dump — values in tables must come from the file layout.
+${FILL_RULES}
+${hints ? `\nfieldHints (types/labels for this template only):\n${hints}\n` : ""}
 templateJson:
-${JSON.stringify(slim, null, 2)}
+${JSON.stringify(slim)}
 
-Source text:
-${corpus}`;
+SOURCE FILES are attached after this message.`;
 
-  const parsed = await callGeminiJson(prompt, opts);
+  const parsed = await callGeminiJson(prompt, {
+    apiKey: opts?.apiKey,
+    model: opts?.model,
+    sourceFiles,
+  });
   return mergeAiIntoValuesJson(skeleton, parsed);
+}
+
+export type BatchFillItem = {
+  id: string;
+  filename: string;
+  skeleton: DocxFormValuesJson;
+  fields?: FormField[];
+};
+
+export type BatchFillResultItem = {
+  id: string;
+  filename: string;
+  valuesJson: DocxFormValuesJson;
+};
+
+function pickFilledRawForItem(
+  parsed: Record<string, unknown>,
+  item: BatchFillItem,
+  index: number,
+  total: number,
+): Record<string, unknown> | null {
+  const results = parsed.results;
+  if (Array.isArray(results)) {
+    const byId = results.find(
+      (r) =>
+        r &&
+        typeof r === "object" &&
+        !Array.isArray(r) &&
+        String((r as { id?: unknown }).id || "") === item.id,
+    ) as Record<string, unknown> | undefined;
+    if (byId) {
+      const inner = byId.valuesJson;
+      if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+        return inner as Record<string, unknown>;
+      }
+      return byId;
+    }
+    const byName = results.find(
+      (r) =>
+        r &&
+        typeof r === "object" &&
+        !Array.isArray(r) &&
+        (String((r as { template?: unknown }).template || "") ===
+          item.skeleton.template ||
+          String((r as { filename?: unknown }).filename || "") === item.filename),
+    ) as Record<string, unknown> | undefined;
+    if (byName) {
+      const inner = byName.valuesJson;
+      if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+        return inner as Record<string, unknown>;
+      }
+      return byName;
+    }
+    if (index < results.length) {
+      const at = results[index];
+      if (at && typeof at === "object" && !Array.isArray(at)) {
+        const row = at as Record<string, unknown>;
+        const inner = row.valuesJson;
+        if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+          return inner as Record<string, unknown>;
+        }
+        return row;
+      }
+    }
+  }
+
+  // Mistaken single-object reply when only one template was expected elsewhere.
+  if (
+    total === 1 &&
+    parsed.format === "docx-form-values" &&
+    parsed.values &&
+    typeof parsed.values === "object"
+  ) {
+    return parsed;
+  }
+  return null;
+}
+
+/**
+ * Multi-template: send N separate blank Export JSONs in one request (not merged
+ * into one form). AI returns N filled Export JSONs. Source files are attached once.
+ * Falls back to per-template calls if the batch reply cannot be matched.
+ */
+export async function geminiFillDocxFormValuesBatch(
+  items: BatchFillItem[],
+  sourceFiles: GeminiSourceFile[],
+  opts?: { apiKey?: string | null; model?: string | null },
+): Promise<BatchFillResultItem[]> {
+  if (!items.length) return [];
+  if (items.length === 1) {
+    const only = items[0];
+    const valuesJson = await geminiFillDocxFormValues(only.skeleton, sourceFiles, {
+      apiKey: opts?.apiKey,
+      model: opts?.model,
+      fields: only.fields,
+    });
+    return [{ id: only.id, filename: only.filename, valuesJson }];
+  }
+
+  if (!sourceFiles.length) {
+    throw new Error("ไม่มีไฟล์ต้นทางให้ AI อ่าน");
+  }
+  if (!getGeminiApiKey(opts?.apiKey)) {
+    throw new Error("ยังไม่ได้เชื่อมต่อ Google AI — ใส่ Gemini API key ของคุณก่อน");
+  }
+
+  const pack = items.map((it) => ({
+    id: it.id,
+    filename: it.filename,
+    templateJson: slimExportSkeleton(it.skeleton),
+    fieldHints: it.fields?.length ? JSON.parse(fieldHintsForPrompt(it.fields) || "null") : null,
+  }));
+
+  const prompt = `You fill SEVERAL separate Thai Word Export JSON files from the SAME attached SOURCE FILES.
+Each item in "templates" is ONE independent Export JSON (docx-form-values) — do NOT merge fields across templates.
+Read the attached files yourself (PDF / images / Word document.xml). Do NOT use OCR text dumps.
+Return ONLY valid JSON:
+{
+  "results": [
+    { "id": "<same id>", "filename": "<same filename>", "valuesJson": { ...filled docx-form-values... } },
+    ...
+  ]
+}
+Rules:
+- results MUST have exactly ${items.length} entries, one per templates[].id
+- Keep each valuesJson.format/version/template/fields unchanged; only fill values/skip/rowSkip
+- ${FILL_RULES.split("\n").join("\n- ")}
+
+templates:
+${JSON.stringify(pack)}
+
+SOURCE FILES are attached after this message.`;
+
+  const parsed = await callGeminiJson(prompt, {
+    apiKey: opts?.apiKey,
+    model: opts?.model,
+    sourceFiles,
+  });
+
+  const out: BatchFillResultItem[] = [];
+  const missing: BatchFillItem[] = [];
+
+  for (let i = 0; i < items.length; i += 1) {
+    const item = items[i];
+    const raw = parsed ? pickFilledRawForItem(parsed, item, i, items.length) : null;
+    if (!raw) {
+      missing.push(item);
+      continue;
+    }
+    out.push({
+      id: item.id,
+      filename: item.filename,
+      valuesJson: mergeAiIntoValuesJson(item.skeleton, raw),
+    });
+  }
+
+  // Per-template fallback only for items the batch reply missed.
+  for (const item of missing) {
+    const valuesJson = await geminiFillDocxFormValues(item.skeleton, sourceFiles, {
+      apiKey: opts?.apiKey,
+      model: opts?.model,
+      fields: item.fields,
+    });
+    out.push({ id: item.id, filename: item.filename, valuesJson });
+  }
+
+  // Preserve input order.
+  const byId = new Map(out.map((r) => [r.id, r]));
+  return items.map((it) => {
+    const hit = byId.get(it.id);
+    if (!hit) {
+      throw new Error(`AI ไม่คืน JSON สำหรับเทมเพลต ${it.filename}`);
+    }
+    return hit;
+  });
 }

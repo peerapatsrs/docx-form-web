@@ -1,5 +1,4 @@
 import { Hono } from "hono";
-import JSZip from "jszip";
 import {
   extractDocumentLayout,
   extractDocumentText,
@@ -19,19 +18,16 @@ import {
   normalizeGeminiModel,
   writeAiConfig,
 } from "./ai-config";
-import { geminiFillDocxFormValues } from "./gemini-map";
-import { extractMany } from "./source-extract";
-import {
-  extractedMeta,
-  type DocxFormValuesJson,
-} from "./source-map";
-import { tagTemplate, type TagReplacement } from "./template-tagger";
+import type { DocxFormValuesJson } from "./source-map";
 import {
   canUseFeature,
   PremiumFeature,
   premiumDeniedPayload,
   type PremiumFeatureId,
 } from "./premium";
+
+// Heavy AI / ZIP / OCR deps are dynamic-imported inside those handlers only.
+// Static import pulled pdf/AI graph into every /api/parse and made upload feel slow after batch/ZIP work.
 
 const MAX_DOCX_BYTES = 25 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
@@ -63,6 +59,31 @@ function summarizeFields(fields: FormField[]) {
     else list += 1;
   }
   return { text, image, list, bool, auto };
+}
+
+/** Compact log lines for what AI filled into Export JSON. */
+function summarizeAiValuesJson(valuesJson: DocxFormValuesJson): string {
+  const values = (valuesJson?.values || {}) as Record<string, unknown>;
+  const keys = Object.keys(values);
+  const filled = keys.filter((k) => {
+    const v = values[k];
+    if (v == null || v === "") return false;
+    if (Array.isArray(v)) return v.length > 0;
+    return true;
+  });
+  const preview = JSON.stringify(values);
+  const clipped =
+    preview.length > 480 ? `${preview.slice(0, 477)}…` : preview;
+  const keySample = filled.slice(0, 10).join(", ") || "(ยังไม่เต็มช่อง)";
+  return `AI กรอก ${filled.length}/${keys.length} คีย์ [${keySample}] · values=${clipped}`;
+}
+
+function assertNotAborted(signal: AbortSignal | null | undefined) {
+  if (signal?.aborted) {
+    const err = new Error("ยกเลิกโดยผู้ใช้");
+    err.name = "AbortError";
+    throw err;
+  }
 }
 
 export function createApi(options: { startedAt: Date; version?: string }) {
@@ -354,79 +375,78 @@ export function createApi(options: { startedAt: Date; version?: string }) {
       };
 
       const runMap = async (emit: (evt: ProgressEvt) => void | Promise<void>) => {
-        const extractSteps = payloads.length;
-        const totalSteps = extractSteps + 2; // extract*N + gemini once + done
+        const [{ detectKind }, { geminiFillDocxFormValues }, { sourceFilesMeta }] =
+          await Promise.all([
+            import("./source-extract"),
+            import("./gemini-map"),
+            import("./source-map"),
+          ]);
+        const totalSteps = payloads.length + 2; // prepare*N + gemini once + done
         emit({
           type: "log",
-          message: `เริ่มแมป ${payloads.length} ไฟล์ · โมเดล ${geminiStatus({ requestKey: clientKey, requestModel: clientModel }).model} · AI เติม Export JSON รอบเดียว`,
+          message: `เริ่มแมป ${payloads.length} ไฟล์ · โมเดล ${geminiStatus({ requestKey: clientKey, requestModel: clientModel }).model} · ส่งไฟล์ต้นทางจริง (PDF/รูป) ให้ AI อ่านเอง ไม่ดึงข้อความ/OCR ก่อน`,
         });
         emit({
           type: "progress",
           step: 0,
           total: totalSteps,
-          label: "เตรียมดึงข้อความจากเอกสาร",
+          label: "เตรียมแนบไฟล์ต้นทาง",
         });
 
-        const extracted = await extractMany(payloads, async (info) => {
+        for (let i = 0; i < payloads.length; i += 1) {
+          const p = payloads[i];
+          const kind = detectKind(p.filename, p.mimeType);
           const kindLabel =
-            info.kind === "image"
-              ? "OCR รูป"
-              : info.kind === "pdf"
-                ? "อ่าน PDF"
-                : info.kind === "docx"
-                  ? "อ่าน Word"
-                  : "อ่านไฟล์";
-          if (info.phase === "start") {
-            await emit({
-              type: "log",
-              message: `[${info.index + 1}/${info.total}] ${kindLabel}: ${info.filename}`,
-            });
-            await emit({
-              type: "progress",
-              step: info.index,
-              total: totalSteps,
-              label: `${kindLabel} — ${info.filename}`,
-            });
-          } else {
-            const chars = info.result?.charCount ?? 0;
-            const warn = info.result?.warning ? ` · ${info.result.warning}` : "";
-            await emit({
-              type: "log",
-              message: `  ✓ ${info.filename}: ${chars} ตัวอักษร${warn}`,
-            });
-            await emit({
-              type: "progress",
-              step: info.index + 1,
-              total: totalSteps,
-              label: `ดึงข้อความแล้ว ${info.index + 1}/${info.total}`,
-            });
-          }
-        });
+            kind === "image"
+              ? "รูป"
+              : kind === "pdf"
+                ? "PDF"
+                : kind === "docx"
+                  ? "Word"
+                  : "ไฟล์";
+          const kb = Math.max(1, Math.round(p.buffer.length / 1024));
+          await emit({
+            type: "log",
+            message: `[${i + 1}/${payloads.length}] แนบ${kindLabel}: ${p.filename} (${kb} KB)`,
+          });
+          await emit({
+            type: "progress",
+            step: i + 1,
+            total: totalSteps,
+            label: `เตรียมแนบ ${i + 1}/${payloads.length}`,
+          });
+        }
 
         await emit({
           type: "log",
-          message: `ส่งโครง Export JSON ให้ Gemini เติมค่า (1 ครั้ง)…`,
+          message: `ส่งโครง Export JSON + ไฟล์ต้นทางให้ Gemini กรอกค่า แล้วรอ JSON กลับ (1 ครั้ง)…`,
         });
         await emit({
           type: "progress",
-          step: extractSteps + 1,
+          step: payloads.length + 1,
           total: totalSteps,
-          label: "รอ JSON จาก Gemini",
+          label: "รอ AI อ่านไฟล์แล้วกรอก JSON",
         });
 
-        const valuesJson = await geminiFillDocxFormValues(skeleton, extracted, {
+        assertNotAborted(c.req.raw.signal);
+        await emit({
+          type: "log",
+          message: `ส่งไฟล์ต้นทางจริง + Export JSON · ฟิลด์ ${fields.length} ตัว (AI อ่าน PDF/รูปเอง)`,
+        });
+        const valuesJson = await geminiFillDocxFormValues(skeleton, payloads, {
           apiKey: clientKey,
           model: clientModel,
+          fields,
         });
         await emit({
           type: "log",
-          message: `ได้ docx-form-values แล้ว — พร้อม Import`,
+          message: `ได้ Export JSON ที่ AI กรอกแล้ว — ${summarizeAiValuesJson(valuesJson)}`,
         });
         await emit({
           type: "progress",
-          step: extractSteps + 2,
+          step: totalSteps,
           total: totalSteps,
-          label: "พร้อม Import JSON",
+          label: "พร้อม Import JSON ลงหน้าจอ",
         });
 
         await emit({
@@ -435,8 +455,8 @@ export function createApi(options: { startedAt: Date; version?: string }) {
           values: valuesJson.values,
           skip: valuesJson.skip,
           rowSkip: valuesJson.rowSkip,
-          extracted: extractedMeta(extracted),
-          ai: { used: true, mode: "fill-export-json" },
+          extracted: sourceFilesMeta(payloads),
+          ai: { used: true, mode: "export-json-fill-files" },
           message: "แมปเสร็จ",
         });
       };
@@ -533,22 +553,23 @@ export function createApi(options: { startedAt: Date; version?: string }) {
         return c.json({ error: "ไฟล์ใหญ่เกินไป (สูงสุด 25 MB)" }, 400);
       }
 
+      const tagger = await import("./template-tagger");
       const replacementsRaw = form.get("replacements");
-      let replacements: TagReplacement[] = [];
+      let replacements: Parameters<typeof tagger.tagTemplate>[1] = [];
       if (typeof replacementsRaw === "string" && replacementsRaw.trim()) {
         try {
           const parsed = JSON.parse(replacementsRaw) as unknown;
           if (!Array.isArray(parsed)) {
             return c.json({ error: "replacements ต้องเป็นอาร์เรย์" }, 400);
           }
-          replacements = parsed as TagReplacement[];
+          replacements = parsed as Parameters<typeof tagger.tagTemplate>[1];
         } catch {
           return c.json({ error: "replacements ต้องเป็น JSON ที่ถูกต้อง" }, 400);
         }
       }
 
       const buffer = Buffer.from(await file.arrayBuffer());
-      const result = await tagTemplate(buffer, replacements);
+      const result = await tagger.tagTemplate(buffer, replacements);
       const base = file.name.replace(/\.docx$/i, "") || "template";
       const outName = `${base}-tagged.docx`;
 
@@ -668,7 +689,11 @@ export function createApi(options: { startedAt: Date; version?: string }) {
           mimeType: f.type,
         })),
       );
-      const extracted = await extractMany(payloads);
+
+      const wantStream =
+        c.req.query("stream") === "1" ||
+        (c.req.header("accept") || "").includes("application/x-ndjson");
+      const abortSignal = c.req.raw.signal;
 
       type BatchMapItem = {
         id: string | null;
@@ -680,17 +705,92 @@ export function createApi(options: { startedAt: Date; version?: string }) {
         /** Same format as Export JSON / Import JSON */
         valuesJson?: DocxFormValuesJson;
       };
-      const results: BatchMapItem[] = [];
+      type BatchEvt =
+        | { type: "log"; message: string }
+        | { type: "progress"; step: number; total: number; label: string }
+        | {
+            type: "batch-result";
+            ok: boolean;
+            mapped: number;
+            total: number;
+            results: BatchMapItem[];
+            extracted: unknown;
+            message?: string;
+          }
+        | { type: "error"; error: string; message?: string };
 
-      for (let i = 0; i < schemas.length; i += 1) {
-        const schema = schemas[i];
-        const name = String(
-          schema.valuesJson?.template ||
-            schema.filename ||
-            `template-${i + 1}.docx`,
-        );
-        const id = schema.id != null ? String(schema.id) : null;
-        try {
+      const runBatch = async (emit: (evt: BatchEvt) => void | Promise<void>) => {
+        const [{ detectKind }, { geminiFillDocxFormValuesBatch }, { sourceFilesMeta }] =
+          await Promise.all([
+            import("./source-extract"),
+            import("./gemini-map"),
+            import("./source-map"),
+          ]);
+        // prepare*N + 1 AI batch (N separate JSONs + source files once) + done
+        const totalSteps = payloads.length + 2;
+        await emit({
+          type: "log",
+          message: `เริ่มแมปหลายเทมเพลต · ต้นทาง ${payloads.length} ไฟล์ · เทมเพลต ${schemas.length} · โมเดล ${geminiStatus({ requestKey: clientKey, requestModel: clientModel }).model}`,
+        });
+        await emit({
+          type: "log",
+          message: `จะส่ง Export JSON แยกต่อเทมเพลต + ไฟล์ต้นทางจริง (PDF/รูป) ให้ AI อ่านเอง · ไม่ดึงข้อความ/OCR ก่อน`,
+        });
+        await emit({
+          type: "progress",
+          step: 0,
+          total: totalSteps,
+          label: "เตรียมแนบไฟล์ต้นทาง",
+        });
+
+        assertNotAborted(abortSignal);
+        for (let i = 0; i < payloads.length; i += 1) {
+          assertNotAborted(abortSignal);
+          const p = payloads[i];
+          const kind = detectKind(p.filename, p.mimeType);
+          const kindLabel =
+            kind === "image"
+              ? "รูป"
+              : kind === "pdf"
+                ? "PDF"
+                : kind === "docx"
+                  ? "Word"
+                  : "ไฟล์";
+          const kb = Math.max(1, Math.round(p.buffer.length / 1024));
+          await emit({
+            type: "log",
+            message: `[ต้นทาง ${i + 1}/${payloads.length}] แนบ${kindLabel}: ${p.filename} (${kb} KB)`,
+          });
+          await emit({
+            type: "progress",
+            step: i + 1,
+            total: totalSteps,
+            label: `เตรียมแนบ ${i + 1}/${payloads.length}`,
+          });
+        }
+
+        const results: BatchMapItem[] = [];
+        const fillItems: {
+          id: string;
+          filename: string;
+          skeleton: DocxFormValuesJson;
+          fields: FormField[];
+        }[] = [];
+
+        for (let i = 0; i < schemas.length; i += 1) {
+          const schema = schemas[i];
+          const name = String(
+            schema.valuesJson?.template ||
+              schema.filename ||
+              `template-${i + 1}.docx`,
+          );
+          const id =
+            schema.id != null && String(schema.id)
+              ? String(schema.id)
+              : `schema-${i}`;
+          const templateFields = Array.isArray(schema.fields)
+            ? (schema.fields as FormField[])
+            : [];
           const skeleton =
             schema.valuesJson && schema.valuesJson.format === "docx-form-values"
               ? schema.valuesJson
@@ -703,56 +803,187 @@ export function createApi(options: { startedAt: Date; version?: string }) {
               error:
                 "ต้องส่ง valuesJson ที่สร้างตอนจะส่งให้ AI (รูปแบบ Export JSON) — ไม่สร้างตอนโหลดไฟล์",
             });
+            await emit({
+              type: "log",
+              message: `  ✗ ${name}: ไม่มีโครง Export JSON จากไคลเอนต์`,
+            });
             continue;
           }
-          const valuesJson = await geminiFillDocxFormValues(
+          if (!templateFields.length) {
+            results.push({
+              id,
+              filename: name,
+              ok: false,
+              error: "ไม่มี fields ของเทมเพลตสำหรับแมป",
+            });
+            await emit({
+              type: "log",
+              message: `  ✗ ${name}: schemas.fields ว่าง`,
+            });
+            continue;
+          }
+          fillItems.push({
+            id,
+            filename: name,
             skeleton,
-            extracted,
-            {
-              apiKey: clientKey,
-              model: clientModel,
-            },
-          );
-          results.push({
-            id,
-            filename: name,
-            ok: true,
-            fieldCount: skeleton.fields?.length || 0,
-            suggestions: Object.keys(valuesJson.values || {}).length,
-            valuesJson,
+            fields: templateFields,
           });
-        } catch (err) {
-          results.push({
-            id,
-            filename: name,
-            ok: false,
-            error: formatTemplateError(err),
+          await emit({
+            type: "log",
+            message: `เตรียม Export JSON แยก #${fillItems.length}: 「${name}」 · ฟิลด์ ${templateFields.length} ตัว`,
           });
         }
-      }
 
-      const okCount = results.filter((r) => r.ok).length;
-      if (!okCount) {
-        const reasons = results
-          .map((r) => `${r.filename}: ${r.error || "ไม่ทราบสาเหตุ"}`)
-          .slice(0, 4)
-          .join(" · ");
-        return c.json(
-          {
+        if (fillItems.length) {
+          assertNotAborted(abortSignal);
+          const names = fillItems.map((t) => t.filename).join(", ");
+          await emit({
+            type: "log",
+            message:
+              fillItems.length === 1
+                ? `ส่งโครง Export JSON + ไฟล์ต้นทางให้ AI กรอก (รอบเดียว)`
+                : `ส่งชุด Export JSON ${fillItems.length} ไฟล์แยก + ไฟล์ต้นทางจริง ให้ AI รอบเดียว · ${names}`,
+          });
+          await emit({
+            type: "progress",
+            step: payloads.length,
+            total: totalSteps,
+            label:
+              fillItems.length === 1
+                ? `AI อ่านไฟล์แล้วกรอก — ${fillItems[0].filename}`
+                : `AI อ่านไฟล์แล้วกรอก Export JSON ${fillItems.length} ชุด`,
+          });
+
+          try {
+            const filled = await geminiFillDocxFormValuesBatch(
+              fillItems,
+              payloads,
+              {
+                apiKey: clientKey,
+                model: clientModel,
+              },
+            );
+            for (const item of filled) {
+              results.push({
+                id: item.id,
+                filename: item.filename,
+                ok: true,
+                fieldCount: item.valuesJson.fields?.length || 0,
+                suggestions: Object.keys(item.valuesJson.values || {}).length,
+                valuesJson: item.valuesJson,
+              });
+              await emit({
+                type: "log",
+                message: `  ✓ ${item.filename}: ${summarizeAiValuesJson(item.valuesJson)}`,
+              });
+            }
+          } catch (err) {
+            const error = formatTemplateError(err);
+            for (const item of fillItems) {
+              if (results.some((r) => r.id === item.id && r.ok)) continue;
+              results.push({
+                id: item.id,
+                filename: item.filename,
+                ok: false,
+                error,
+              });
+            }
+            await emit({
+              type: "log",
+              message: `  ✗ ชุด Export JSON: ${error}`,
+            });
+          }
+        }
+
+        const okCount = results.filter((r) => r.ok).length;
+        await emit({
+          type: "progress",
+          step: totalSteps,
+          total: totalSteps,
+          label: `เสร็จ ${okCount}/${results.length} เทมเพลต`,
+        });
+        if (!okCount) {
+          const reasons = results
+            .map((r) => `${r.filename}: ${r.error || "ไม่ทราบสาเหตุ"}`)
+            .slice(0, 4)
+            .join(" · ");
+          await emit({
+            type: "error",
             error: `แมป JSON ไม่สำเร็จทุกไฟล์ — ${reasons}`,
-            results,
-            extracted: extractedMeta(extracted),
-          },
-          400,
-        );
+            message: reasons,
+          });
+          return;
+        }
+        await emit({
+          type: "batch-result",
+          ok: true,
+          mapped: okCount,
+          total: results.length,
+          results,
+          extracted: sourceFilesMeta(payloads),
+          message: `แมปเสร็จ ${okCount}/${results.length} เทมเพลต — พร้อม Import ลงจอ`,
+        });
+      };
+
+      if (!wantStream) {
+        const box: {
+          payload: Extract<BatchEvt, { type: "batch-result" }> | null;
+          error: string | null;
+        } = { payload: null, error: null };
+        await runBatch((evt) => {
+          if (evt.type === "batch-result") box.payload = evt;
+          if (evt.type === "error") box.error = evt.error;
+        });
+        if (box.error || !box.payload) {
+          return c.json(
+            { error: box.error || "แมปหลายเทมเพลตไม่สำเร็จ" },
+            400,
+          );
+        }
+        return c.json({
+          ok: true,
+          mapped: box.payload.mapped,
+          total: box.payload.total,
+          results: box.payload.results,
+          extracted: box.payload.extracted,
+        });
       }
 
-      return c.json({
-        ok: true,
-        mapped: okCount,
-        total: results.length,
-        results,
-        extracted: extractedMeta(extracted),
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          const emit = async (evt: BatchEvt) => {
+            controller.enqueue(encoder.encode(`${JSON.stringify(evt)}\n`));
+          };
+          try {
+            await runBatch(emit);
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            const cancelled =
+              (err instanceof Error && err.name === "AbortError") ||
+              /ยกเลิกโดยผู้ใช้/i.test(message);
+            await emit({
+              type: "error",
+              error: cancelled
+                ? "ยกเลิกโดยผู้ใช้"
+                : `แมปหลายเทมเพลตไม่สำเร็จ: ${message}`,
+              message,
+            });
+          } finally {
+            controller.close();
+          }
+        },
+        cancel() {
+          /* client aborted */
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "application/x-ndjson; charset=utf-8",
+          "Cache-Control": "no-cache",
+          "X-Content-Type-Options": "nosniff",
+        },
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -814,6 +1045,7 @@ export function createApi(options: { startedAt: Date; version?: string }) {
         filledName?: string;
       };
       const results: BatchFillResult[] = [];
+      const { default: JSZip } = await import("jszip");
       const zip = new JSZip();
 
       for (let i = 0; i < templates.length; i += 1) {

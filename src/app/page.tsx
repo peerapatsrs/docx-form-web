@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { AuthBar } from "@/components/AuthBar";
 
 /** Same shell as the original docx-form Web UI — logic lives in /public/app.js */
 export default function Home() {
@@ -8,7 +9,7 @@ export default function Home() {
   useEffect(() => {
     if (document.querySelector("script[data-docx-form-app]")) return;
     const s = document.createElement("script");
-    s.src = `/app.js?v=web4`;
+    s.src = `/app.js?v=web19`;
     s.dataset.docxFormApp = "1";
     document.body.appendChild(s);
   }, []);
@@ -32,9 +33,12 @@ export default function Home() {
             </span>
           </div>
         </div>
-        <div className="status-pill" id="status">
-          <span className="status-dot" id="statusDot" />
-          <span id="statusText">กำลังเชื่อมต่อ…</span>
+        <div className="topbar-end">
+          <AuthBar />
+          <div className="status-pill" id="status">
+            <span className="status-dot" id="statusDot" />
+            <span id="statusText">กำลังเชื่อมต่อ…</span>
+          </div>
         </div>
       </header>
 

@@ -1,5 +1,5 @@
 import type { FormField } from "./docx-engine";
-import type { ExtractedSource } from "./source-extract";
+import { detectKind, type ExtractedSource } from "./source-extract";
 
 export type MapCandidate = {
   value: string | boolean;
@@ -36,6 +36,27 @@ export function extractedMeta(sources: ExtractedSource[]): SourceMapResult["extr
     charCount: s.charCount,
     warning: s.warning,
   }));
+}
+
+/** Meta for AI path that sends original files (no local OCR / text extract). */
+export function sourceFilesMeta(
+  files: { filename: string; mimeType?: string; buffer: Buffer }[],
+): SourceMapResult["extracted"] {
+  return files.map((f) => {
+    const kind = detectKind(f.filename, f.mimeType);
+    let warning: string | undefined;
+    if (kind === "docx") {
+      warning = "ส่ง document.xml จากไฟล์ Word (Gemini ไม่รับ .docx โดยตรง)";
+    } else if (kind === "unknown") {
+      warning = "ชนิดไฟล์ไม่รองรับ";
+    }
+    return {
+      filename: f.filename,
+      kind,
+      charCount: f.buffer?.length || 0,
+      warning,
+    };
+  });
 }
 
 /** Group Gemini hits into FieldProposal[] (one proposal per path). */

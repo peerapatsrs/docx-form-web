@@ -58,22 +58,37 @@ function enforceEnabled(): boolean {
 }
 
 /**
- * Placeholder entitlement resolver.
- * Later: read session cookie / Bearer / Stripe customer subscription.
+ * Resolve paid entitlement from Better Auth session (when enforce is on).
+ * Later: combine with Stripe subscription lookup.
  */
 export async function resolveEntitlement(
-  _req?: Request,
+  req?: Request,
 ): Promise<Entitlement> {
+  let customerId: string | null = null;
+  if (req) {
+    try {
+      const { auth } = await import("./auth");
+      const session = await auth.api.getSession({ headers: req.headers });
+      customerId = session?.user?.id ?? null;
+    } catch {
+      customerId = null;
+    }
+  }
+
   // Dev / pre-paywall: treat everyone as paid unless enforce + unpaid stub.
   if (!enforceEnabled()) {
-    return { paid: true, plan: "pro", customerId: null };
+    return { paid: true, plan: "pro", customerId };
   }
-  // When enforcing without a real billing hook yet, deny by default.
-  // Replace this block with Stripe/Auth lookup.
+
   const bypass = String(process.env.PREMIUM_BYPASS_KEY || "").trim();
-  const headerKey = ""; // wire from request headers later
+  const headerKey = req?.headers.get("x-premium-bypass")?.trim() || "";
   if (bypass && headerKey && bypass === headerKey) {
-    return { paid: true, plan: "pro", customerId: "bypass" };
+    return { paid: true, plan: "pro", customerId: customerId || "bypass" };
+  }
+
+  // Enforcing: signed-in users are pro until Stripe is wired.
+  if (customerId) {
+    return { paid: true, plan: "pro", customerId };
   }
   return { paid: false, plan: "free", customerId: null };
 }

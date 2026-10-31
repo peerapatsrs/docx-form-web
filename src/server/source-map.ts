@@ -1,0 +1,374 @@
+import type { FormField } from "./docx-engine";
+import type { ExtractedSource } from "./source-extract";
+
+export type MapCandidate = {
+  value: string | boolean;
+  sourceFile: string;
+  rule: string;
+  confidence: number;
+};
+
+export type FieldProposal = {
+  path: string;
+  candidates: MapCandidate[];
+  selectedIndex: number;
+  /** When true, draft should skip this path */
+  preferSkip?: boolean;
+};
+
+export type SourceMapResult = {
+  proposals: FieldProposal[];
+  values: Record<string, unknown>;
+  skip: Record<string, boolean>;
+  rowSkip: Record<string, Record<string, boolean>[]>;
+  extracted: {
+    filename: string;
+    kind: string;
+    charCount: number;
+    warning?: string;
+  }[];
+};
+
+export function extractedMeta(sources: ExtractedSource[]): SourceMapResult["extracted"] {
+  return sources.map((s) => ({
+    filename: s.filename,
+    kind: s.kind,
+    charCount: s.charCount,
+    warning: s.warning,
+  }));
+}
+
+/** Group Gemini hits into FieldProposal[] (one proposal per path). */
+export function proposalsFromHits(
+  hits: Array<MapCandidate & { path: string }>,
+): FieldProposal[] {
+  const byPath = new Map<string, FieldProposal>();
+  for (const hit of hits) {
+    const { path, ...cand } = hit;
+    let prop = byPath.get(path);
+    if (!prop) {
+      prop = { path, candidates: [], selectedIndex: 0, preferSkip: false };
+      byPath.set(path, prop);
+    }
+    const dup = prop.candidates.find(
+      (c) => String(c.value) === String(cand.value) && c.rule === cand.rule,
+    );
+    if (dup) {
+      dup.confidence = Math.max(dup.confidence, cand.confidence);
+      continue;
+    }
+    prop.candidates.push(cand);
+    prop.candidates.sort((a, b) => b.confidence - a.confidence);
+    prop.selectedIndex = 0;
+  }
+  return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path, "th"));
+}
+
+const MISS_CAND: MapCandidate = {
+  value: "(ไม่พบในเอกสาร)",
+  sourceFile: "Google Gemini",
+  rule: "gemini-miss",
+  confidence: 0,
+};
+
+/**
+ * Ensure every fillable template path has a proposal entry.
+ * Missing paths get a skip-selected placeholder so the map panel lists them all.
+ */
+export function ensureCompleteProposals(
+  fields: FormField[],
+  proposals: FieldProposal[],
+): FieldProposal[] {
+  const byPath = new Map(proposals.map((p) => [p.path, p]));
+
+  const ensure = (path: string, preferSkip = false) => {
+    if (byPath.has(path)) return;
+    const prop: FieldProposal = {
+      path,
+      candidates: [{ ...MISS_CAND }],
+      selectedIndex: preferSkip ? -1 : 0,
+      preferSkip,
+    };
+    byPath.set(path, prop);
+  };
+
+  for (const f of fields) {
+    if (f.type === "auto" || f.type === "image") continue;
+    if (f.type === "list") {
+      const prefix = `${f.name}.`;
+      const rowIdxs = new Set<number>();
+      for (const p of byPath.keys()) {
+        if (!p.startsWith(prefix)) continue;
+        const m = /^\S+\.(\d+)\./.exec(p);
+        if (m) rowIdxs.add(Number(m[1]));
+      }
+      // If Gemini found nothing for this list, still expose row 0 cells as skipped
+      // so every item variable is visible and can be filled manually after apply.
+      const rows = rowIdxs.size ? [...rowIdxs] : [0];
+      for (const i of rows) {
+        for (const item of f.itemFields) {
+          if (item.type === "auto") continue;
+          ensure(`${f.name}.${i}.${item.name}`, true);
+        }
+      }
+      continue;
+    }
+    ensure(f.name, true);
+  }
+
+  return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path, "th"));
+}
+
+export function buildDraftFromProposals(
+  fields: FormField[],
+  proposals: FieldProposal[],
+): Pick<SourceMapResult, "values" | "skip" | "rowSkip"> {
+  const values: Record<string, unknown> = {};
+  const skip: Record<string, boolean> = {};
+  const rowSkip: Record<string, Record<string, boolean>[]> = {};
+  const byPath = new Map(proposals.map((p) => [p.path, p]));
+
+  const pick = (path: string): MapCandidate | null => {
+    const p = byPath.get(path);
+    if (!p || p.preferSkip || p.selectedIndex < 0 || !p.candidates.length) return null;
+    return p.candidates[p.selectedIndex] || null;
+  };
+
+  for (const f of fields) {
+    if (f.type === "auto" || f.type === "image") {
+      skip[f.name] = f.type === "image";
+      continue;
+    }
+
+    if (f.type === "list") {
+      const prefix = `${f.name}.`;
+      const rowIdxs = new Set<number>();
+      for (const p of proposals) {
+        if (!p.path.startsWith(prefix)) continue;
+        const rest = p.path.slice(prefix.length);
+        const m = /^(\d+)\./.exec(rest);
+        if (m) rowIdxs.add(Number(m[1]));
+      }
+      const maxRow = rowIdxs.size ? Math.max(...rowIdxs) + 1 : 0;
+      if (maxRow === 0) {
+        skip[f.name] = true;
+        values[f.name] = [];
+        continue;
+      }
+      skip[f.name] = false;
+      const rows: Record<string, unknown>[] = [];
+      const rowSkipArr: Record<string, boolean>[] = [];
+      for (let i = 0; i < maxRow; i += 1) {
+        const row: Record<string, unknown> = {};
+        const rs: Record<string, boolean> = {};
+        for (const item of f.itemFields) {
+          if (item.type === "auto") {
+            row[item.name] = "";
+            rs[item.name] = false;
+            continue;
+          }
+          const cand = pick(`${f.name}.${i}.${item.name}`);
+          if (!cand) {
+            if (item.type === "bool") {
+              rs[item.name] = false;
+              row[item.name] = false;
+            } else {
+              rs[item.name] = true;
+              row[item.name] = "";
+            }
+          } else {
+            rs[item.name] = false;
+            row[item.name] = cand.value;
+          }
+        }
+        rows.push(row);
+        rowSkipArr.push(rs);
+      }
+      values[f.name] = rows;
+      rowSkip[f.name] = rowSkipArr;
+      continue;
+    }
+
+    const cand = pick(f.name);
+    if (!cand) {
+      // Bool false is a real value — do not auto-skip (keeps control editable).
+      if (f.type === "bool") {
+        skip[f.name] = false;
+        values[f.name] = false;
+      } else {
+        skip[f.name] = true;
+        values[f.name] = "";
+      }
+    } else {
+      skip[f.name] = false;
+      values[f.name] = cand.value;
+    }
+  }
+
+  return { values, skip, rowSkip };
+}
+
+/** Same envelope as browser Export JSON / Import JSON. */
+export type DocxFormValuesJson = {
+  format: "docx-form-values";
+  version: 1;
+  exportedAt: string;
+  template: string;
+  fields: { name: string; type: string }[];
+  values: Record<string, unknown>;
+  skip: Record<string, boolean>;
+  rowSkip: Record<string, Record<string, boolean>[]>;
+  images: Record<string, unknown>;
+};
+
+export function toDocxFormValuesJson(
+  templateFilename: string,
+  fields: FormField[],
+  draft: Pick<SourceMapResult, "values" | "skip" | "rowSkip">,
+): DocxFormValuesJson {
+  return {
+    format: "docx-form-values",
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    template: templateFilename || "",
+    fields: fields.map((f) => ({ name: f.name, type: f.type })),
+    values: draft.values,
+    skip: draft.skip,
+    rowSkip: draft.rowSkip,
+    images: {},
+  };
+}
+
+/**
+ * Keep only keys from the skeleton; prefer AI values when present.
+ * Ensures Import JSON always receives a valid docx-form-values envelope.
+ * Skeleton must be built by the client at Export / send-to-AI time.
+ */
+export function mergeAiIntoValuesJson(
+  skeleton: DocxFormValuesJson,
+  aiRaw: Record<string, unknown> | null | undefined,
+): DocxFormValuesJson {
+  const base = {
+    ...skeleton,
+    exportedAt: new Date().toISOString(),
+    images: {},
+  };
+  if (!aiRaw || typeof aiRaw !== "object") return base;
+
+  const aiValues =
+    aiRaw.values && typeof aiRaw.values === "object" && !Array.isArray(aiRaw.values)
+      ? (aiRaw.values as Record<string, unknown>)
+      : aiRaw;
+  const aiSkip =
+    aiRaw.skip && typeof aiRaw.skip === "object" && !Array.isArray(aiRaw.skip)
+      ? (aiRaw.skip as Record<string, boolean>)
+      : {};
+  const aiRowSkip =
+    aiRaw.rowSkip && typeof aiRaw.rowSkip === "object" && !Array.isArray(aiRaw.rowSkip)
+      ? (aiRaw.rowSkip as Record<string, Record<string, boolean>[]>)
+      : {};
+
+  const values: Record<string, unknown> = { ...base.values };
+  const skip: Record<string, boolean> = { ...base.skip };
+  const rowSkip: Record<string, Record<string, boolean>[]> = {
+    ...base.rowSkip,
+  };
+
+  for (const key of Object.keys(base.values)) {
+    if (!Object.prototype.hasOwnProperty.call(aiValues, key)) continue;
+    const v = aiValues[key];
+    if (Array.isArray(base.values[key])) {
+      values[key] = Array.isArray(v) ? v : base.values[key];
+      const empty = !Array.isArray(v) || v.length === 0;
+      skip[key] =
+        Object.prototype.hasOwnProperty.call(aiSkip, key)
+          ? !!aiSkip[key]
+          : empty;
+      if (Array.isArray(aiRowSkip[key])) rowSkip[key] = aiRowSkip[key];
+    } else if (typeof base.values[key] === "boolean") {
+      values[key] = !!v;
+      skip[key] =
+        Object.prototype.hasOwnProperty.call(aiSkip, key) ? !!aiSkip[key] : false;
+    } else {
+      const str = v == null ? "" : String(v);
+      values[key] = str;
+      skip[key] =
+        Object.prototype.hasOwnProperty.call(aiSkip, key)
+          ? !!aiSkip[key]
+          : !str.trim();
+    }
+  }
+
+  return {
+    ...base,
+    format: "docx-form-values",
+    version: 1,
+    values,
+    skip,
+    rowSkip,
+    images: {},
+  };
+}
+
+/**
+ * Convert draft values/skip into the payload shape expected by fillTemplate
+ * (bool → trueText/falseText, auto row numbers, skipped → "" / []).
+ * Mirrors the browser buildValuesPayload().
+ */
+export function toFillValues(
+  fields: FormField[],
+  values: Record<string, unknown>,
+  skip: Record<string, boolean>,
+  rowSkip: Record<string, Record<string, boolean>[]>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+
+  for (const f of fields) {
+    if (f.type === "text") {
+      out[f.name] = skip[f.name] ? "" : String(values[f.name] ?? "");
+      continue;
+    }
+    if (f.type === "bool") {
+      const on = !skip[f.name] && !!values[f.name];
+      out[f.name] = on ? f.trueText : f.falseText;
+      continue;
+    }
+    if (f.type === "auto") {
+      out[f.name] = "1";
+      continue;
+    }
+    if (f.type === "image") {
+      // Batch path has no image uploads — clear image tags.
+      out[f.name] = "";
+      continue;
+    }
+    if (f.type === "list") {
+      if (skip[f.name]) {
+        out[f.name] = [];
+        continue;
+      }
+      const rows = Array.isArray(values[f.name])
+        ? (values[f.name] as Record<string, unknown>[])
+        : [];
+      out[f.name] = rows.map((row, idx) => {
+        const rowOut: Record<string, unknown> = {};
+        for (const item of f.itemFields) {
+          if (item.type === "auto") {
+            rowOut[item.name] = String(idx + 1);
+          } else if (item.type === "bool") {
+            const on =
+              !rowSkip[f.name]?.[idx]?.[item.name] && !!row?.[item.name];
+            rowOut[item.name] = on ? item.trueText : item.falseText;
+          } else {
+            rowOut[item.name] = rowSkip[f.name]?.[idx]?.[item.name]
+              ? ""
+              : String(row?.[item.name] ?? "");
+          }
+        }
+        return rowOut;
+      });
+    }
+  }
+
+  return out;
+}

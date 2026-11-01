@@ -1,4 +1,21 @@
 services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: docx
+      POSTGRES_PASSWORD: docx
+      POSTGRES_DB: docx_form
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docx -d docx_form"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
   web:
     build: .
     ports:
@@ -6,4 +23,17 @@ services:
     environment:
       HOSTNAME: "0.0.0.0"
       PORT: "3000"
+      DATABASE_URL: postgres://docx:docx@db:5432/docx_form
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-docker-dev-secret-change-me-32chars}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3000}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+      SUPERADMIN_EMAILS: ${SUPERADMIN_EMAILS:-peerapat.srs@gmail.com}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  pgdata:

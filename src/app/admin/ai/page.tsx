@@ -1,0 +1,159 @@
+"use client";
+
+import { useEffect, useState } from "react";
+
+type AiStatus = {
+  byok?: boolean;
+  connected?: boolean;
+  model?: string;
+  models?: { id: string; label: string }[];
+  adminDefaultModel?: string | null;
+  hasServerEnvKey?: boolean;
+  premiumEnforce?: boolean;
+  maskedKey?: string | null;
+  configPath?: string;
+  studioUrl?: string;
+};
+
+export default function AdminAiPage() {
+  const [status, setStatus] = useState<AiStatus | null>(null);
+  const [defaultModel, setDefaultModel] = useState("gemini-3.8-flash");
+  const [error, setError] = useState("");
+  const [ok, setOk] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    void (async () => {
+      const res = await fetch("/api/admin/ai", { credentials: "include" });
+      const data = (await res.json().catch(() => ({}))) as {
+        settings?: { defaultModel?: string };
+        status?: AiStatus;
+        error?: string;
+      };
+      if (!res.ok) {
+        setError(data.error || "โหลดสถานะ AI ไม่สำเร็จ");
+      } else {
+        setStatus(data.status || null);
+        setDefaultModel(
+          data.settings?.defaultModel ||
+            data.status?.adminDefaultModel ||
+            "gemini-3.8-flash",
+        );
+      }
+      setLoading(false);
+    })();
+  }, []);
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    setOk("");
+    try {
+      const res = await fetch("/api/admin/ai", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ defaultModel }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        settings?: { defaultModel?: string };
+        status?: AiStatus;
+        error?: string;
+      };
+      if (!res.ok) {
+        setError(data.error || "บันทึกไม่สำเร็จ");
+        return;
+      }
+      setStatus(data.status || null);
+      if (data.settings?.defaultModel) setDefaultModel(data.settings.defaultModel);
+      setOk("บันทึกโมเดลเริ่มต้นแล้ว");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (loading) {
+    return (
+      <section className="admin-panel">
+        <p className="admin-muted">กำลังโหลด…</p>
+      </section>
+    );
+  }
+
+  const models = status?.models || [];
+
+  return (
+    <div className="admin-overview">
+      <section className="admin-panel">
+        <h2 className="admin-panel-title">สถานะ</h2>
+        <ul className="admin-kv">
+          <li>
+            <span>โหมดคีย์</span>
+            <strong>{status?.byok ? "BYOK (คีย์อยู่ที่เบราว์เซอร์)" : "เซิร์ฟเวอร์เก็บคีย์ได้"}</strong>
+          </li>
+          <li>
+            <span>คีย์จาก env</span>
+            <strong>{status?.hasServerEnvKey ? "มี" : "ไม่มี"}</strong>
+          </li>
+          <li>
+            <span>PREMIUM_ENFORCE</span>
+            <strong>{status?.premiumEnforce ? "เปิด" : "ปิด"}</strong>
+          </li>
+          <li>
+            <span>โมเดลที่ resolve ตอนนี้</span>
+            <strong>{status?.model || "—"}</strong>
+          </li>
+          <li>
+            <span>path คอนฟิก</span>
+            <strong>{status?.configPath || "—"}</strong>
+          </li>
+        </ul>
+        {status?.studioUrl ? (
+          <p className="admin-muted">
+            <a href={status.studioUrl} target="_blank" rel="noreferrer">
+              Google AI Studio
+            </a>
+          </p>
+        ) : null}
+      </section>
+
+      <section className="admin-panel">
+        <h2 className="admin-panel-title">โมเดลเริ่มต้น</h2>
+        {error ? (
+          <p className="auth-error" role="alert">
+            {error}
+          </p>
+        ) : null}
+        {ok ? (
+          <p className="auth-ok" role="status">
+            {ok}
+          </p>
+        ) : null}
+        <form className="admin-form" onSubmit={(e) => void save(e)}>
+          <label className="admin-field">
+            <span>defaultModel</span>
+            <select
+              className="admin-select"
+              value={defaultModel}
+              onChange={(e) => setDefaultModel(e.target.value)}
+            >
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+              {!models.some((m) => m.id === defaultModel) ? (
+                <option value={defaultModel}>{defaultModel}</option>
+              ) : null}
+            </select>
+          </label>
+          <button type="submit" className="admin-btn admin-btn-primary" disabled={busy}>
+            {busy ? "กำลังบันทึก…" : "บันทึก"}
+          </button>
+        </form>
+      </section>
+    </div>
+  );
+}

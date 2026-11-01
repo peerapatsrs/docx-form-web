@@ -6,10 +6,18 @@
 /** @typedef {{ name: string, type: 'list', itemFields: ListItemField[] }} ListField */
 /** @typedef {TextField | ImageField | ListField | BoolField | AutoField} FormField */
 
-const app = document.getElementById("app");
-const banner = document.getElementById("banner");
-const statusDot = document.getElementById("statusDot");
-const statusText = document.getElementById("statusText");
+/** Shell nodes from React home — refreshed on soft navigate remount. */
+let app = document.getElementById("app");
+let banner = document.getElementById("banner");
+let statusDot = document.getElementById("statusDot");
+let statusText = document.getElementById("statusText");
+
+function refreshShellElements() {
+  app = document.getElementById("app");
+  banner = document.getElementById("banner");
+  statusDot = document.getElementById("statusDot");
+  statusText = document.getElementById("statusText");
+}
 
 /**
  * @type {{
@@ -65,6 +73,19 @@ let sourceMapAbort = null;
 let aiStatus = { connected: false, models: [], defaultModel: "gemini-3.8-flash" };
 
 /**
+ * Entitlement for multi-template caps (from /api/health).
+ * Free ≤2 · paid ≤10 per batch.
+ * @type {{ paid: boolean, plan: string, maxMultiTemplates: number }}
+ */
+let premiumStatus = {
+  paid: false,
+  plan: "free",
+  maxMultiTemplates: 2,
+  freeMaxMulti: 2,
+  paidMaxMulti: 10,
+};
+
+/**
  * Multi-template workspace (หนึ่งชุดเอกสารต้นทาง → หลายแบบฟอร์ม).
  * @type {{
  *   id: string,
@@ -85,6 +106,80 @@ let multiActiveId = null;
 
 function isMultiMode() {
   return multiSlots.length > 1;
+}
+
+function getMaxMultiTemplates() {
+  const n = Number(premiumStatus.maxMultiTemplates);
+  if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  return premiumStatus.paid ? 10 : 2;
+}
+
+/** Short plan badge for upload UI — matches /account wording. */
+function planQuotaLabel() {
+  if (!premiumStatus.paid) return "ฟรี";
+  const p = String(premiumStatus.plan || "pro")
+    .trim()
+    .toLowerCase();
+  if (p === "pro" || p === "paid" || p === "premium") return "จ่ายแล้ว";
+  if (p && p !== "free" && p !== "unknown") return p;
+  return "จ่ายแล้ว";
+}
+
+function dropzoneMultiSubHtml() {
+  return `หรือ <span class="linkish">เลือกไฟล์</span> — หลายเทมเพลตได้สูงสุด ${getMaxMultiTemplates()} ไฟล์ต่อครั้ง (${planQuotaLabel()})`;
+}
+
+function multiTabsQuotaLabel(slotCount) {
+  const n = Math.max(1, Number(slotCount) || 1);
+  const max = getMaxMultiTemplates();
+  const plan = planQuotaLabel();
+  if (n <= 1) return `เทมเพลต · ${n}/${max} (${plan})`;
+  return `${n} เทมเพลต · ${n}/${max} (${plan})`;
+}
+
+function addTemplateBtnTitle() {
+  return `เพิ่มเทมเพลต .docx (สูงสุด ${getMaxMultiTemplates()} · ${planQuotaLabel()})`;
+}
+
+function multiUploadOptHint() {
+  return `ข้อความเป็นตัวอักษร ส่วนตัวแปรเป็นช่องว่างให้กรอก เหมือนใน Word · อัปโหลดหลาย .docx ได้สูงสุด ${getMaxMultiTemplates()} ไฟล์ต่อครั้ง (${planQuotaLabel()})`;
+}
+
+/** Refresh plan/quota copy after /api/health returns live entitlement. */
+function refreshPlanQuotaUi() {
+  const sub = document.querySelector("#dropzone .dropzone-sub");
+  if (sub) {
+    const text = sub.textContent || "";
+    // Skip tagger / other empty states that reuse .dropzone-sub
+    if (!text.includes("ไฮไลต์") && text.includes("หลายเทมเพลต")) {
+      sub.innerHTML = dropzoneMultiSubHtml();
+    }
+  }
+  const label = document.querySelector(".multi-tabs-label");
+  if (label) {
+    const n = document.querySelectorAll(".multi-tab-item").length;
+    label.textContent = multiTabsQuotaLabel(n || 1);
+  }
+  const addBtn = document.getElementById("addTemplateTabBtn");
+  if (addBtn) addBtn.title = addTemplateBtnTitle();
+  const optHint = document.querySelector("#showFullContent + span small");
+  if (optHint && (optHint.textContent || "").includes("อัปโหลดหลาย")) {
+    optHint.textContent = multiUploadOptHint();
+  }
+}
+
+function multiLimitMessage(kind = "select") {
+  const max = getMaxMultiTemplates();
+  const paidCap = Number(premiumStatus.paidMaxMulti) || 10;
+  const plan = planQuotaLabel();
+  if (premiumStatus.paid) {
+    return kind === "add"
+      ? `${plan}: เพิ่มเทมเพลตได้ไม่เกิน ${max} ไฟล์`
+      : `${plan}: เลือกได้ไม่เกิน ${max} ไฟล์ต่อครั้ง`;
+  }
+  return kind === "add"
+    ? `บัญชี${plan}เพิ่มเทมเพลตได้ไม่เกิน ${max} ไฟล์ — จ่ายแล้วได้ถึง ${paidCap}`
+    : `บัญชี${plan}เลือกได้ไม่เกิน ${max} ไฟล์ต่อครั้ง — จ่ายแล้วได้ถึง ${paidCap}`;
 }
 
 function newSlotId() {
@@ -802,13 +897,20 @@ function explainSkippedTemplates(opts) {
 }
 
 function hideBanner() {
+  if (!banner) return;
   banner.hidden = true;
   banner.textContent = "";
   banner.classList.remove("success", "progress");
   banner.removeAttribute("aria-busy");
 }
 
-function showBanner(message, kind = "error") {
+/**
+ * @param {string} message
+ * @param {'error'|'success'|'progress'|'warn'} [kind]
+ * @param {{ action?: { label: string, onClick: () => void }, note?: string }} [opts]
+ */
+function showBanner(message, kind = "error", opts = {}) {
+  if (!banner) return;
   banner.hidden = !message;
   banner.classList.remove("success", "progress");
   if (!message) {
@@ -817,21 +919,33 @@ function showBanner(message, kind = "error") {
   }
   const closeBtn =
     `<button type="button" class="banner-close" data-banner-close title="ปิดข้อความ" aria-label="ปิดข้อความ">×</button>`;
+  const actionBtn =
+    opts.action?.label
+      ? `<button type="button" class="banner-action" data-banner-action>${escapeHtml(opts.action.label)}</button>`
+      : "";
+  const noteHtml =
+    opts.note && String(opts.note).trim()
+      ? `<span class="banner-note">${escapeHtml(String(opts.note).trim())}</span>`
+      : "";
   if (kind === "progress") {
     banner.classList.add("progress");
     banner.setAttribute("aria-busy", "true");
-    banner.innerHTML = `<span class="banner-spinner" aria-hidden="true"></span><span class="banner-msg">${escapeHtml(message)}</span><span class="banner-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="banner-bar" aria-hidden="true"></span>`;
+    banner.innerHTML = `<span class="banner-spinner" aria-hidden="true"></span><span class="banner-copy"><span class="banner-msg">${escapeHtml(message)}</span>${noteHtml}</span><span class="banner-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="banner-bar" aria-hidden="true"></span>`;
   } else if (kind === "success") {
     banner.classList.add("success");
     banner.removeAttribute("aria-busy");
-    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${closeBtn}`;
+    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${actionBtn}${closeBtn}`;
   } else {
     banner.removeAttribute("aria-busy");
-    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${closeBtn}`;
+    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${actionBtn}${closeBtn}`;
   }
   banner.querySelector("[data-banner-close]")?.addEventListener("click", (ev) => {
     ev.preventDefault();
     hideBanner();
+  });
+  banner.querySelector("[data-banner-action]")?.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    opts.action?.onClick?.();
   });
   // Only scroll for errors — success/progress must not jump the viewport.
   if (kind === "error") {
@@ -872,8 +986,9 @@ function askDialog(opts) {
 
     const selectOpts = opts.select?.options || [];
     const selectValue = opts.select?.value || selectOpts[0]?.id || "";
+    const allowCustom = opts.select ? opts.select.allowCustom !== false : false;
     const knownIds = new Set(selectOpts.map((o) => o.id));
-    const isCustom = selectValue && !knownIds.has(selectValue);
+    const isCustom = allowCustom && selectValue && !knownIds.has(selectValue);
     const optionsHtml = selectOpts
       .map(
         (o) =>
@@ -884,19 +999,40 @@ function askDialog(opts) {
       ? `<label class="dialog-input-label" for="dialogSelect">${escapeHtml(opts.select.label || "โมเดล")}
           <select id="dialogSelect" class="dialog-input dialog-select">
             ${optionsHtml}
-            <option value="__custom__" ${isCustom ? "selected" : ""}>อื่นๆ (พิมพ์เอง)…</option>
+            ${allowCustom ? `<option value="__custom__" ${isCustom ? "selected" : ""}>อื่นๆ (พิมพ์เอง)…</option>` : ""}
           </select>
         </label>
-        <label class="dialog-input-label" for="dialogCustomModel" id="dialogCustomModelWrap" ${isCustom ? "" : "hidden"}>
+        ${
+          allowCustom
+            ? `<label class="dialog-input-label" for="dialogCustomModel" id="dialogCustomModelWrap" ${isCustom ? "" : "hidden"}>
           รหัสโมเดล
           <input id="dialogCustomModel" class="dialog-input" type="text"
             placeholder="เช่น gemini-3.8-flash" autocomplete="off" spellcheck="false"
             value="${escapeAttr(isCustom ? selectValue : "")}" />
         </label>`
+            : ""
+        }`
       : "";
 
-    const linkHtml = opts.link
-      ? `<p class="dialog-link-wrap"><a class="dialog-link" href="${escapeAttr(opts.link.href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(opts.link.label)}</a></p>`
+    /** @type {Record<string, { href: string, label: string }> | null} */
+    const linkForSelect =
+      opts.linkForSelect && typeof opts.linkForSelect === "object"
+        ? opts.linkForSelect
+        : null;
+    const initialSelectId = isCustom ? "__custom__" : selectValue || selectOpts[0]?.id || "";
+    const initialLink =
+      (linkForSelect && linkForSelect[initialSelectId]) || opts.link || null;
+    const linkHtml = initialLink
+      ? `<p class="dialog-link-wrap" id="dialogLinkWrap"><a class="dialog-link" id="dialogLink" href="${escapeAttr(initialLink.href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(initialLink.label)}</a></p>`
+      : linkForSelect
+        ? `<p class="dialog-link-wrap" id="dialogLinkWrap" hidden><a class="dialog-link" id="dialogLink" href="#" target="_blank" rel="noopener noreferrer"></a></p>`
+        : "";
+
+    const checkboxHtml = opts.checkbox
+      ? `<label class="dialog-check" for="dialogCheck">
+          <input id="dialogCheck" type="checkbox" ${opts.checkbox.checked ? "checked" : ""} />
+          <span>${escapeHtml(opts.checkbox.label || "")}</span>
+        </label>`
       : "";
 
     const overlay = document.createElement("div");
@@ -904,13 +1040,17 @@ function askDialog(opts) {
     overlay.className = "dialog-overlay";
     overlay.setAttribute("role", "dialog");
     overlay.setAttribute("aria-modal", "true");
+    // When link tracks the select, put it under the dropdown so it updates with the choice.
+    const linkAfterSelect = !!linkForSelect;
     overlay.innerHTML = `
       <div class="dialog-card">
         <h2 class="dialog-title">${escapeHtml(opts.title)}</h2>
         <p class="dialog-body">${escapeHtml(opts.body)}</p>
-        ${linkHtml}
+        ${linkAfterSelect ? "" : linkHtml}
         ${inputHtml}
         ${selectHtml}
+        ${linkAfterSelect ? linkHtml : ""}
+        ${checkboxHtml}
         <div class="dialog-actions dialog-actions-stack">${actionsHtml}</div>
       </div>
     `;
@@ -919,11 +1059,13 @@ function askDialog(opts) {
       const input = /** @type {HTMLInputElement | null} */ (overlay.querySelector("#dialogInput"));
       const select = /** @type {HTMLSelectElement | null} */ (overlay.querySelector("#dialogSelect"));
       const custom = /** @type {HTMLInputElement | null} */ (overlay.querySelector("#dialogCustomModel"));
+      const check = /** @type {HTMLInputElement | null} */ (overlay.querySelector("#dialogCheck"));
       let model = select?.value || "";
       if (model === "__custom__") model = String(custom?.value || "").trim();
       return {
         value: input?.value || "",
         model,
+        checked: check ? !!check.checked : false,
       };
     };
 
@@ -943,19 +1085,43 @@ function askDialog(opts) {
     const selectEl = /** @type {HTMLSelectElement | null} */ (overlay.querySelector("#dialogSelect"));
     const customWrap = overlay.querySelector("#dialogCustomModelWrap");
     const customEl = /** @type {HTMLInputElement | null} */ (overlay.querySelector("#dialogCustomModel"));
+    const linkWrap = overlay.querySelector("#dialogLinkWrap");
+    const linkEl = /** @type {HTMLAnchorElement | null} */ (overlay.querySelector("#dialogLink"));
+    const syncSelectLink = () => {
+      if (!linkForSelect || !linkEl) return;
+      const id = selectEl?.value || "";
+      const meta = linkForSelect[id];
+      if (!meta?.href) {
+        if (linkWrap instanceof HTMLElement) linkWrap.hidden = true;
+        return;
+      }
+      linkEl.href = meta.href;
+      linkEl.textContent = meta.label;
+      if (linkWrap instanceof HTMLElement) linkWrap.hidden = false;
+    };
     selectEl?.addEventListener("change", () => {
-      const show = selectEl.value === "__custom__";
+      const show = allowCustom && selectEl.value === "__custom__";
       if (customWrap instanceof HTMLElement) customWrap.hidden = !show;
       if (show) customEl?.focus();
+      syncSelectLink();
     });
+    syncSelectLink();
 
     for (const a of opts.actions) {
       overlay
         .querySelector(`[data-dialog="${cssAttrSelector(a.id)}"]`)
         ?.addEventListener("click", () => {
-          if ((opts.input || opts.select) && (a.id === "ok" || a.id === "save")) {
+          if (
+            (opts.input || opts.select || opts.checkbox) &&
+            (a.id === "ok" || a.id === "save")
+          ) {
             const fields = readFields();
-            finish({ id: a.id, value: fields.value, model: fields.model });
+            finish({
+              id: a.id,
+              value: fields.value,
+              model: fields.model,
+              checked: fields.checked,
+            });
             return;
           }
           finish(a.id);
@@ -970,7 +1136,12 @@ function askDialog(opts) {
         if (e.key === "Enter") {
           e.preventDefault();
           const fields = readFields();
-          finish({ id: "ok", value: fields.value, model: fields.model });
+          finish({
+            id: "ok",
+            value: fields.value,
+            model: fields.model,
+            checked: fields.checked,
+          });
         }
       });
     } else {
@@ -1233,12 +1404,11 @@ function renderMultiTabs() {
       </div>`;
     })
     .join("");
-  const label =
-    slots.length === 1 ? "เทมเพลต" : `${slots.length} เทมเพลต`;
+  const label = multiTabsQuotaLabel(slots.length);
   return `<div class="multi-tabs" role="tablist" aria-label="เทมเพลต">
-    <span class="multi-tabs-label">${label}</span>
+    <span class="multi-tabs-label">${escapeHtml(label)}</span>
     ${tabs}
-    <button type="button" class="multi-tab multi-tab-add" id="addTemplateTabBtn" title="เพิ่มเทมเพลต .docx">+ เพิ่ม</button>
+    <button type="button" class="multi-tab multi-tab-add" id="addTemplateTabBtn" title="${escapeAttr(addTemplateBtnTitle())}">+ เพิ่ม</button>
   </div>`;
 }
 
@@ -1341,38 +1511,326 @@ function setCreditsVersion(version) {
 
 const AI_KEY_SS = "docx-form-web:geminiKey";
 const AI_MODEL_SS = "docx-form-web:geminiModel";
+const AI_VAULT_LS = "docx-form-web:aiVault:v1";
+/** Tagger AI draft: variable-name language (`th` | `en`). Default Thai. */
+const TAGGER_NAME_LANG_SS = "docx-form-web:taggerNameLang";
 
-function getClientAiKey() {
+/** @returns {"th"|"en"} */
+function getTaggerAiNameLanguage() {
   try {
-    return String(sessionStorage.getItem(AI_KEY_SS) || "").trim();
+    const v = String(sessionStorage.getItem(TAGGER_NAME_LANG_SS) || "")
+      .trim()
+      .toLowerCase();
+    if (v === "en" || v === "english" || v === "eng") return "en";
   } catch {
-    return "";
+    /* ignore */
   }
+  return "th";
 }
 
-function getClientAiModel() {
+/** @param {"th"|"en"|string} lang */
+function setTaggerAiNameLanguage(lang) {
+  const next = String(lang || "").trim().toLowerCase() === "en" ? "en" : "th";
   try {
-    return String(sessionStorage.getItem(AI_MODEL_SS) || "").trim();
+    sessionStorage.setItem(TAGGER_NAME_LANG_SS, next);
   } catch {
-    return "";
+    /* ignore */
   }
+  return next;
 }
 
-function setClientAi(apiKey, model) {
+/** @type {{ id: string, label: string, docsUrl: string, defaultModel: string, models: {id:string,label:string}[], keyPlaceholder?: string, formAiSupported?: boolean, formAiNote?: string }[]} */
+let aiProvidersCatalog = [];
+
+/** Logged-in (session cookie) — enables optional server key sync. */
+let aiUserLoggedIn = false;
+/** Session role from /api/me — used for staff-only UI (admin+). */
+let aiUserRole = "";
+
+function rolePartsClient(role) {
+  return String(role || "")
+    .split(",")
+    .map((r) => r.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/** admin / superadmin — matches server roleIsStaffPaid. */
+function isAiStaffAdmin() {
+  return rolePartsClient(aiUserRole).some(
+    (r) => r === "admin" || r === "superadmin",
+  );
+}
+
+/**
+ * @typedef {{ id: string, provider: string, label: string, apiKey: string, model: string, storeOnServer?: boolean }} AiVaultEntry
+ * @typedef {{ entries: AiVaultEntry[], activeId: string | null }} AiVault
+ */
+
+function newAiEntryId() {
+  return `k-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+/** @returns {AiVault} */
+function emptyAiVault() {
+  return { entries: [], activeId: null };
+}
+
+/** @returns {AiVault} */
+function readAiVault() {
   try {
-    if (apiKey) sessionStorage.setItem(AI_KEY_SS, String(apiKey).trim());
-    if (model) sessionStorage.setItem(AI_MODEL_SS, String(model).trim());
+    const raw = localStorage.getItem(AI_VAULT_LS);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && Array.isArray(parsed.entries)) {
+        return {
+          entries: parsed.entries.filter(
+            (e) => e && e.id && e.provider && e.apiKey,
+          ),
+          activeId: parsed.activeId || null,
+        };
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  // Migrate legacy session Gemini key once.
+  try {
+    const legacyKey = String(sessionStorage.getItem(AI_KEY_SS) || "").trim();
+    const legacyModel = String(sessionStorage.getItem(AI_MODEL_SS) || "").trim();
+    if (legacyKey) {
+      const id = newAiEntryId();
+      const vault = {
+        entries: [
+          {
+            id,
+            provider: "google",
+            label: "Gemini (เดิม)",
+            apiKey: legacyKey,
+            model: legacyModel || "gemini-3.8-flash",
+          },
+        ],
+        activeId: id,
+      };
+      writeAiVault(vault);
+      sessionStorage.removeItem(AI_KEY_SS);
+      sessionStorage.removeItem(AI_MODEL_SS);
+      return vault;
+    }
+  } catch {
+    /* ignore */
+  }
+  return emptyAiVault();
+}
+
+/** @param {AiVault} vault */
+function writeAiVault(vault) {
+  try {
+    localStorage.setItem(
+      AI_VAULT_LS,
+      JSON.stringify({
+        entries: vault.entries,
+        activeId: vault.activeId,
+      }),
+    );
   } catch {
     /* private mode */
   }
 }
 
-function clearClientAi() {
+/** @returns {AiVaultEntry | null} */
+function getActiveAiEntry() {
+  const vault = readAiVault();
+  if (!vault.entries.length) return null;
+  const active =
+    vault.entries.find((e) => e.id === vault.activeId) || vault.entries[0];
+  return active || null;
+}
+
+function getClientAiKey() {
+  return String(getActiveAiEntry()?.apiKey || "").trim();
+}
+
+function getClientAiModel() {
+  const e = getActiveAiEntry();
+  if (!e) return "";
+  return coerceClientAiModel(
+    e.provider,
+    e.model,
+    aiStatus.models?.length ? aiStatus.models : undefined,
+  );
+}
+
+function getClientAiProvider() {
+  return String(getActiveAiEntry()?.provider || "google").trim() || "google";
+}
+
+function getClientAiLabel() {
+  const e = getActiveAiEntry();
+  if (!e) return "";
+  return e.label || providerLabel(e.provider);
+}
+
+function providerLabel(id) {
+  const p = aiProvidersCatalog.find((x) => x.id === id);
+  if (p) return p.label;
+  if (id === "google") return "Google Gemini";
+  if (id === "cursor") return "Cursor";
+  return id || "AI";
+}
+
+/** True when provider can power tagger draft / form fill. */
+function providerFormAiSupported(id) {
+  const p = aiProvidersCatalog.find((x) => x.id === id);
+  if (!p) return true;
+  return p.formAiSupported !== false;
+}
+
+function providerFormAiNote(id) {
+  const p = aiProvidersCatalog.find((x) => x.id === id);
+  if (p?.formAiNote) return String(p.formAiNote);
+  if (id === "cursor") {
+    return "Cursor: ใช้ Cloud Agent (no-repo) ผ่าน SDK — ช้ากว่า chat ปกติ และคิดเงินตามแพ็กเกจ Cursor";
+  }
+  return "";
+}
+
+function providerModels(id) {
+  const p = aiProvidersCatalog.find((x) => x.id === id);
+  if (p?.models?.length) return p.models;
+  return geminiModelOptions();
+}
+
+/** Vault may still hold gated/retired Cursor ids (e.g. auto-smart). */
+const CURSOR_STALE_MODELS = new Set([
+  "auto-smart",
+  "auto",
+  "default",
+  "composer-2",
+  "composer-2-fast",
+]);
+
+/**
+ * Prefer a model that exists in `models` (live or catalog). Cursor stale ids
+ * fall back to Composer 2.5 so draft headers do not hard-fail.
+ * @param {string} provider
+ * @param {string} model
+ * @param {{id:string,label?:string}[]=} models
+ */
+function coerceClientAiModel(provider, model, models) {
+  const list =
+    Array.isArray(models) && models.length ? models : providerModels(provider);
+  const ids = new Set(list.map((m) => String(m.id || "").trim()).filter(Boolean));
+  const catalogDef =
+    aiProvidersCatalog.find((p) => p.id === provider)?.defaultModel ||
+    list[0]?.id ||
+    "";
+  const fallback =
+    provider === "cursor"
+      ? ids.has("composer-2.5")
+        ? "composer-2.5"
+        : catalogDef || list[0]?.id || "composer-2.5"
+      : catalogDef || list[0]?.id || "";
+  const id = String(model || "").trim();
+  if (provider === "cursor" && (!id || CURSOR_STALE_MODELS.has(id))) {
+    return fallback;
+  }
+  if (id && ids.size && !ids.has(id)) return fallback || id;
+  return id || fallback;
+}
+
+function providerDocs(id) {
+  const p = aiProvidersCatalog.find((x) => x.id === id);
+  return p?.docsUrl || "https://aistudio.google.com/apikey";
+}
+
+async function refreshAiLoginState() {
   try {
-    sessionStorage.removeItem(AI_KEY_SS);
-    sessionStorage.removeItem(AI_MODEL_SS);
+    const res = await fetch("/api/me", { credentials: "include" });
+    aiUserLoggedIn = res.ok;
+    if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      aiUserRole = String(data?.user?.role || "");
+    } else {
+      aiUserRole = "";
+    }
+  } catch {
+    aiUserLoggedIn = false;
+    aiUserRole = "";
+  }
+  return aiUserLoggedIn;
+}
+
+/** Pull server vault into localStorage (merge; do not wipe local-only keys). */
+async function pullServerAiKeys() {
+  if (!aiUserLoggedIn) return;
+  try {
+    const res = await fetch("/api/ai/keys", { credentials: "include" });
+    if (res.status === 401) {
+      aiUserLoggedIn = false;
+      return;
+    }
+    if (!res.ok) return;
+    const data = await res.json().catch(() => ({}));
+    const remote = Array.isArray(data.entries) ? data.entries : [];
+    if (!remote.length) return;
+    const vault = readAiVault();
+    const byId = new Map(vault.entries.map((e) => [e.id, e]));
+    for (const r of remote) {
+      if (!r?.id || !r.apiKey) continue;
+      const next = {
+        id: String(r.id),
+        provider: String(r.provider || "google"),
+        label: String(r.label || providerLabel(r.provider)),
+        apiKey: String(r.apiKey),
+        model: String(r.model || ""),
+        storeOnServer: true,
+      };
+      byId.set(next.id, next);
+    }
+    vault.entries = [...byId.values()];
+    if (!vault.activeId || !byId.has(vault.activeId)) {
+      vault.activeId = vault.entries[0]?.id || null;
+    }
+    writeAiVault(vault);
   } catch {
     /* ignore */
+  }
+}
+
+/** @param {AiVaultEntry} entry */
+async function pushServerAiKey(entry) {
+  if (!aiUserLoggedIn || !entry?.id || !entry.apiKey) return false;
+  try {
+    const res = await fetch("/api/ai/keys", {
+      method: "PUT",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        entry: {
+          id: entry.id,
+          provider: entry.provider,
+          label: entry.label,
+          model: entry.model,
+          apiKey: entry.apiKey,
+        },
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function deleteServerAiKey(id) {
+  if (!aiUserLoggedIn || !id) return false;
+  try {
+    const res = await fetch(`/api/ai/keys/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      credentials: "include",
+    });
+    return res.ok;
+  } catch {
+    return false;
   }
 }
 
@@ -1386,29 +1844,67 @@ function maskClientKey(key) {
 function aiAuthHeaders(extra = {}) {
   /** @type {Record<string, string>} */
   const h = { ...extra };
-  const key = getClientAiKey();
-  const model = getClientAiModel();
-  if (key) h["X-Gemini-Api-Key"] = key;
-  if (model) h["X-Gemini-Model"] = model;
+  const entry = getActiveAiEntry();
+  if (!entry) return h;
+  const key = String(entry.apiKey || "").trim();
+  const model = String(entry.model || "").trim();
+  const provider = String(entry.provider || "google").trim();
+  if (key) {
+    h["X-Ai-Api-Key"] = key;
+    h["X-Gemini-Api-Key"] = key; // legacy
+  }
+  if (model) {
+    h["X-Ai-Model"] = model;
+    h["X-Gemini-Model"] = model;
+  }
+  if (provider) h["X-Ai-Provider"] = provider;
   return h;
 }
 
 function applyAiStatus(data) {
-  const clientKey = getClientAiKey();
-  const clientModel = getClientAiModel();
+  const entry = getActiveAiEntry();
+  const clientKey = entry?.apiKey || "";
+  const clientModel = entry?.model || "";
+  const provider = entry?.provider || data.provider || "google";
+  if (Array.isArray(data.providers) && data.providers.length) {
+    aiProvidersCatalog = data.providers;
+  }
   aiStatus = {
     connected: !!clientKey || !!data.connected,
     maskedKey: clientKey ? maskClientKey(clientKey) : data.maskedKey || null,
-    model: clientModel || data.model || data.defaultModel || "gemini-3.8-flash",
-    models: Array.isArray(data.models) ? data.models : geminiModelOptions(),
+    model:
+      clientModel ||
+      data.model ||
+      data.defaultModel ||
+      "gemini-3.8-flash",
+    models: Array.isArray(data.models)
+      ? data.models
+      : providerModels(provider),
     defaultModel: data.defaultModel || "gemini-3.8-flash",
-    studioUrl: data.studioUrl || "https://aistudio.google.com/apikey",
+    studioUrl: data.docsUrl || data.studioUrl || providerDocs(provider),
     byok: data.byok !== false,
+    provider,
+    providerLabel: data.providerLabel || providerLabel(provider),
+    entryLabel: entry?.label || "",
+    providers: aiProvidersCatalog,
   };
+}
+
+async function ensureAiProviders() {
+  if (aiProvidersCatalog.length) return aiProvidersCatalog;
+  try {
+    const res = await fetch("/api/ai/providers");
+    const data = await res.json().catch(() => ({}));
+    if (Array.isArray(data.providers)) aiProvidersCatalog = data.providers;
+  } catch {
+    /* ignore */
+  }
+  return aiProvidersCatalog;
 }
 
 async function refreshAiStatus() {
   try {
+    await ensureAiProviders();
     const res = await fetch("/api/ai/status", { headers: aiAuthHeaders() });
     if (!res.ok) return;
     const data = await res.json().catch(() => ({}));
@@ -1418,122 +1914,610 @@ async function refreshAiStatus() {
   }
 }
 
-async function connectGoogleAi() {
-  if (aiStatus.connected || getClientAiKey()) {
-    const choice = await askDialog({
-      title: "Google AI (คีย์ของคุณ)",
-      body: `คีย์อยู่ที่เบราว์เซอร์นี้เท่านั้น ไม่บันทึกลงเซิร์ฟเวอร์ — ${aiStatus.maskedKey || maskClientKey(getClientAiKey())}`,
-      select: {
-        label: "โมเดล Gemini",
-        value: getClientAiModel() || aiStatus.model || aiStatus.defaultModel || "gemini-3.8-flash",
-        options: geminiModelOptions(),
-      },
-      actions: [
-        { id: "save", label: "บันทึกโมเดล", kind: "primary" },
-        { id: "disconnect", label: "ลบคีย์จากเบราว์เซอร์", kind: "secondary" },
-        { id: "abort", label: "ปิด", kind: "ghost" },
-      ],
+/** Free plan: 1 AI key. Paid: unlimited named keys in the browser vault. */
+const FREE_MAX_AI_KEYS = 1;
+
+function maxAiKeysForPlan() {
+  return premiumStatus.paid ? Number.POSITIVE_INFINITY : FREE_MAX_AI_KEYS;
+}
+
+function canAddAiKey() {
+  const n = readAiVault().entries.length;
+  const max = maxAiKeysForPlan();
+  return n < max;
+}
+
+async function explainAiKeyQuota() {
+  const choice = await askDialog({
+    title: "เพิ่มคีย์ได้เมื่อเป็นแผนจ่ายแล้ว",
+    body:
+      `บัญชี${planQuotaLabel()}เก็บ AI key ได้ ${FREE_MAX_AI_KEYS} อัน\n` +
+      `ถ้าต้องการเก็บหลายคีย์ (หลายเจ้า / สลับใช้) ให้อัปเกรดเป็นจ่ายแล้วที่หน้าบัญชี หรือให้ผู้ดูแลตั้งแผนให้`,
+    actions: [
+      { id: "ok", label: "เข้าใจแล้ว", kind: "primary" },
+      { id: "account", label: "ไปหน้าบัญชี", kind: "secondary" },
+    ],
+  });
+  if (choice === "account") {
+    // Hard nav — Next soft router is unavailable from this vanilla app.js shell.
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- intentional
+    window.location.assign("/account");
+  }
+}
+
+/**
+ * Fetch live models for a provider using the user's API key.
+ * @returns {Promise<{ models: {id:string,label:string}[], defaultModel: string, source: string, warning?: string|null }>}
+ */
+async function fetchLiveProviderModels(provider, apiKey) {
+  const fallback = {
+    models: providerModels(provider),
+    defaultModel:
+      aiProvidersCatalog.find((p) => p.id === provider)?.defaultModel ||
+      providerModels(provider)[0]?.id ||
+      "",
+    source: "fallback",
+    warning: null,
+  };
+  try {
+    const res = await fetch("/api/ai/models", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider, apiKey }),
     });
-    if (!choice || choice === "abort") return;
-    if (choice === "disconnect") {
-      clearClientAi();
-      await fetch("/api/ai/google", { method: "DELETE", headers: aiAuthHeaders() }).catch(() => {});
-      await refreshAiStatus();
-      if (state.file) renderForm();
-      else applyAiStatus({ connected: false, models: aiStatus.models, byok: true });
-      showBanner("ลบคีย์จากเบราว์เซอร์แล้ว", "success");
-      setTimeout(() => showBanner(""), 2200);
-      return;
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { ...fallback, warning: data.error || "ดึงรายการโมเดลไม่สำเร็จ" };
     }
-    if (choice.id === "save") {
-      const model = String(choice.model || "").trim();
-      if (!model) {
-        showBanner("ยังไม่ได้เลือกโมเดล");
-        return;
-      }
-      setClientAi(getClientAiKey(), model);
-      await refreshAiStatus();
-      if (state.file) renderForm();
-      showBanner(`ใช้โมเดล ${model} แล้ว (คีย์ยังอยู่ที่เครื่องคุณ)`, "success");
-      setTimeout(() => showBanner(""), 2800);
-    }
-    return;
+    const models = Array.isArray(data.models) && data.models.length
+      ? data.models
+      : fallback.models;
+    return {
+      models,
+      defaultModel: data.defaultModel || models[0]?.id || fallback.defaultModel,
+      source: data.source || "live",
+      warning: data.warning || null,
+    };
+  } catch {
+    return { ...fallback, warning: "เชื่อมต่อเพื่อดึงรายการโมเดลไม่ได้" };
+  }
+}
+
+/**
+ * Add a named key for any provider (active after save).
+ */
+async function promptAddAiKey() {
+  if (!canAddAiKey()) {
+    await explainAiKeyQuota();
+    return false;
+  }
+  await refreshAiLoginState();
+  await ensureAiProviders();
+  const providers = aiProvidersCatalog.length
+    ? aiProvidersCatalog
+    : [{ id: "google", label: "Google Gemini", defaultModel: "gemini-3.8-flash", models: geminiModelOptions(), docsUrl: "https://aistudio.google.com/apikey" }];
+
+  /** @type {Record<string, { href: string, label: string }>} */
+  const providerLinks = {};
+  for (const p of providers) {
+    const href = p.docsUrl || providerDocs(p.id);
+    if (!href) continue;
+    providerLinks[p.id] = {
+      href,
+      label: `ไปเอา API key ที่ ${p.label}`,
+    };
   }
 
-  const result = await askDialog({
-    title: "ใส่ Gemini API key ของคุณ",
-    body: "ใช้คีย์จาก Google AI Studio ของคุณเอง — เก็บเฉพาะในเบราว์เซอร์นี้ (session) ไม่บันทึกลงเซิร์ฟเวอร์ของแอป เพื่อลดค่าใช้จ่ายฝั่งเรา",
-    link: {
-      href: aiStatus.studioUrl || "https://aistudio.google.com/apikey",
-      label: "เปิด Google AI Studio (สร้าง API key)",
-    },
-    input: {
-      label: "Gemini API key ของคุณ",
-      type: "password",
-      placeholder: "AIza…",
-    },
+  const pick = await askDialog({
+    title: "เลือกผู้ให้บริการ AI",
+    body: "เลือกเจ้าแล้วกดลิงก์ด้านล่างเพื่อไปสร้าง/คัดลอก API key — ค่าเริ่มต้นเก็บในเบราว์เซอร์\n\nหมายเหตุ: Cursor ใช้ Cloud Agent (ช้ากว่า / คิดเงินตามแพ็กเกจ Cursor)",
     select: {
-      label: "โมเดล Gemini",
-      value: aiStatus.model || aiStatus.defaultModel || "gemini-3.8-flash",
-      options: geminiModelOptions(),
+      label: "ผู้ให้บริการ",
+      value: "google",
+      allowCustom: false,
+      options: providers.map((p) => ({
+        id: p.id,
+        label:
+          p.formAiSupported === false
+            ? `${p.label} (ยังไม่รองรับดราฟ/กรอก)`
+            : p.label,
+      })),
     },
+    linkForSelect: providerLinks,
     actions: [
-      { id: "ok", label: "ใช้คีย์นี้", kind: "primary" },
+      { id: "ok", label: "ถัดไป", kind: "primary" },
       { id: "abort", label: "ยกเลิก", kind: "ghost" },
     ],
   });
-  if (!result || result === "abort" || result.id !== "ok") return;
-  const apiKey = String(result.value || "").trim();
-  const model = String(result.model || "").trim();
+  if (!pick || pick === "abort" || pick.id !== "ok") return false;
+  const provider = String(pick.model || "google").trim();
+  const def = providers.find((p) => p.id === provider) || providers[0];
+  const formOk = def.formAiSupported !== false;
+
+  const named = await askDialog({
+    title: `เพิ่มคีย์ · ${def.label}`,
+    body: formOk
+      ? provider === "cursor"
+        ? "ตั้งชื่อคีย์ แล้วใส่ API key (crsr_…) — ดราฟ/กรอกผ่าน Cloud Agent (ช้ากว่า chat ปกติ · คิดเงินตามแพ็กเกจ Cursor)"
+        : "ตั้งชื่อคีย์ แล้วใส่ API key — ระบบจะดึงรายการโมเดลล่าสุดจาก API ของเจ้านี้"
+      : providerFormAiNote(provider) ||
+        `${def.label}: คีย์นี้ยังใช้ดราฟตัวแปร/กรอกฟอร์มในแอปไม่ได้ — เก็บไว้ได้แต่แนะนำใช้ Gemini / OpenAI / Claude`,
+    link: {
+      href: def.docsUrl || providerDocs(provider),
+      label: formOk
+        ? provider === "cursor"
+          ? `เปิดเอกสาร Cursor SDK · ${def.label}`
+          : `เปิดหน้าสร้าง API key · ${def.label}`
+        : `อ่านเอกสาร · ${def.label}`,
+    },
+    input: {
+      label: "ชื่อคีย์",
+      type: "text",
+      placeholder: def.label,
+      value: def.label,
+    },
+    actions: [
+      { id: "ok", label: "ใส่ API key", kind: "primary" },
+      { id: "abort", label: "ยกเลิก", kind: "ghost" },
+    ],
+  });
+  if (!named || named === "abort" || named.id !== "ok") return false;
+  const label = String(named.value || def.label).trim() || def.label;
+
+  const keyResult = await askDialog({
+    title: `API key · ${label}`,
+    body: aiUserLoggedIn
+      ? `${def.label} — ติ๊กด้านล่างถ้าต้องการซิงก์คีย์ขึ้นเซิร์ฟเวอร์ (เข้ารหัส)`
+      : `${def.label} — คีย์เก็บในเบราว์เซอร์นี้`,
+    input: {
+      label: "API key",
+      type: "password",
+      placeholder: def.keyPlaceholder || "…",
+    },
+    checkbox: aiUserLoggedIn
+      ? {
+          label: "เก็บคีย์นี้บนเซิร์ฟเวอร์ (ใช้ได้ข้ามเครื่องเมื่อล็อกอิน)",
+          checked: false,
+        }
+      : undefined,
+    actions: [
+      { id: "ok", label: "ดึงรายการโมเดล", kind: "primary" },
+      { id: "abort", label: "ยกเลิก", kind: "ghost" },
+    ],
+  });
+  if (!keyResult || keyResult === "abort" || keyResult.id !== "ok") return false;
+  const apiKey = String(keyResult.value || "").trim();
+  const storeOnServer = aiUserLoggedIn && !!keyResult.checked;
   if (!apiKey) {
     showBanner("ยังไม่ได้ใส่ API key");
-    return;
+    return false;
   }
+
+  showBanner(
+    formOk ? "กำลังดึงรายการโมเดลจาก API…" : "กำลังเตรียมรายการโมเดลสำรอง…",
+    "progress",
+  );
+  const live = await fetchLiveProviderModels(provider, apiKey);
+  hideBanner();
+  if (formOk && live.warning && live.source !== "live") {
+    const tip = String(live.warning).replace(/\s+/g, " ").trim();
+    showBanner(
+      tip.length > 140 ? `ใช้รายการสำรอง — ${tip.slice(0, 137)}…` : `ใช้รายการสำรอง — ${tip}`,
+    );
+    setTimeout(() => showBanner(""), 4200);
+  } else if (!formOk) {
+    showBanner(providerFormAiNote(provider) || live.warning || "", "warn");
+    setTimeout(() => showBanner(""), 5200);
+  }
+
+  const modelPick = await askDialog({
+    title: `เลือกโมเดล · ${def.label}`,
+    body: !formOk
+      ? "รายการโมเดลนี้ยังใช้ดราฟตัวแปรหรือกรอกฟอร์มในแอปไม่ได้ — เก็บคีย์ไว้ได้"
+      : provider === "cursor"
+        ? "โมเดล Cursor Cloud Agent (SDK) — หรือเลือกอื่นๆ แล้วพิมพ์รหัสโมเดลเอง"
+        : live.source === "live"
+          ? "รายการจาก API ล่าสุดของเจ้านี้ — หรือเลือกอื่นๆ แล้วพิมพ์รหัสโมเดลเอง"
+          : "ดึงรายการจาก API ไม่ได้ (เช่น คีย์ยังไม่มีเครดิต/สิทธิ์) — ใช้รายการสำรอง หรือพิมพ์รหัสโมเดลเอง",
+    select: {
+      label: "โมเดล",
+      value: live.defaultModel || live.models[0]?.id || def.defaultModel || "",
+      options: live.models,
+    },
+    actions: [
+      {
+        id: "ok",
+        label: formOk ? "บันทึกและใช้คีย์นี้" : "บันทึกคีย์ไว้ (ยังใช้ดราฟไม่ได้)",
+        kind: "primary",
+      },
+      { id: "abort", label: "ยกเลิก", kind: "ghost" },
+    ],
+  });
+  if (!modelPick || modelPick === "abort" || modelPick.id !== "ok") return false;
+  const model = coerceClientAiModel(
+    provider,
+    String(modelPick.model || live.defaultModel || "").trim(),
+    live.models,
+  );
   if (!model) {
     showBanner("ยังไม่ได้เลือกโมเดล");
-    return;
+    return false;
   }
+
   try {
-    const res = await fetch("/api/ai/google", {
+    const res = await fetch("/api/ai/connect", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...aiAuthHeaders() },
-      body: JSON.stringify({ apiKey, model, persist: false }),
+      body: JSON.stringify({ apiKey, model, provider, persist: false }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       showBanner(data.error || "ตรวจสอบ API key ไม่สำเร็จ");
-      return;
+      return false;
     }
-    setClientAi(apiKey, model);
-    applyAiStatus({ ...data, connected: true, byok: true });
-    if (state.file) renderForm();
-    showBanner(`พร้อมใช้คีย์ของคุณ · ${model} — ไม่ได้เก็บลงเซิร์ฟเวอร์`, "success");
-    setTimeout(() => showBanner(""), 3600);
+    const vault = readAiVault();
+    const id = newAiEntryId();
+    const entry = { id, provider, label, apiKey, model, storeOnServer };
+    vault.entries.push(entry);
+    vault.activeId = id;
+    writeAiVault(vault);
+    if (storeOnServer) {
+      const okPush = await pushServerAiKey(entry);
+      if (!okPush) {
+        entry.storeOnServer = false;
+        writeAiVault(vault);
+        showBanner("บันทึกในเบราว์เซอร์แล้ว แต่ซิงก์ขึ้นเซิร์ฟเวอร์ไม่สำเร็จ");
+      } else if (!formOk) {
+        showBanner(
+          `บันทึกแล้ว · ${label} — แต่ยังใช้ดราฟ/กรอกไม่ได้ (ใช้ Gemini / OpenAI / Claude)`,
+        );
+      } else {
+        showBanner(`พร้อมใช้ · ${label} · ${model} · ซิงก์เซิร์ฟเวอร์แล้ว`, "success");
+      }
+    } else if (!formOk) {
+      showBanner(
+        `บันทึกแล้ว · ${label} — แต่ยังใช้ดราฟ/กรอกไม่ได้ (ใช้ Gemini / OpenAI / Claude)`,
+      );
+    } else {
+      showBanner(`พร้อมใช้ · ${label} · ${model}`, "success");
+    }
+    applyAiStatus({ ...data, connected: true, byok: true, provider });
+    setTimeout(() => showBanner(""), formOk ? 3200 : 5200);
+    return true;
   } catch {
     showBanner("เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ขณะตรวจสอบ API key");
+    return false;
   }
+}
+
+async function openAiKeysManager() {
+  await ensureAiProviders();
+  await refreshAiLoginState();
+  await pullServerAiKeys();
+  await refreshAiStatus();
+
+  const renderList = () => {
+    const vault = readAiVault();
+    if (!vault.entries.length) {
+      return `<p class="dialog-body">ยังไม่มีคีย์ — กด «เพิ่มคีย์» เพื่อเลือกผู้ให้บริการ (Gemini, OpenAI, Claude, OpenRouter ฯลฯ)</p>`;
+    }
+    return `<div class="ai-key-list" role="list">${vault.entries
+      .map((e) => {
+        const active = e.id === vault.activeId;
+        const where = e.storeOnServer ? "เซิร์ฟเวอร์" : "เครื่องนี้";
+        const syncBtn = aiUserLoggedIn
+          ? `<button type="button" class="btn-ghost btn-compact ai-key-sync" data-sync="${escapeAttr(e.id)}" title="${e.storeOnServer ? "เลิกเก็บบนเซิร์ฟเวอร์" : "เก็บคีย์นี้บนเซิร์ฟเวอร์"}">${e.storeOnServer ? "เลิกซิงก์" : "ซิงก์"}</button>`
+          : "";
+        return `<label class="ai-key-row ${active ? "is-active" : ""}" role="listitem">
+          <input type="radio" name="aiActiveKey" value="${escapeAttr(e.id)}" ${active ? "checked" : ""} />
+          <span class="ai-key-meta">
+            <strong>${escapeHtml(e.label || providerLabel(e.provider))} <span class="ai-key-badge">${escapeHtml(where)}</span></strong>
+            <small>${escapeHtml(providerLabel(e.provider))} · ${escapeHtml(e.model)} · ${escapeHtml(maskClientKey(e.apiKey))}</small>
+          </span>
+          ${syncBtn}
+          <button type="button" class="btn-ghost btn-compact ai-key-del" data-del="${escapeAttr(e.id)}" title="ลบคีย์นี้">ลบ</button>
+        </label>`;
+      })
+      .join("")}</div>`;
+  };
+
+  return new Promise((resolve) => {
+    const existing = document.getElementById("appDialog");
+    if (existing) existing.remove();
+
+    const overlay = document.createElement("div");
+    overlay.id = "appDialog";
+    overlay.className = "dialog-overlay";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+
+    const paint = () => {
+      const vault = readAiVault();
+      const active = getActiveAiEntry();
+      const allowAdd = canAddAiKey();
+      const quotaHint = premiumStatus.paid
+        ? "แผนจ่ายแล้ว · เพิ่มหลายคีย์ได้ · คีย์ที่เลือกจะใช้ตอนแมปเอกสาร"
+        : `แผนฟรีเก็บได้ ${FREE_MAX_AI_KEYS} คีย์ · จ่ายแล้วถึงจะเพิ่มมากกว่า 1 อันได้`;
+      const syncHint = aiUserLoggedIn
+        ? "ล็อกอินแล้ว · กด「ซิงก์」หรือติ๊กตอนเพิ่มคีย์เพื่อเก็บบนเซิร์ฟเวอร์"
+        : "ยังไม่ล็อกอิน · คีย์อยู่แค่เครื่องนี้";
+      overlay.innerHTML = `
+        <div class="dialog-card dialog-card-wide">
+          <h2 class="dialog-title">คีย์ AI ของคุณ</h2>
+          <p class="dialog-body">${escapeHtml(quotaHint)} · ${escapeHtml(syncHint)}</p>
+          ${renderList()}
+          <div class="dialog-actions dialog-actions-stack">
+            <button type="button" class="btn-primary" data-ai-act="add" title="${allowAdd ? "เพิ่มคีย์ผู้ให้บริการ" : "แผนฟรีมีได้ 1 คีย์ — จ่ายแล้วถึงจะเพิ่มได้อีก"}">${allowAdd ? "เพิ่มคีย์" : "เพิ่มคีย์ (จ่ายแล้ว)"}</button>
+            <button type="button" class="btn-secondary" data-ai-act="use" ${vault.entries.length ? "" : "disabled"}>ใช้คีย์ที่เลือก</button>
+            <button type="button" class="btn-secondary" data-ai-act="edit-model" ${active ? "" : "disabled"}>เปลี่ยนโมเดลคีย์ที่เลือก</button>
+            <button type="button" class="btn-ghost" data-ai-act="close">ปิด</button>
+          </div>
+        </div>`;
+
+      overlay.querySelector('[data-ai-act="close"]')?.addEventListener("click", () => {
+        overlay.remove();
+        document.removeEventListener("keydown", onKey);
+        resolve("close");
+      });
+      overlay.querySelector('[data-ai-act="add"]')?.addEventListener("click", () => {
+        void (async () => {
+          if (!canAddAiKey()) {
+            await explainAiKeyQuota();
+            paint();
+            return;
+          }
+          overlay.remove();
+          document.removeEventListener("keydown", onKey);
+          const ok = await promptAddAiKey();
+          if (state.file) renderForm();
+          if (ok || readAiVault().entries.length) {
+            await openAiKeysManager();
+          }
+          resolve("add");
+        })();
+      });
+      overlay.querySelector('[data-ai-act="use"]')?.addEventListener("click", () => {
+        const checked = /** @type {HTMLInputElement | null} */ (
+          overlay.querySelector('input[name="aiActiveKey"]:checked')
+        );
+        const vaultNow = readAiVault();
+        if (checked?.value) {
+          vaultNow.activeId = checked.value;
+          writeAiVault(vaultNow);
+        }
+        applyAiStatus({
+          connected: !!getClientAiKey(),
+          byok: true,
+          provider: getClientAiProvider(),
+          models: providerModels(getClientAiProvider()),
+        });
+        if (state.file) renderForm();
+        const e = getActiveAiEntry();
+        showBanner(
+          e
+            ? `ใช้คีย์「${e.label}」· ${providerLabel(e.provider)} · ${e.model}`
+            : "ยังไม่ได้เลือกคีย์",
+          e ? "success" : undefined,
+        );
+        setTimeout(() => showBanner(""), 2800);
+        overlay.remove();
+        document.removeEventListener("keydown", onKey);
+        resolve("use");
+      });
+      overlay.querySelector('[data-ai-act="edit-model"]')?.addEventListener("click", () => {
+        void (async () => {
+          const checked = /** @type {HTMLInputElement | null} */ (
+            overlay.querySelector('input[name="aiActiveKey"]:checked')
+          );
+          const vaultNow = readAiVault();
+          const entry =
+            vaultNow.entries.find((e) => e.id === checked?.value) ||
+            getActiveAiEntry();
+          if (!entry) return;
+          overlay.remove();
+          document.removeEventListener("keydown", onKey);
+          showBanner("กำลังดึงรายการโมเดลจาก API…", "progress");
+          const live = await fetchLiveProviderModels(entry.provider, entry.apiKey);
+          hideBanner();
+          const models = live.models.length ? live.models : providerModels(entry.provider);
+          if (live.warning && live.source !== "live") {
+            const tip = String(live.warning).replace(/\s+/g, " ").trim();
+            showBanner(
+              tip.length > 140
+                ? `ใช้รายการสำรอง — ${tip.slice(0, 137)}…`
+                : `ใช้รายการสำรอง — ${tip}`,
+            );
+            setTimeout(() => showBanner(""), 4200);
+          }
+          const choice = await askDialog({
+            title: `โมเดล · ${entry.label}`,
+            body:
+              live.source === "live"
+                ? `${providerLabel(entry.provider)} · ${maskClientKey(entry.apiKey)} · รายการจาก API`
+                : `${providerLabel(entry.provider)} · ${maskClientKey(entry.apiKey)} · ดึงจาก API ไม่ได้ — ใช้รายการสำรองหรือพิมพ์เอง`,
+            select: {
+              label: "โมเดล",
+              value: coerceClientAiModel(
+                entry.provider,
+                entry.model,
+                models,
+              ),
+              options: models,
+            },
+            actions: [
+              { id: "save", label: "บันทึก", kind: "primary" },
+              { id: "abort", label: "ยกเลิก", kind: "ghost" },
+            ],
+          });
+          if (choice && choice !== "abort" && choice.id === "save") {
+            const model = coerceClientAiModel(
+              entry.provider,
+              String(choice.model || "").trim(),
+              models,
+            );
+            if (model) {
+              entry.model = model;
+              vaultNow.activeId = entry.id;
+              writeAiVault(vaultNow);
+              if (entry.storeOnServer) void pushServerAiKey(entry);
+              applyAiStatus({
+                connected: true,
+                byok: true,
+                provider: entry.provider,
+                models,
+              });
+              if (state.file) renderForm();
+              showBanner(`ใช้โมเดล ${model} แล้ว`, "success");
+              setTimeout(() => showBanner(""), 2400);
+            }
+          }
+          await openAiKeysManager();
+          resolve("edit");
+        })();
+      });
+      overlay.querySelectorAll("[data-sync]").forEach((btn) => {
+        btn.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          void (async () => {
+            const id = btn.getAttribute("data-sync");
+            const vaultNow = readAiVault();
+            const entry = vaultNow.entries.find((e) => e.id === id);
+            if (!entry) return;
+            if (entry.storeOnServer) {
+              await deleteServerAiKey(entry.id);
+              entry.storeOnServer = false;
+              writeAiVault(vaultNow);
+              showBanner(`เลิกซิงก์「${entry.label}」แล้ว — เหลือแค่เครื่องนี้`, "success");
+            } else {
+              const ok = await pushServerAiKey(entry);
+              if (!ok) {
+                showBanner("ซิงก์ขึ้นเซิร์ฟเวอร์ไม่สำเร็จ");
+                return;
+              }
+              entry.storeOnServer = true;
+              writeAiVault(vaultNow);
+              showBanner(`ซิงก์「${entry.label}」ขึ้นเซิร์ฟเวอร์แล้ว`, "success");
+            }
+            setTimeout(() => showBanner(""), 2400);
+            paint();
+          })();
+        });
+      });
+      overlay.querySelectorAll("[data-del]").forEach((btn) => {
+        btn.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          void (async () => {
+            const id = btn.getAttribute("data-del");
+            const vaultNow = readAiVault();
+            const doomed = vaultNow.entries.find((e) => e.id === id);
+            if (doomed?.storeOnServer) await deleteServerAiKey(id);
+            vaultNow.entries = vaultNow.entries.filter((e) => e.id !== id);
+            if (vaultNow.activeId === id) {
+              vaultNow.activeId = vaultNow.entries[0]?.id || null;
+            }
+            writeAiVault(vaultNow);
+            applyAiStatus({
+              connected: !!getClientAiKey(),
+              byok: true,
+              provider: getClientAiProvider(),
+              models: providerModels(getClientAiProvider()),
+            });
+            paint();
+          })();
+        });
+      });
+    };
+
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        overlay.remove();
+        document.removeEventListener("keydown", onKey);
+        resolve("abort");
+      }
+    };
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) {
+        overlay.remove();
+        document.removeEventListener("keydown", onKey);
+        resolve("abort");
+      }
+    });
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(overlay);
+    paint();
+  });
+}
+
+/** @deprecated name kept for call sites — opens multi-provider key manager */
+async function connectGoogleAi() {
+  if (!getClientAiKey()) {
+    const added = await promptAddAiKey();
+    if (state.file) renderForm();
+    if (taggerSession) renderTaggerWorkspace();
+    if (added) return;
+    // Still allow opening manager (empty) via second path
+  }
+  await openAiKeysManager();
+  if (state.file) renderForm();
+  if (taggerSession) renderTaggerWorkspace();
 }
 
 async function checkHealth() {
   try {
-    const res = await fetch("/api/health", { headers: aiAuthHeaders() });
+    const res = await fetch("/api/health", {
+      headers: aiAuthHeaders(),
+      credentials: "include",
+    });
     if (!res.ok) throw new Error("bad");
     const data = await res.json().catch(() => ({}));
     setCreditsVersion(data.version || "0.0.0");
+    if (data.premium && typeof data.premium === "object") {
+      const paid = Boolean(data.premium.paid);
+      const maxRaw = Number(data.premium.maxMultiTemplates);
+      const freeMax = Number(data.premium.freeMaxMulti);
+      const paidMax = Number(data.premium.paidMaxMulti);
+      premiumStatus = {
+        paid,
+        plan: String(data.premium.plan || (paid ? "pro" : "free")),
+        maxMultiTemplates:
+          Number.isFinite(maxRaw) && maxRaw > 0
+            ? maxRaw
+            : paid
+              ? Number.isFinite(paidMax) && paidMax > 0
+                ? paidMax
+                : 10
+              : Number.isFinite(freeMax) && freeMax > 0
+                ? freeMax
+                : 2,
+        freeMaxMulti:
+          Number.isFinite(freeMax) && freeMax > 0 ? freeMax : 2,
+        paidMaxMulti:
+          Number.isFinite(paidMax) && paidMax > 0 ? paidMax : 10,
+      };
+      refreshPlanQuotaUi();
+    }
     if (data.ai && typeof data.ai === "object") {
       applyAiStatus(data.ai);
     } else {
       await refreshAiStatus();
     }
-    statusDot.classList.add("ok");
-    statusDot.classList.remove("bad");
-    statusText.textContent = aiStatus.connected
-      ? `localhost · คีย์คุณ · ${aiStatus.model || "Gemini"}`
-      : "localhost · พร้อมใช้";
+    if (statusDot) {
+      statusDot.classList.add("ok");
+      statusDot.classList.remove("bad");
+    }
+    if (statusText) {
+      statusText.textContent = aiStatus.connected
+        ? `localhost · ${aiStatus.providerLabel || "AI"} · ${aiStatus.model || ""}`
+        : "localhost · พร้อมใช้";
+    }
   } catch {
-    statusDot.classList.remove("ok");
-    statusDot.classList.add("bad");
-    statusText.textContent = "เชื่อมต่อไม่ได้";
+    if (statusDot) {
+      statusDot.classList.remove("ok");
+      statusDot.classList.add("bad");
+    }
+    if (statusText) statusText.textContent = "เชื่อมต่อไม่ได้";
     showBanner("เซิร์ฟเวอร์ไม่ตอบสนอง — ลองรีเฟรชหน้า หรือรัน docx-form ใหม่");
   }
 }
@@ -1601,7 +2585,7 @@ function ensureListRows(name, itemFields) {
  *     domCellIndex?: number,
  *     trueText?: string,
  *     falseText?: string,
- *     source?: 'existing'|'session',
+ *     source?: 'existing'|'session'|'ai',
  *   }[],
  *   busy: boolean,
  * }}
@@ -1653,6 +2637,7 @@ function removeTaggerDialogPortals() {
   document.getElementById("taggerCreateBtn")?.remove();
   document.getElementById("taggerDeleteBtn")?.remove();
   document.getElementById("taggerCopyBtn")?.remove();
+  removeTaggerInlineUndoBtn();
 }
 
 function portalTaggerDialogsToBody() {
@@ -1678,7 +2663,7 @@ function renderEmpty() {
       <button type="button" class="dropzone" id="dropzone" aria-label="อัปโหลดไฟล์ Word">
         <div class="dropzone-kicker">เทมเพลตใหม่</div>
         <div class="dropzone-title">ลากไฟล์ .docx มาวางที่นี่</div>
-        <div class="dropzone-sub">หรือ <span class="linkish">เลือกไฟล์</span> — เลือกได้หลายเทมเพลตถ้าเอกสารต้นทางใช้ร่วมกันได้</div>
+        <div class="dropzone-sub">${dropzoneMultiSubHtml()}</div>
       </button>
       <section class="draft-entry-panel" id="emptyDraftPanel" aria-label="โหลดดราฟ">
         <div class="draft-entry-head">
@@ -1701,7 +2686,7 @@ function renderEmpty() {
           <input type="checkbox" id="showFullContent" ${state.showFullContent ? "checked" : ""} />
           <span>
             <strong>แสดงรายละเอียดเนื้อหาในไฟล์ทั้งหมด</strong>
-            <small>ข้อความเป็นตัวอักษร ส่วนตัวแปรเป็นช่องว่างให้กรอก เหมือนใน Word · อัปโหลดหลาย .docx ได้ถ้าจะแมปจากเอกสารต้นทางชุดเดียว</small>
+            <small>${escapeHtml(multiUploadOptHint())}</small>
           </span>
         </label>
         <div class="upload-tips">
@@ -1726,22 +2711,47 @@ function renderEmpty() {
             <li>
               <span>ลิสต์ (ย่อหน้า)</span>
               <code>{{#รายการ}}…{{/}}</code>
-              <small class="tip-note">ห่อบล็อกซ้ำนอกตาราง — ข้างในใส่ {{ชื่อ}} / {{+ลำดับ}} ได้</small>
+              <small class="tip-note">ห่อบล็อกซ้ำนอกตาราง (หน่วยแรกเป็นต้นแบบ เช่น จำเลยที่ 1 — ไม่แท็กหน่วย 2/3 แยก) · ข้างในใส่ {{ชื่อ}} / {{+ลำดับ}} ได้ · AI ดราฟห่อหน่วยแรกเมื่อเจอแพทเทิร์นซ้ำ</small>
             </li>
             <li>
               <span>ตาราง / ลิสต์</span>
               <code>{{#รายการ}}</code> ต้นแถว · <code>{{/}}</code> ท้ายแถว
-              <small class="tip-note">ห่อแถวต้นแบบ · ในเซลล์ใส่ {{คอลัมน์}} หรือ {{+ลำดับ}} · แถวอื่นในตาราง (เช่น ฟุตเตอร์) ไม่ถูกลบอัตโนมัติ</small>
+              <small class="tip-note">ห่อแถวต้นแบบ (แถวข้อมูลแรกต่อตาราง) · ในเซลล์ใส่ {{คอลัมน์}} หรือ {{+ลำดับ}} · แถวตัวอย่างถัดไป/ฟุตเตอร์ไม่ถูกลบอัตโนมัติ · AI ดราฟแท็กเฉพาะแถวต้นแบบ</small>
             </li>
           </ul>
           <p class="tip-note tip-tagger-hint">หรือใช้ปุ่ม <strong>สร้างเทมเพลตจากเอกสาร</strong> — ในตารางแต่ละแถวมีกลุ่ม <strong>+ ตัวแปร</strong> / <strong>ลบ</strong> กดได้เลย หรือไฮไลต์ข้อความแล้วใช้ปุ่มลอย</p>
         </div>
       </aside>
       <section class="tagger-entry-card" aria-labelledby="taggerEntryTitle">
-        <span class="tagger-entry-mark" aria-hidden="true"></span>
-        <p class="dropzone-kicker">ทางลัด</p>
-        <h2 class="tagger-entry-title" id="taggerEntryTitle">สร้างเทมเพลตจากเอกสาร</h2>
+        <div class="tagger-entry-head">
+          <span class="tagger-entry-mark" aria-hidden="true"></span>
+          <div>
+            <p class="dropzone-kicker">ทางลัด</p>
+            <h2 class="tagger-entry-title" id="taggerEntryTitle">สร้างเทมเพลตจากเอกสาร</h2>
+          </div>
+        </div>
         <p class="tagger-entry-sub">ไฮไลต์ข้อความในไฟล์ตัวอย่าง แล้วแทนด้วย <code>{{ตัวแปร}}</code> — คงเลย์เอาต์ Word เดิม</p>
+        <div class="tagger-entry-demo" aria-hidden="true">
+          <div class="tagger-demo-sheet">
+            <div class="tagger-demo-line muted">เรียน คุณ</div>
+            <div class="tagger-demo-line">
+              <mark>สมชาย ใจดี</mark>
+              <span class="tagger-demo-arrow">→</span>
+              <code>{{ชื่อ}}</code>
+            </div>
+            <div class="tagger-demo-line muted">วันที่ 1 พ.ย. 2569</div>
+            <div class="tagger-demo-line">
+              <mark>กรุงเทพฯ</mark>
+              <span class="tagger-demo-arrow">→</span>
+              <code>{{ที่อยู่}}</code>
+            </div>
+          </div>
+        </div>
+        <ol class="tagger-entry-steps">
+          <li><span class="tagger-step-body"><strong>อัปโหลด</strong> ไฟล์ .docx ตัวอย่าง</span></li>
+          <li><span class="tagger-step-body"><strong>ไฮไลต์</strong> ข้อความที่อยากเป็นช่องกรอก</span></li>
+          <li><span class="tagger-step-body"><strong>ดาวน์โหลด</strong> เทมเพลตพร้อม <code>{{ตัวแปร}}</code></span></li>
+        </ol>
         <button type="button" class="btn-primary tagger-entry-cta" id="startTaggerMode">เริ่มสร้างเทมเพลต</button>
       </section>
     </div>
@@ -2001,6 +3011,503 @@ async function callTemplateTag(file, replacements) {
   return data;
 }
 
+/** Pretty-print last model JSON (before validate) in a dialog. */
+async function showTaggerAiRawJson() {
+  if (!isAiStaffAdmin()) {
+    showBanner("ดู JSON ดิบได้เฉพาะแอดมินขึ้นไป");
+    return;
+  }
+  if (!taggerSession) return;
+  const rawAi = taggerSession.lastAiRaw;
+  const rawText = String(taggerSession.lastAiRawText || "").trim();
+  const validated = Array.isArray(taggerSession.lastAiValidated)
+    ? taggerSession.lastAiValidated
+    : [];
+  if (!rawAi && !rawText) {
+    showBanner("ยังไม่มี JSON จาก AI — กด AI ช่วยดราฟก่อน");
+    return;
+  }
+
+  let display = rawText;
+  if (rawAi) {
+    try {
+      display = JSON.stringify(rawAi, null, 2);
+    } catch {
+      display = rawText || String(rawAi);
+    }
+  }
+  const rawCount = Array.isArray(rawAi?.suggestions) ? rawAi.suggestions.length : "—";
+  const meta = `โมเดลส่งมา ${rawCount} ข้อ · ผ่าน validate ${validated.length} ข้อ`;
+
+  const existing = document.getElementById("taggerAiRawDialog");
+  if (existing) existing.remove();
+
+  const overlay = document.createElement("div");
+  overlay.id = "taggerAiRawDialog";
+  overlay.className = "dialog-overlay";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.innerHTML = `
+    <div class="dialog-card dialog-card-wide dialog-card-raw-json">
+      <h2 class="dialog-title">JSON ดิบจาก AI</h2>
+      <p class="dialog-body">${escapeHtml(meta)} — ก่อนระบบจับคู่/กรอง</p>
+      <pre class="tagger-ai-raw-pre" id="taggerAiRawPre">${escapeHtml(display)}</pre>
+      <div class="dialog-actions dialog-actions-stack">
+        <button type="button" class="btn-primary" data-raw-act="copy">คัดลอก</button>
+        <button type="button" class="btn-secondary" data-raw-act="download">ดาวน์โหลด .json</button>
+        <button type="button" class="btn-ghost" data-raw-act="close">ปิด</button>
+      </div>
+    </div>
+  `;
+
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener("keydown", onKey);
+  };
+  const onKey = (e) => {
+    if (e.key === "Escape") close();
+  };
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+  overlay.addEventListener("click", async (e) => {
+    const btn = /** @type {HTMLElement | null} */ (
+      e.target instanceof Element ? e.target.closest("[data-raw-act]") : null
+    );
+    if (!btn) return;
+    const act = btn.getAttribute("data-raw-act");
+    if (act === "close") {
+      close();
+      return;
+    }
+    if (act === "copy") {
+      try {
+        await navigator.clipboard.writeText(display);
+        showBanner("คัดลอก JSON แล้ว", "success");
+        setTimeout(() => showBanner(""), 2200);
+      } catch {
+        showBanner("คัดลอกไม่สำเร็จ");
+      }
+      return;
+    }
+    if (act === "download") {
+      const blob = new Blob([display], { type: "application/json;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ai-tag-raw-${Date.now()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+  });
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(overlay);
+}
+
+/**
+ * Ask AI for draft variables from the original .docx, then apply them immediately.
+ * Tags use source "ai" so the user can cancel unwanted ones.
+ */
+async function runTaggerAiDraft() {
+  if (!taggerSession?.originalFile) return;
+  if (taggerSession.busy || taggerSession.aiDrafting) return;
+
+  if (!aiStatus.connected && !getClientAiKey()) {
+    showBanner("ต้องใส่ AI API key ของคุณก่อน");
+    await connectGoogleAi();
+    if (!aiStatus.connected && !getClientAiKey()) return;
+  }
+
+  const activeProvider = getClientAiProvider();
+  if (!providerFormAiSupported(activeProvider)) {
+    showBanner(
+      providerFormAiNote(activeProvider) ||
+        "ผู้ให้บริการนี้ยังไม่รองรับ AI ดราฟตัวแปร — ใช้ Gemini / OpenAI / Claude",
+    );
+    return;
+  }
+
+  taggerSession.busy = true;
+  taggerSession.aiDrafting = true;
+  app.setAttribute("aria-busy", "true");
+  renderTaggerWorkspace();
+  const stopAiWaitBanner = startTaggerAiWaitBanner();
+
+  try {
+    await refreshAiLoginState();
+    const fd = new FormData();
+    fd.append("file", taggerSession.originalFile);
+    const byokKey = getClientAiKey();
+    const byokModel = getClientAiModel();
+    const byokProvider = getClientAiProvider();
+    if (byokKey) {
+      fd.append("geminiApiKey", byokKey);
+      fd.append("aiApiKey", byokKey);
+    }
+    if (byokModel) {
+      fd.append("geminiModel", byokModel);
+      fd.append("aiModel", byokModel);
+    }
+    if (byokProvider) fd.append("aiProvider", byokProvider);
+    fd.append("nameLanguage", getTaggerAiNameLanguage());
+
+    const res = await fetch("/api/template/suggest-tags", {
+      method: "POST",
+      body: fd,
+      headers: aiAuthHeaders(),
+    });
+    const data = await res.json().catch(() => ({}));
+    stopAiWaitBanner();
+    if (!res.ok) {
+      throw new Error(data.error || "AI ดราฟตัวแปรไม่สำเร็จ");
+    }
+
+    const staff = isAiStaffAdmin();
+    const rawAi =
+      staff &&
+      data.rawAi &&
+      typeof data.rawAi === "object" &&
+      !Array.isArray(data.rawAi)
+        ? data.rawAi
+        : null;
+    const rawText =
+      staff && typeof data.rawText === "string" ? data.rawText : "";
+    if (taggerSession) {
+      taggerSession.lastAiRaw = rawAi;
+      taggerSession.lastAiRawText = rawText;
+      taggerSession.lastAiValidated = Array.isArray(data.suggestions)
+        ? data.suggestions
+        : [];
+    }
+    if (staff) {
+      try {
+        console.groupCollapsed("[tagger AI] raw JSON");
+        console.log(rawText || rawAi);
+        console.log("validated", data.suggestions);
+        console.groupEnd();
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const rawList = Array.isArray(data.suggestions) ? data.suggestions : [];
+    if (!rawList.length) {
+      showBanner(
+        staff && (rawAi || rawText)
+          ? "AI ไม่พบจุดที่จับคู่ได้ — กด «ดู JSON ดิบ» เพื่อตรวจคำตอบจากโมเดล"
+          : "AI ไม่พบจุดที่น่าจะเป็นตัวแปร — ลองไฮไลต์สร้างเอง",
+      );
+      return;
+    }
+
+    const original = taggerSession.originalPlainText || "";
+    const occupied = [];
+    for (const r of taggerSession.replacements) {
+      if (isTaggerDeleteOp(r)) continue;
+      const start = ensureTaggerPlainStart(r, original);
+      if (typeof start === "number" && start >= 0) {
+        occupied.push({ start, end: start + String(r.plainText || "").length });
+      }
+    }
+    const usedNames = new Set(
+      taggerSession.replacements.map((r) => String(r.label || "").trim()).filter(Boolean),
+    );
+
+    /** @type {NonNullable<typeof taggerSession>['replacements']} */
+    const toAdd = [];
+    let n = 0;
+
+    /** Soft wrap spans: nested field replaces may sit fully inside. */
+    /** @type {{ start: number, end: number, soft?: boolean }[]} */
+    const softOccupied = occupied.map((r) => ({ ...r }));
+    // Existing list / list-table wraps count as soft so nested AI fields (incl. auto) stay valid.
+    for (const r of taggerSession.replacements) {
+      if (isTaggerDeleteOp(r)) continue;
+      if (r.kind !== "list" && r.kind !== "list-table") continue;
+      const start = ensureTaggerPlainStart(r, original);
+      if (typeof start !== "number" || start < 0) continue;
+      let occupyStart = start;
+      let occupyEnd = start + String(r.plainText || "").length;
+      const rps = Number(r.rowPlainStart);
+      const rpe = Number(r.rowPlainEnd);
+      if (
+        (r.kind === "list-table" || r.mode === "wrap-row") &&
+        Number.isFinite(rps) &&
+        Number.isFinite(rpe) &&
+        rpe > rps
+      ) {
+        occupyStart = rps;
+        occupyEnd = rpe;
+      }
+      softOccupied.push({ start: occupyStart, end: occupyEnd, soft: true });
+    }
+
+    const sortedRaw = rawList.slice().sort((a, b) => {
+      const ak = String(a?.kind || "").toLowerCase().replace(/_/g, "-");
+      const bk = String(b?.kind || "").toLowerCase().replace(/_/g, "-");
+      const am = String(a?.mode || "").toLowerCase().replace(/_/g, "-");
+      const bm = String(b?.mode || "").toLowerCase().replace(/_/g, "-");
+      const rank = (k, m) => {
+        if (k === "list" || k === "list-table" || m === "wrap" || m === "wrap-row") return 2;
+        if (m === "fill-empty-tc" || m === "fill-empty") return 1;
+        return 0;
+      };
+      return rank(bk, bm) - rank(ak, am);
+    });
+
+    /** @type {Map<string, number>} */
+    const wrapOccByTag = new Map();
+
+    for (const s of sortedRaw) {
+      const plain = String(s.plainText || "").trim();
+      if (!plain) continue;
+      let name = String(s.name || "").trim().replace(/^#+/, "");
+      if (!name || !/^[\w\u0E00-\u0E7F.-]+$/u.test(name)) continue;
+      // Same name at multiple spans is OK (one form field, many locations).
+      // Only rename when this name is already used by a different plainText in-session.
+      if (usedNames.has(name)) {
+        const clash = [...taggerSession.replacements, ...toAdd].some(
+          (r) =>
+            String(r.label || "").trim() === name &&
+            String(r.plainText || "").trim() !== plain,
+        );
+        if (clash) {
+          let i = 2;
+          while (usedNames.has(`${name}_${i}`) && i < 50) i += 1;
+          name = `${name}_${i}`;
+        }
+      }
+      /** @type {'text'|'bool'|'auto'|'list'|'list-table'} */
+      let kind = "text";
+      const k = String(s.kind || "text").toLowerCase().replace(/_/g, "-");
+      if (k === "bool" || k === "auto" || k === "list" || k === "list-table") kind = k;
+      const isList = kind === "list" || kind === "list-table";
+      const trueText = kind === "bool" ? String(s.trueText ?? "√") : "";
+      const falseText = kind === "bool" ? String(s.falseText ?? "") : "";
+      const modeFromServer = String(s.mode || "").toLowerCase().replace(/_/g, "-");
+      /** @type {'replace'|'wrap'|'wrap-row'|'fill-empty-tc'} */
+      let mode = "replace";
+      if (kind === "list-table" || modeFromServer === "wrap-row") {
+        kind = "list-table";
+        mode = "wrap-row";
+      } else if (kind === "list" || modeFromServer === "wrap") {
+        kind = "list";
+        mode = "wrap";
+      } else if (
+        modeFromServer === "fill-empty-tc" ||
+        modeFromServer === "fill-empty"
+      ) {
+        mode = "fill-empty-tc";
+      }
+      const cellIndexRaw = Number(s.cellIndex);
+      const hasCellIndex = Number.isFinite(cellIndexRaw) && cellIndexRaw >= 0;
+      if (mode === "fill-empty-tc" && !hasCellIndex) continue;
+      if (mode === "fill-empty-tc" && (kind === "list" || kind === "list-table")) {
+        kind = "text";
+      }
+      const closeTag = isList
+        ? String(s.closeTag || "{{/}}").trim() || "{{/}}"
+        : undefined;
+
+      let occ = Number(s.occurrence);
+      if (!Number.isFinite(occ) || occ < 0) occ = 0;
+      let plainStart =
+        typeof s.plainStart === "number" && s.plainStart >= 0
+          ? s.plainStart
+          : nthOccurrenceStart(original, plain, occ);
+      if (plainStart < 0) continue;
+      const end = plainStart + plain.length;
+      // list-table: soft-occupy the full <w:tr> when the server sent row bounds,
+      // so first-cell "1" + other cell replaces nest instead of partially colliding.
+      const rowPlainStart = Number(s.rowPlainStart);
+      const rowPlainEnd = Number(s.rowPlainEnd);
+      const hasRowSpan =
+        (kind === "list-table" || mode === "wrap-row") &&
+        Number.isFinite(rowPlainStart) &&
+        Number.isFinite(rowPlainEnd) &&
+        rowPlainEnd > rowPlainStart;
+      const occupyStart = hasRowSpan ? rowPlainStart : plainStart;
+      const occupyEnd = hasRowSpan ? rowPlainEnd : end;
+
+      // auto / {{+name}} only inside list or list-table soft wraps; stray → text.
+      if (kind === "auto") {
+        const insideList =
+          softOccupied.some(
+            (r) => r.soft && plainStart >= r.start && end <= r.end,
+          ) ||
+          (mode === "fill-empty-tc" &&
+            softOccupied.some(
+              (r) => r.soft && plainStart >= r.start && plainStart < r.end,
+            ));
+        if (!insideList) kind = "text";
+      }
+
+      const serverTag = typeof s.tag === "string" && s.tag ? s.tag : "";
+      // Rebuild when demoting auto→text so we never keep a stray {{+…}} from the server.
+      const mustRebuildTag =
+        !serverTag || (kind === "text" && /^\{\{\+/.test(serverTag));
+      const tag = isList
+        ? serverTag || `{{#${name}}}`
+        : mustRebuildTag
+          ? buildTaggerTag(kind, name, trueText, falseText)
+          : serverTag;
+
+      const overlapsUnsafe = softOccupied.some((r) => {
+        if (!(plainStart < r.end && end > r.start)) return false;
+        // Nested field / empty-cell fill fully inside a list wrap is OK; wraps never nest.
+        if (!isList && r.soft && plainStart >= r.start && end <= r.end) return false;
+        // fill-empty-tc uses the row anchor (may equal wrap plain) — allow on soft wraps.
+        if (
+          !isList &&
+          mode === "fill-empty-tc" &&
+          r.soft &&
+          plainStart >= r.start &&
+          plainStart < r.end
+        ) {
+          return false;
+        }
+        return true;
+      });
+      if (overlapsUnsafe) continue;
+
+      const id = `ai_${Date.now().toString(36)}_${n++}_${name}`;
+      /** @type {NonNullable<typeof taggerSession>['replacements'][number]} */
+      const op = {
+        id,
+        plainText: plain,
+        occurrence: occ,
+        plainStart,
+        tag,
+        mode,
+        kind,
+        label: name,
+        source: "ai",
+        ...(closeTag ? { closeTag } : {}),
+        ...(kind === "bool" ? { trueText, falseText } : {}),
+      };
+
+      if (mode === "fill-empty-tc") {
+        op.cellIndex = cellIndexRaw;
+        const tableIndex = Number(s.tableIndex);
+        const rowIndexInTable = Number(s.rowIndexInTable);
+        if (Number.isFinite(tableIndex) && tableIndex >= 0) op.tableIndex = tableIndex;
+        if (Number.isFinite(rowIndexInTable) && rowIndexInTable >= 0) {
+          op.rowIndexInTable = rowIndexInTable;
+        }
+        let wrapTag = typeof s.wrapTag === "string" ? s.wrapTag.trim() : "";
+        let wrapOccurrence = Number(s.wrapOccurrence);
+        if (!wrapTag) {
+          // Bind to the soft wrap that covers this row anchor (full row span preferred).
+          const parent = [...toAdd]
+            .reverse()
+            .find((r) => {
+              if (!(r.mode === "wrap-row" || r.kind === "list-table")) return false;
+              if (typeof r.plainStart !== "number") return false;
+              const rStart = Number(r.rowPlainStart);
+              const rEnd = Number(r.rowPlainEnd);
+              if (Number.isFinite(rStart) && Number.isFinite(rEnd) && rEnd > rStart) {
+                return plainStart >= rStart && plainStart < rEnd;
+              }
+              return (
+                plainStart >= r.plainStart &&
+                end <= r.plainStart + String(r.plainText || "").length
+              );
+            });
+          if (parent) {
+            wrapTag = parent.tag;
+            wrapOccurrence = wrapOccByTag.has(wrapTag)
+              ? /** @type {number} */ (wrapOccByTag.get(wrapTag)) - 1
+              : 0;
+          }
+        }
+        if (wrapTag) {
+          op.wrapTag = wrapTag;
+          op.wrapOccurrence =
+            Number.isFinite(wrapOccurrence) && wrapOccurrence >= 0 ? wrapOccurrence : 0;
+        }
+        // Do not hard-occupy the row anchor — it is shared with the list wrap / siblings.
+        toAdd.push(op);
+        usedNames.add(name);
+        continue;
+      }
+
+      if (isList && hasRowSpan) {
+        op.rowPlainStart = rowPlainStart;
+        op.rowPlainEnd = rowPlainEnd;
+      }
+
+      // Nested replace inside a list-table: keep wrapTag when the server sent it.
+      if (!isList && mode === "replace") {
+        const wrapTag = typeof s.wrapTag === "string" ? s.wrapTag.trim() : "";
+        const wrapOccurrence = Number(s.wrapOccurrence);
+        if (wrapTag) {
+          op.wrapTag = wrapTag;
+          op.wrapOccurrence =
+            Number.isFinite(wrapOccurrence) && wrapOccurrence >= 0 ? wrapOccurrence : 0;
+        }
+        if (hasCellIndex) op.cellIndex = cellIndexRaw;
+      }
+
+      toAdd.push(op);
+      if (isList) {
+        const nextOcc = (wrapOccByTag.get(tag) || 0) + 1;
+        wrapOccByTag.set(tag, nextOcc);
+      }
+      softOccupied.push({
+        start: occupyStart,
+        end: occupyEnd,
+        soft: isList,
+      });
+      usedNames.add(name);
+    }
+
+    if (!toAdd.length) {
+      showBanner("ข้อเสนอจาก AI ทับแท็กที่มีอยู่แล้ว หรือจับคู่ข้อความไม่ได้ — ลองสร้างเอง");
+      return;
+    }
+
+    showBanner("กำลังใส่แท็กจากข้อเสนอ AI…", "progress");
+    const ok = await commitTaggerOps(toAdd);
+    if (ok) {
+      showBanner(
+        `สร้างแล้ว ${toAdd.length} รายการจาก AI — ตรวจทานแล้วค่อยดาวน์โหลด · อันไม่เอาให้คลิกแท็กแล้วกดยกเลิกแท็ก`,
+        "success",
+      );
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "AI ดราฟตัวแปรไม่สำเร็จ";
+    showBanner(msg);
+  } finally {
+    stopAiWaitBanner?.();
+    if (taggerSession) {
+      taggerSession.busy = false;
+      taggerSession.aiDrafting = false;
+    }
+    app.removeAttribute("aria-busy");
+    renderTaggerWorkspace();
+  }
+}
+
+/** Rotating progress copy while the model reads the full document. */
+function startTaggerAiWaitBanner() {
+  const lines = [
+    "กำลังส่งเอกสารให้ AI อ่านทั้งไฟล์…",
+    "AI กำลังหาจุดที่น่าจะเป็นตัวแปร…",
+    "อาจใช้เวลาสักครู่ ตามขนาดไฟล์และโมเดลที่เลือก",
+  ];
+  const modelNote = "ความแม่นยำขึ้นอยู่กับโมเดลที่ใช้";
+  let i = 0;
+  const paint = () => {
+    showBanner(lines[i % lines.length] || lines[0], "progress", { note: modelNote });
+  };
+  paint();
+  const timer = setInterval(() => {
+    i += 1;
+    paint();
+  }, 4200);
+  return () => clearInterval(timer);
+}
+
 function base64ToFile(b64, filename) {
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
@@ -2195,12 +3702,13 @@ function renderTaggerWorkspace() {
                 ? { hint: "ติ๊ก", cls: "is-bool" }
                 : { hint: "ข้อความ", cls: "is-text" };
       const fromFile = r.source === "existing";
+      const fromAi = r.source === "ai";
       const srcText = fromFile
         ? "ในไฟล์เดิม · แก้ชื่อได้ / ยกเลิกไม่ได้"
         : `${r.plainText.slice(0, 48)}${r.plainText.length > 48 ? "…" : ""}`;
       return `
-      <button type="button" class="tagger-chip-list-item ${kindMeta.cls}${fromFile ? " is-existing" : ""}" data-tagger-edit="${escapeAttr(r.id)}" title="${fromFile ? "คลิกเพื่อแก้ไขแท็กในไฟล์" : "คลิกเพื่อแก้หรือยกเลิก"}">
-        <span class="tagger-chip-kind">${escapeHtml(kindMeta.hint)}${fromFile ? " · ไฟล์เดิม" : ""}</span>
+      <button type="button" class="tagger-chip-list-item ${kindMeta.cls}${fromFile ? " is-existing" : ""}${fromAi ? " is-ai" : ""}" data-tagger-edit="${escapeAttr(r.id)}" title="${fromFile ? "คลิกเพื่อแก้ไขแท็กในไฟล์" : "คลิกเพื่อแก้หรือยกเลิก"}">
+        <span class="tagger-chip-kind">${escapeHtml(kindMeta.hint)}${fromFile ? " · ไฟล์เดิม" : fromAi ? " · AI" : ""}</span>
         <code>${escapeHtml(label)}</code>
         <span class="tagger-chip-src">${escapeHtml(srcText)}</span>
       </button>`;
@@ -2215,6 +3723,29 @@ function renderTaggerWorkspace() {
     endTaggerChipRepResolve();
   }
 
+  const taggerAiOn = !!(aiStatus.connected || getClientAiKey());
+  const taggerAiKeyTitle = taggerAiOn
+    ? `คีย์「${getClientAiLabel() || aiStatus.entryLabel || "AI"}」· ${aiStatus.providerLabel || providerLabel(getClientAiProvider())} · ${aiStatus.model || getClientAiModel() || ""} — เลือก provider / โมเดล / คีย์`
+    : "ใส่ AI API key ของคุณ (หลายเจ้าได้ · เก็บในเบราว์เซอร์)";
+  const taggerAiKeyLabel = taggerAiOn
+    ? `AI · ${escapeHtml(getClientAiLabel() || aiStatus.providerLabel || String(aiStatus.model || getClientAiModel() || "พร้อม").replace(/^gemini-/i, ""))}`
+    : "เลือก model";
+  const taggerAiDrafting = !!s.aiDrafting;
+  const taggerAiKeyDisabled = s.busy || taggerAiDrafting ? "disabled" : "";
+  const taggerAiDraftLabel = taggerAiDrafting
+    ? `<span class="btn-spinner" aria-hidden="true"></span><span>AI กำลังอ่านเอกสาร…</span>`
+    : "AI ช่วยดราฟ";
+  const taggerAiDraftTitle = taggerAiDrafting
+    ? "กำลังรอโมเดลอ่านทั้งไฟล์และเสนอจุดแท็ก — อาจใช้เวลาสักครู่"
+    : "ส่งเอกสารเต็มให้ AI อ่านแล้วตัดสินใจจุดที่เป็นตัวแปรเอง — ระบบจับคู่ label/ค่ากับข้อความจริง · ใช้คีย์/โมเดลที่เลือกไว้";
+  const taggerNameLang = getTaggerAiNameLanguage();
+  const cancelableTagCount = s.replacements.filter((r) => r.source !== "existing").length;
+  const cancelAllDisabled =
+    cancelableTagCount === 0 || s.busy || taggerAiDrafting ? "disabled" : "";
+  const cancelAllTitle =
+    cancelableTagCount === 0
+      ? "ไม่มีแท็กที่ยกเลิกได้ (แท็กจากไฟล์เดิมยกเลิกไม่ได้)"
+      : `ยกเลิกแท็กที่สร้างในเซสชันนี้ ${cancelableTagCount} รายการ — แท็กจากไฟล์เดิมยังอยู่`;
   removeTaggerDialogPortals();
   app.innerHTML = `
     <div class="file-chip">
@@ -2224,19 +3755,41 @@ function renderTaggerWorkspace() {
         <button type="button" class="linkish" id="taggerCancel">ยกเลิก</button>
       </div>
     </div>
+    <div class="tagger-ai-row tagger-ai-row-top">
+      <button type="button" class="btn-secondary btn-compact tagger-ai-key-btn ${taggerAiOn ? "is-ai-on" : ""}" id="taggerAiKeyBtn" ${taggerAiKeyDisabled} title="${escapeAttr(taggerAiKeyTitle)}">
+        ${taggerAiKeyLabel}
+      </button>
+      <label class="tagger-name-lang" title="ภาษาของชื่อตัวแปรที่ AI เสนอ — ไทย เช่น ลำดับ · English เช่น defendant_no">
+        <span class="tagger-name-lang-label">ชื่อ</span>
+        <select id="taggerAiNameLang" ${taggerAiKeyDisabled} aria-label="ภาษาชื่อตัวแปร AI">
+          <option value="th" ${taggerNameLang === "th" ? "selected" : ""}>ไทย</option>
+          <option value="en" ${taggerNameLang === "en" ? "selected" : ""}>EN</option>
+        </select>
+      </label>
+      <button type="button" class="btn-secondary tagger-ai-draft-btn${taggerAiDrafting ? " is-loading" : ""}" id="taggerAiDraft" ${taggerAiKeyDisabled}${taggerAiDrafting ? ' aria-busy="true"' : ""} title="${escapeAttr(taggerAiDraftTitle)}">${taggerAiDraftLabel}</button>
+      ${
+        isAiStaffAdmin() && (s.lastAiRaw || s.lastAiRawText)
+          ? `<button type="button" class="btn-secondary btn-compact" id="taggerAiRawBtn" ${taggerAiDrafting ? "disabled" : ""} title="ดู JSON ดิบที่โมเดลตอบก่อน validate (แอดมิน)">ดู JSON ดิบ</button>`
+          : ""
+      }
+    </div>
     <p class="tagger-help">ลากเลือกข้อความในพรีวิว แล้วใช้ปุ่มลอยข้างช่วงที่เลือก: <strong>สร้างตัวแปร</strong> · <strong>ลบแถว</strong> · <strong>คัดลอกข้อความ</strong> — ข้อความ <code>{{ชื่อ}}</code> · รันเลข <code>{{+ชื่อ}}</code> (ในลูป) · <strong>ลิสต์ย่อหน้า</strong> / <strong>ตาราง</strong> ด้วย <code>{{#รายการ}}…{{/}}</code></p>
     <div class="doc-sheet tagger-sheet" id="taggerPreview">
-      <div class="doc-sheet-label">พรีวิวเอกสาร (เลือกข้อความได้)</div>
+      <div class="doc-sheet-label">
+        <span class="doc-sheet-label-text">พรีวิวเอกสาร (เลือกข้อความได้)</span>
+        <div class="doc-sheet-label-actions">
+          <button type="button" class="btn-secondary btn-compact danger" id="taggerCancelAll" ${cancelAllDisabled} title="${escapeAttr(cancelAllTitle)}">ยกเลิกทั้งหมด</button>
+          <button type="button" class="tagger-toolbar-undo" id="taggerCancelAllUndoBtn" hidden aria-hidden="true" title="เลิกทำ">เลิกทำ</button>
+        </div>
+      </div>
       <div class="doc-body tagger-select-root" id="taggerSelectRoot">${previewHtml}</div>
     </div>
     <div class="tagger-chip-bar" id="taggerChipBar" ${s.replacements.length ? "" : "hidden"}>
-      <span class="tagger-chip-bar-label">รายการแท็ก (คลิกเพื่อแก้ไข · แท็กจากไฟล์เดิมยกเลิกไม่ได้)</span>
+      <span class="tagger-chip-bar-label">รายการแท็ก (คลิกเพื่อแก้ไข · แท็ก AI/มือยกเลิกได้ · จากไฟล์เดิมยกเลิกไม่ได้)</span>
       <div class="tagger-chip-list">${chips}</div>
     </div>
     <div class="sticky-bar tagger-actions">
-      <button type="button" class="btn-primary" id="taggerCreateFromSel" disabled title="ลากเลือกข้อความในพรีวิวก่อน">สร้างจากที่เลือก</button>
-      <button type="button" class="btn-secondary" id="taggerDownload" ${(s.taggedFile || s.replacements.length) && !s.busy ? "" : "disabled"}>ดาวน์โหลดเทมเพลต</button>
-      <button type="button" class="btn-primary" id="taggerOpenFill" ${(s.taggedFile || s.replacements.length) && !s.busy ? "" : "disabled"}>ใช้กรอกต่อ</button>
+      <button type="button" class="btn-secondary" id="taggerDownload" ${(s.taggedFile || s.replacements.length) && !s.busy && !taggerAiDrafting ? "" : "disabled"}>ดาวน์โหลดเทมเพลต</button>
     </div>
     <button type="button" class="tagger-float-btn" id="taggerCreateBtn" hidden aria-hidden="true">สร้างตัวแปร</button>
     <button type="button" class="tagger-float-btn tagger-float-delete" id="taggerDeleteBtn" hidden aria-hidden="true">ลบแถว</button>
@@ -2315,13 +3868,31 @@ function renderTaggerWorkspace() {
   portalTaggerDialogsToBody();
 
   document.getElementById("taggerCancel")?.addEventListener("click", () => {
+    clearTaggerCancelAllUndo();
     taggerSession = null;
     taggerPendingSelection = null;
     renderEmpty();
   });
+  document.getElementById("taggerCancelAll")?.addEventListener("click", () => {
+    void cancelAllTaggerReplacements();
+  });
+  document.getElementById("taggerCancelAllUndoBtn")?.addEventListener("click", () => {
+    void undoTaggerCancelAll();
+  });
+  document.getElementById("taggerAiKeyBtn")?.addEventListener("click", () => {
+    void connectGoogleAi();
+  });
+  document.getElementById("taggerAiNameLang")?.addEventListener("change", (e) => {
+    const el = /** @type {HTMLSelectElement} */ (e.target);
+    setTaggerAiNameLanguage(el?.value || "th");
+  });
+  document.getElementById("taggerAiRawBtn")?.addEventListener("click", () => {
+    void showTaggerAiRawJson();
+  });
+  document.getElementById("taggerAiDraft")?.addEventListener("click", () => {
+    void runTaggerAiDraft();
+  });
   document.getElementById("taggerDownload")?.addEventListener("click", () => downloadTaggedTemplate());
-  document.getElementById("taggerOpenFill")?.addEventListener("click", () => openTaggedInFillForm());
-  document.getElementById("taggerCreateFromSel")?.addEventListener("click", () => openTaggerCreateDialog());
   document.getElementById("taggerCreateBtn")?.addEventListener("click", () => openTaggerCreateDialog());
   document.getElementById("taggerDeleteBtn")?.addEventListener("click", () => openTaggerDeleteDialog());
   document.getElementById("taggerCopyBtn")?.addEventListener("click", () => void copyTaggerSelectionText());
@@ -2381,6 +3952,12 @@ function renderTaggerWorkspace() {
   }
 
   bindTaggerSelection();
+  if (taggerCancelUndos.some((e) => e.mode === "toolbar")) {
+    placeTaggerCancelAllToolbarUndo();
+  }
+  if (taggerCancelUndos.some((e) => e.mode === "inline")) {
+    placeAllTaggerInlineUndos();
+  }
 }
 
 /**
@@ -2570,6 +4147,68 @@ function previewRowIndexToOriginal(tableIndex, previewRowIndex) {
     if (d <= orig) orig += 1;
   }
   return orig;
+}
+
+/**
+ * Inverse of previewRowIndexToOriginal — locate a live preview <tr> from a Word row index.
+ * @param {number} tableIndex
+ * @param {number} originalRowIndex
+ */
+function originalRowIndexToPreview(tableIndex, originalRowIndex) {
+  let preview = originalRowIndex;
+  if (!taggerSession?.replacements?.length) return preview;
+  const prior = taggerSession.replacements
+    .filter(
+      (r) =>
+        (r.mode === "delete-tr" || r.kind === "delete-tr") &&
+        r.tableIndex === tableIndex &&
+        typeof r.rowIndexInTable === "number",
+    )
+    .map((r) => /** @type {number} */ (r.rowIndexInTable))
+    .sort((a, b) => a - b);
+  for (const d of prior) {
+    if (d < originalRowIndex) preview -= 1;
+  }
+  return preview;
+}
+
+/**
+ * Resolve a live preview <td>/<th> for a bare-cell undo pin.
+ * @param {Pick<TaggerCancelUndoEntry, 'tableIndex'|'rowIndexInTable'|'cellIndex'|'domCellIndex'>} entry
+ * @returns {HTMLElement | null}
+ */
+function findTaggerPreviewCellForUndo(entry) {
+  const root = /** @type {HTMLElement | null} */ (document.getElementById("taggerSelectRoot"));
+  if (!root) return null;
+  const tableIndex = Number(entry.tableIndex);
+  if (!Number.isFinite(tableIndex) || tableIndex < 0) return null;
+  const tables = [...root.querySelectorAll("table.doc-table, table")];
+  const table = tables[tableIndex];
+  if (!table) return null;
+  const rows = /** @type {HTMLTableRowElement[]} */ ([...table.querySelectorAll("tr")]);
+  const origRow = Number(entry.rowIndexInTable);
+  let previewRow = Number.isFinite(origRow) && origRow >= 0
+    ? originalRowIndexToPreview(tableIndex, origRow)
+    : -1;
+  if (!(previewRow >= 0 && previewRow < rows.length)) {
+    // No row pin — can't safely guess among tables.
+    if (!(Number.isFinite(origRow) && origRow >= 0)) return null;
+    previewRow = Math.min(rows.length - 1, Math.max(0, origRow));
+  }
+  const tr = rows[previewRow];
+  if (!tr) return null;
+  const cells = /** @type {HTMLElement[]} */ ([
+    ...tr.querySelectorAll(":scope > td, :scope > th"),
+  ]);
+  const domIdx = Number(entry.domCellIndex);
+  if (Number.isFinite(domIdx) && domIdx >= 0 && domIdx < cells.length) {
+    return cells[domIdx];
+  }
+  const cellIdx = Number(entry.cellIndex);
+  if (Number.isFinite(cellIdx) && cellIdx >= 0 && cellIdx < cells.length) {
+    return cells[cellIdx];
+  }
+  return cells[0] || null;
 }
 
 /**
@@ -3222,7 +4861,7 @@ function syncTaggerFloatButton(root, floatBtnHint) {
   // Opening a dialog / clicking float controls collapses the live range.
   // selectionchange then syncs with null — never wipe a good snapshot here.
   // Pending is cleared explicitly when the user starts a new drag (onPointerDown).
-  if (!isTaggerCreateDialogOpen() && !isTaggerDeleteDialogOpen() && info) {
+  if (!isAnyTaggerDialogOpen() && info) {
     taggerPendingSelection = info;
   }
   // Create/delete need a mappable selection (occurrence). Live text alone is not enough —
@@ -3240,17 +4879,7 @@ function syncTaggerFloatButton(root, floatBtnHint) {
     });
   }
 
-  const fromSelBtn = /** @type {HTMLButtonElement | null} */ (
-    document.getElementById("taggerCreateFromSel")
-  );
-  if (fromSelBtn) {
-    fromSelBtn.disabled = !hasText || busy;
-    fromSelBtn.title = hasText
-      ? `สร้างตัวแปรจาก “${previewCopiedText(info?.plainText || "", 32)}”`
-      : "ลากเลือกข้อความในพรีวิวก่อน";
-  }
-
-  if (!hasText || busy) {
+  if (!hasText || busy || isAnyTaggerDialogOpen()) {
     hideCreateUi();
     return;
   }
@@ -3365,7 +4994,7 @@ function bindTaggerSelection() {
     const t = /** @type {HTMLElement} */ (e.target);
     if (
       t?.closest?.(
-        ".tagger-chip, .tagger-row-group, .tagger-row-act, .tagger-row-list-edit, .tagger-row-edit-tags, #taggerCreateBtn, #taggerDeleteBtn, #taggerCopyBtn",
+        ".tagger-chip, .tagger-row-group, .tagger-row-act, .tagger-row-list-edit, .tagger-row-edit-tags, .tagger-inline-undo, #taggerCreateBtn, #taggerDeleteBtn, #taggerCopyBtn",
       )
     ) {
       return;
@@ -4084,7 +5713,9 @@ function isTaggerUiChrome(el) {
     node.hasAttribute("data-tagger-row-chrome") ||
     node.classList.contains("tagger-row-group") ||
     node.classList.contains("tagger-row-act") ||
-    node.classList.contains("tagger-list-frame-label")
+    node.classList.contains("tagger-list-frame-label") ||
+    node.classList.contains("tagger-inline-undo") ||
+    !!node.closest?.(".tagger-inline-undo")
   );
 }
 
@@ -4196,18 +5827,21 @@ function overlapsExistingTaggerPlain(plain, occ, extra = []) {
 
 /**
  * Pure-digit needles must not be a *prefix* of a longer number — "2" ≠ leading
- * digit of "281". Short runnos also must not steal "1" from "1โฉนด…". Longer IDs
- * (tax / ทะเบียน) often sit flush against the next Thai label with no tab —
- * those must still match. Only the next char is checked (left digit OK).
+ * digit of "281", "3" inside "02-023-2599", or "1" from "1โฉนด…". Longer IDs
+ * (tax / ทะเบียน) flush against a following Thai label still match.
  * @param {string} haystack
  * @param {number} idx
  * @param {string} needle
  */
 function plainMatchAllowed(haystack, idx, needle) {
   if (!/^\d+$/.test(needle)) return true;
-  const next = haystack[idx + needle.length] || "";
+  const end = idx + needle.length;
+  const next = haystack[end] || "";
+  const prev = idx > 0 ? haystack[idx - 1] : "";
   if (/\d/.test(next)) return false;
   if (needle.length <= 4 && /[\u0E00-\u0E7F]/u.test(next)) return false;
+  if (/[\d\-/.]/.test(prev)) return false;
+  if (/[\-/.]/.test(next)) return false;
   return true;
 }
 
@@ -5144,6 +6778,7 @@ function openTaggerCreateDialog() {
     err.hidden = true;
     err.textContent = "";
   }
+  hideAllTaggerFloatBtns();
   dlg.hidden = false;
   nameInput.focus();
   nameInput.select();
@@ -5162,6 +6797,25 @@ function isTaggerCreateDialogOpen() {
 function isTaggerDeleteDialogOpen() {
   const dlg = document.getElementById("taggerDeleteDialog");
   return !!(dlg && !dlg.hidden);
+}
+
+function isTaggerEditDialogOpen() {
+  const dlg = document.getElementById("taggerEditDialog");
+  return !!(dlg && !dlg.hidden);
+}
+
+function isAnyTaggerDialogOpen() {
+  return (
+    isTaggerCreateDialogOpen() ||
+    isTaggerDeleteDialogOpen() ||
+    isTaggerEditDialogOpen()
+  );
+}
+
+function hideAllTaggerFloatBtns() {
+  hideTaggerFloatEl(document.getElementById("taggerCreateBtn"));
+  hideTaggerFloatEl(document.getElementById("taggerDeleteBtn"));
+  hideTaggerFloatEl(document.getElementById("taggerCopyBtn"));
 }
 
 function closeTaggerDeleteDialog() {
@@ -5258,6 +6912,7 @@ function openTaggerDeleteDialogWithOps(built) {
   }
   const confirmBtn = document.getElementById("taggerDeleteConfirm");
   if (confirmBtn) confirmBtn.setAttribute("data-ops", JSON.stringify(built.ops));
+  hideAllTaggerFloatBtns();
   if (dlg) dlg.hidden = false;
 }
 
@@ -5908,6 +7563,7 @@ function openTaggerEditDialog(id) {
     removeBtn.hidden = fromFile;
     removeBtn.disabled = fromFile;
   }
+  hideAllTaggerFloatBtns();
   if (dlg) dlg.hidden = false;
   if (!isDelete) {
     syncTaggerEditKindFields();
@@ -6132,6 +7788,7 @@ function collectTaggerRemovalIds(r) {
 
 async function removeTaggerReplacement(id) {
   if (!taggerSession) return;
+  if (taggerSession.busy || taggerSession.aiDrafting) return;
   const r = taggerSession.replacements.find((x) => x.id === id);
   if (r?.source === "existing") {
     showBanner("แท็กจากไฟล์เดิมยกเลิกไม่ได้ — ไม่มีข้อความต้นฉบับเหลืออยู่");
@@ -6140,18 +7797,712 @@ async function removeTaggerReplacement(id) {
   if (!r) return;
   const removeIds = collectTaggerRemovalIds(r);
   const droppedChildren = removeIds.size - 1;
+  const original = taggerSession.originalPlainText || "";
+  const anchorStart = ensureTaggerPlainStart(r, original);
+  const rowStart = Number(r.rowPlainStart);
+  const rowEnd = Number(r.rowPlainEnd);
+  const useRow =
+    (r.mode === "wrap-row" || r.kind === "list-table") &&
+    Number.isFinite(rowStart) &&
+    Number.isFinite(rowEnd) &&
+    rowEnd > rowStart;
+  const plainStart = useRow
+    ? rowStart
+    : typeof anchorStart === "number"
+      ? anchorStart
+      : -1;
+  const plainLen = useRow
+    ? rowEnd - rowStart
+    : Math.max(1, String(r.plainText || "").length);
+  // Empty-cell fills (and whitespace-only cells) have nothing to wrap after cancel —
+  // park a bare U-turn on the cell itself.
+  const bareCell =
+    r.mode === "fill-empty-tc" ||
+    ((typeof r.cellIndex === "number" || typeof r.domCellIndex === "number") &&
+      !String(r.plainText || "").trim());
+  const label = String(r.label || r.tag || "").trim();
+  const snapshotReplacements = taggerSession.replacements.map((x) => ({ ...x }));
+  const snapshotTagged = taggerSession.taggedFile;
+  // Keep prior inline U-turns for their full 10s — only drop toolbar cancel-all undo.
+  clearTaggerToolbarUndoOnly();
   taggerSession.replacements = taggerSession.replacements.filter((x) => !removeIds.has(x.id));
   const dlg = document.getElementById("taggerEditDialog");
   if (dlg) dlg.hidden = true;
   // If only identity/existing ops remain, keep downloadable file.
   const ok = await applyTaggerReplacements();
-  if (ok && !taggerSession.replacements.length) {
+  if (!ok || !taggerSession) return;
+  if (!taggerSession.replacements.length) {
     taggerSession.taggedFile = taggerSession.originalFile;
   }
-  if (ok && droppedChildren > 0) {
-    showBanner(`ยกเลิกลิสต์แล้ว — ลบแท็กในลิสต์ ${droppedChildren} รายการด้วย`, "success");
-    setTimeout(() => showBanner(""), 2800);
+  const tip =
+    droppedChildren > 0
+      ? `เลิกทำ — คืนลิสต์และแท็กในลิสต์ ${droppedChildren} รายการ`
+      : label
+        ? `เลิกทำ — คืน ${label}`
+        : "เลิกทำ — คืนแท็กนี้";
+  armTaggerCancelUndo(snapshotReplacements, snapshotTagged, {
+    mode: "inline",
+    plainStart: bareCell ? -1 : plainStart,
+    plainLen: bareCell ? 0 : plainLen,
+    tip,
+    bareCell,
+    ...(typeof r.tableIndex === "number" && r.tableIndex >= 0
+      ? { tableIndex: r.tableIndex }
+      : {}),
+    ...(typeof r.rowIndexInTable === "number" && r.rowIndexInTable >= 0
+      ? { rowIndexInTable: r.rowIndexInTable }
+      : {}),
+    ...(typeof r.cellIndex === "number" && r.cellIndex >= 0 ? { cellIndex: r.cellIndex } : {}),
+    ...(typeof r.domCellIndex === "number" && r.domCellIndex >= 0
+      ? { domCellIndex: r.domCellIndex }
+      : {}),
+  });
+}
+
+/** Session/AI (and delete) tags — not source === "existing" file markers. */
+function countCancelableTaggerReplacements() {
+  return taggerSession?.replacements.filter((r) => r.source !== "existing").length || 0;
+}
+
+/**
+ * 「เลิกทำ」 queue after cancel-one / cancel-all (no confirm dialog).
+ * - inline: U-turn after each restored span; each entry keeps its own 10s timer
+ * - toolbar: single U-turn after 「ยกเลิกทั้งหมด」 (exclusive; clears inline queue)
+ * - bareCell: empty / whitespace table cell — show a lone U-turn in the cell (no text wrap)
+ * @typedef {{
+ *   id: string,
+ *   replacements: NonNullable<typeof taggerSession>['replacements'],
+ *   taggedFile: File | null,
+ *   timer: ReturnType<typeof setTimeout>,
+ *   mode: 'inline' | 'toolbar',
+ *   plainStart?: number,
+ *   plainLen?: number,
+ *   tip?: string,
+ *   bareCell?: boolean,
+ *   tableIndex?: number,
+ *   rowIndexInTable?: number,
+ *   cellIndex?: number,
+ *   domCellIndex?: number,
+ * }} TaggerCancelUndoEntry
+ * @type {TaggerCancelUndoEntry[]}
+ */
+let taggerCancelUndos = [];
+const TAGGER_CANCEL_UNDO_MS = 10_000;
+let taggerCancelUndoSeq = 0;
+
+const TAGGER_UNDO_UTURN_SVG =
+  '<svg class="tagger-inline-undo-icon" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" focusable="false"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M11.5 2.5v6.25a3.25 3.25 0 0 1-3.25 3.25H3.5"/><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M5.75 9.5 3.5 11.75 5.75 14"/></svg>';
+
+function hideTaggerToolbarUndoBtn() {
+  const btn = /** @type {HTMLButtonElement | null} */ (
+    document.getElementById("taggerCancelAllUndoBtn")
+  );
+  if (!btn) return;
+  btn.hidden = true;
+  btn.setAttribute("aria-hidden", "true");
+  btn.removeAttribute("aria-label");
+  btn.removeAttribute("data-undo-id");
+  btn.title = "เลิกทำ";
+  btn.innerHTML = "เลิกทำ";
+}
+
+/** Strip inline U-turn DOM only (queue timers stay). */
+function stripTaggerInlineUndoDom() {
+  document.querySelectorAll(".tagger-inline-undo").forEach((el) => el.remove());
+  document.querySelectorAll(".tagger-undo-highlight").forEach((el) => {
+    const parent = el.parentNode;
+    if (!parent) {
+      el.remove();
+      return;
+    }
+    while (el.firstChild) parent.insertBefore(el.firstChild, el);
+    parent.removeChild(el);
+    parent.normalize?.();
+  });
+}
+
+function removeTaggerInlineUndoBtn() {
+  stripTaggerInlineUndoDom();
+  hideTaggerToolbarUndoBtn();
+}
+
+/** @param {string} id */
+function dismissTaggerCancelUndo(id) {
+  const idx = taggerCancelUndos.findIndex((e) => e.id === id);
+  if (idx < 0) return;
+  const [entry] = taggerCancelUndos.splice(idx, 1);
+  if (entry?.timer) clearTimeout(entry.timer);
+  if (entry?.mode === "toolbar") {
+    hideTaggerToolbarUndoBtn();
+    return;
   }
+  // Re-paint remaining inline marks so DOM matches the queue.
+  placeAllTaggerInlineUndos();
+}
+
+function clearTaggerToolbarUndoOnly() {
+  const toolbar = taggerCancelUndos.filter((e) => e.mode === "toolbar");
+  for (const entry of toolbar) {
+    if (entry.timer) clearTimeout(entry.timer);
+  }
+  taggerCancelUndos = taggerCancelUndos.filter((e) => e.mode !== "toolbar");
+  hideTaggerToolbarUndoBtn();
+}
+
+function clearTaggerCancelAllUndo() {
+  for (const entry of taggerCancelUndos) {
+    if (entry.timer) clearTimeout(entry.timer);
+  }
+  taggerCancelUndos = [];
+  removeTaggerInlineUndoBtn();
+}
+
+/**
+ * U-turn after 「ยกเลิกทั้งหมด」 in the preview header actions.
+ */
+function placeTaggerCancelAllToolbarUndo() {
+  const snap = taggerCancelUndos.find((e) => e.mode === "toolbar");
+  const btn = /** @type {HTMLButtonElement | null} */ (
+    document.getElementById("taggerCancelAllUndoBtn")
+  );
+  if (!snap || !btn) {
+    hideTaggerToolbarUndoBtn();
+    return;
+  }
+  const tip = snap.tip || "เลิกทำ — คืนแท็กที่เพิ่งยกเลิกทั้งหมด";
+  btn.innerHTML = TAGGER_UNDO_UTURN_SVG;
+  btn.title = tip;
+  btn.setAttribute("aria-label", tip);
+  btn.setAttribute("data-undo-id", snap.id);
+  btn.hidden = false;
+  btn.setAttribute("aria-hidden", "false");
+}
+
+/**
+ * @param {NonNullable<typeof taggerSession>['replacements']} snapshotReplacements
+ * @param {File | null} snapshotTagged
+ * @param {{
+ *   mode: 'inline' | 'toolbar',
+ *   plainStart?: number,
+ *   plainLen?: number,
+ *   tip?: string,
+ *   bareCell?: boolean,
+ *   tableIndex?: number,
+ *   rowIndexInTable?: number,
+ *   cellIndex?: number,
+ *   domCellIndex?: number,
+ * }} opts
+ */
+function armTaggerCancelUndo(snapshotReplacements, snapshotTagged, opts) {
+  const mode = opts.mode === "toolbar" ? "toolbar" : "inline";
+  // Cancel-all is exclusive; single-tag undos stack with independent 10s timers.
+  if (mode === "toolbar") {
+    clearTaggerCancelAllUndo();
+  } else {
+    clearTaggerToolbarUndoOnly();
+  }
+  const id = `undo_${Date.now().toString(36)}_${++taggerCancelUndoSeq}`;
+  /** @type {TaggerCancelUndoEntry} */
+  const entry = {
+    id,
+    replacements: snapshotReplacements,
+    taggedFile: snapshotTagged,
+    mode,
+    plainStart: opts.plainStart,
+    plainLen: opts.plainLen,
+    tip: opts.tip,
+    bareCell: !!opts.bareCell,
+    ...(typeof opts.tableIndex === "number" ? { tableIndex: opts.tableIndex } : {}),
+    ...(typeof opts.rowIndexInTable === "number"
+      ? { rowIndexInTable: opts.rowIndexInTable }
+      : {}),
+    ...(typeof opts.cellIndex === "number" ? { cellIndex: opts.cellIndex } : {}),
+    ...(typeof opts.domCellIndex === "number" ? { domCellIndex: opts.domCellIndex } : {}),
+    timer: setTimeout(() => {
+      dismissTaggerCancelUndo(id);
+    }, TAGGER_CANCEL_UNDO_MS),
+  };
+  taggerCancelUndos.push(entry);
+  hideBanner();
+  if (mode === "toolbar") {
+    placeTaggerCancelAllToolbarUndo();
+    return;
+  }
+  placeAllTaggerInlineUndos();
+}
+
+/**
+ * Map original-plain [start, end) onto a live Range inside the tagger preview.
+ * @param {HTMLElement} root
+ * @param {number} plainStart
+ * @param {number} plainEnd
+ * @returns {Range | null}
+ */
+function findTaggerPreviewRangeForPlain(root, plainStart, plainEnd) {
+  if (!root || !(plainEnd > plainStart)) return null;
+  let pos = 0;
+  /** @type {{ node: Node, start: number, end: number, kind: 'text' | 'chip' }[]} */
+  const pieces = [];
+
+  const visit = (node) => {
+    if (!node) return;
+    if (node.nodeType === Node.TEXT_NODE) {
+      const raw = node.textContent || "";
+      const t = normalizeTaggerDomPlain(raw);
+      if (!t.length) return;
+      // Prefer mapping via normalized length; offsets into the live text node
+      // use the raw string when lengths match, else clamp to node length.
+      pieces.push({
+        node,
+        start: pos,
+        end: pos + t.length,
+        kind: "text",
+      });
+      pos += t.length;
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const el = /** @type {Element} */ (node);
+    if (el.tagName === "BR") return;
+    if (isTaggerUiChrome(el)) return;
+    if (el.classList?.contains("tagger-chip")) {
+      const fromChip = chipToOriginalPlain(el);
+      const chunk = fromChip != null ? fromChip : "";
+      if (chunk.length) {
+        pieces.push({ node: el, start: pos, end: pos + chunk.length, kind: "chip" });
+        pos += chunk.length;
+      }
+      return;
+    }
+    for (const child of el.childNodes) visit(child);
+  };
+  visit(root);
+  if (!pieces.length) return null;
+
+  /** @type {Node | null} */
+  let startNode = null;
+  let startOffset = 0;
+  /** @type {Node | null} */
+  let endNode = null;
+  let endOffset = 0;
+
+  for (const p of pieces) {
+    if (!startNode && plainStart >= p.start && plainStart < p.end) {
+      startNode = p.node;
+      if (p.kind === "text") {
+        startOffset = Math.min(
+          (p.node.textContent || "").length,
+          Math.max(0, plainStart - p.start),
+        );
+      } else {
+        startOffset = 0;
+      }
+    }
+    if (plainEnd > p.start && plainEnd <= p.end) {
+      endNode = p.node;
+      if (p.kind === "text") {
+        endOffset = Math.min(
+          (p.node.textContent || "").length,
+          Math.max(0, plainEnd - p.start),
+        );
+      } else {
+        endOffset = 1;
+      }
+      break;
+    }
+    if (plainEnd > p.end) {
+      endNode = p.node;
+      endOffset = p.kind === "text" ? (p.node.textContent || "").length : 1;
+    }
+  }
+  if (!startNode) return null;
+  if (!endNode) {
+    endNode = startNode;
+    endOffset =
+      startNode.nodeType === Node.TEXT_NODE
+        ? (startNode.textContent || "").length
+        : 1;
+  }
+
+  try {
+    const range = document.createRange();
+    if (startNode.nodeType === Node.TEXT_NODE) {
+      range.setStart(startNode, startOffset);
+    } else {
+      range.setStartBefore(startNode);
+    }
+    if (endNode.nodeType === Node.TEXT_NODE) {
+      range.setEnd(endNode, endOffset);
+    } else {
+      range.setEndAfter(endNode);
+    }
+    return range;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Re-paint every active inline U-turn (after render / after one expires).
+ * @param {number} [attempt]
+ */
+function placeAllTaggerInlineUndos(attempt = 0) {
+  if (!taggerSession) return;
+  const entries = taggerCancelUndos.filter((e) => e.mode === "inline");
+  stripTaggerInlineUndoDom();
+  if (!entries.length) return;
+  const root = /** @type {HTMLElement | null} */ (document.getElementById("taggerSelectRoot"));
+  if (!root) return;
+  // Place from document end → start so earlier inserts don't disturb later ranges.
+  const sorted = [...entries].sort(
+    (a, b) => Number(b.plainStart) - Number(a.plainStart) || Number(b.plainLen) - Number(a.plainLen),
+  );
+  let placed = 0;
+  for (const entry of sorted) {
+    if (placeOneTaggerInlineUndo(root, entry)) placed += 1;
+  }
+  if (!placed && attempt < 2) {
+    requestAnimationFrame(() => placeAllTaggerInlineUndos(attempt + 1));
+  }
+}
+
+/** @param {TaggerCancelUndoEntry} entry */
+function makeTaggerInlineUndoBtn(entry) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "tagger-inline-undo";
+  btn.setAttribute("data-undo-id", entry.id);
+  btn.title = entry.tip || "เลิกทำ — คืนแท็กนี้";
+  btn.setAttribute("aria-label", entry.tip || "เลิกทำ");
+  btn.setAttribute("contenteditable", "false");
+  btn.innerHTML = TAGGER_UNDO_UTURN_SVG;
+  btn.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    void undoTaggerCancelEntry(entry.id);
+  });
+  return btn;
+}
+
+/**
+ * Keep U-turn immediately after the cancelled span — never hoist to the end of the
+ * cell/paragraph (that parked the button in the wrong place inside tables).
+ * @param {HTMLElement} wrap
+ * @param {HTMLButtonElement} btn
+ */
+function attachTaggerInlineUndoAfter(wrap, btn) {
+  wrap.after(btn);
+}
+
+/**
+ * True when a text node sits inside row chrome / prior undo UI and must be skipped.
+ * @param {Node | null} node
+ */
+function isTaggerUndoSkipText(node) {
+  const el = node?.parentElement;
+  if (!el) return true;
+  return !!el.closest(
+    ".tagger-inline-undo, .tagger-undo-highlight, .tagger-row-group, [data-tagger-row-chrome]",
+  );
+}
+
+/**
+ * @param {HTMLElement} root
+ * @param {TaggerCancelUndoEntry} entry
+ */
+function placeOneTaggerInlineUndo(root, entry) {
+  // Empty / whitespace table cells: just a bare U-turn in the pinned cell — no text wrap.
+  if (entry.bareCell) {
+    const cell = findTaggerPreviewCellForUndo(entry);
+    if (cell) return placeTaggerInlineUndoAtHostEnd(cell, entry);
+    return false;
+  }
+
+  const plainStart = Number(entry.plainStart);
+  const plainLen = Number(entry.plainLen);
+  if (!Number.isFinite(plainStart) || plainStart < 0 || !(plainLen > 0)) return false;
+  const needle = (taggerSession?.originalPlainText || "").slice(
+    plainStart,
+    plainStart + plainLen,
+  );
+  // Whitespace-only needle can't be wrapped usefully — bare button on pinned cell if any.
+  if (!String(needle).trim()) {
+    const cell = findTaggerPreviewCellForUndo(entry);
+    if (cell) return placeTaggerInlineUndoAtHostEnd(cell, entry);
+  }
+  const range = findTaggerPreviewRangeForPlain(root, plainStart, plainStart + plainLen);
+  if (!range) {
+    // Offsets drifted — still try to land beside the restored text in a table cell.
+    const cell = findTaggerPreviewCellForUndo(entry);
+    if (cell && !String(needle).trim()) {
+      return placeTaggerInlineUndoAtHostEnd(cell, entry);
+    }
+    return placeTaggerInlineUndoByNeedle(root, needle, entry);
+  }
+
+  const startEl =
+    range.startContainer.nodeType === Node.ELEMENT_NODE
+      ? /** @type {Element} */ (range.startContainer)
+      : range.startContainer.parentElement;
+  const endEl =
+    range.endContainer.nodeType === Node.ELEMENT_NODE
+      ? /** @type {Element} */ (range.endContainer)
+      : range.endContainer.parentElement;
+  const startCell = startEl?.closest?.("td, th") || null;
+  const endCell = endEl?.closest?.("td, th") || null;
+
+  // Cross-cell (wrap-row / list row): never surroundContents across <td>s — park the
+  // U-turn at the end of the last spanned cell (where the cancelled row ends).
+  if (startCell && endCell && startCell !== endCell) {
+    const row = startCell.parentElement;
+    const endRow = endCell.parentElement;
+    const target =
+      row && endRow && row === endRow
+        ? endCell
+        : endCell;
+    if (placeTaggerInlineUndoInHost(/** @type {HTMLElement} */ (target), needle, entry)) {
+      return true;
+    }
+    return placeTaggerInlineUndoAtHostEnd(/** @type {HTMLElement} */ (target), entry);
+  }
+
+  const wrap = document.createElement("span");
+  wrap.className = "tagger-undo-highlight";
+  wrap.setAttribute("data-undo-id", entry.id);
+  wrap.setAttribute("contenteditable", "false");
+  const btn = makeTaggerInlineUndoBtn(entry);
+
+  // Prefer same-text-node split — safest inside table cells.
+  if (
+    range.startContainer === range.endContainer &&
+    range.startContainer.nodeType === Node.TEXT_NODE
+  ) {
+    try {
+      const textNode = /** @type {Text} */ (range.startContainer);
+      const start = range.startOffset;
+      const end = range.endOffset;
+      const mid = textNode.splitText(start);
+      mid.splitText(end - start);
+      mid.parentNode?.insertBefore(wrap, mid);
+      wrap.appendChild(mid);
+      attachTaggerInlineUndoAfter(wrap, btn);
+      return true;
+    } catch {
+      /* fall through */
+    }
+  }
+
+  try {
+    range.surroundContents(wrap);
+    attachTaggerInlineUndoAfter(wrap, btn);
+    return true;
+  } catch {
+    /* fall through */
+  }
+
+  // Table/paragraph-safe fallback: search host text (may span multiple text nodes).
+  const host = /** @type {HTMLElement | null} */ (
+    startCell ||
+      endCell ||
+      startEl?.closest?.(".tagger-para, p, li") ||
+      null
+  );
+  if (host && needle) {
+    if (placeTaggerInlineUndoInHost(host, needle, entry)) return true;
+    return placeTaggerInlineUndoAtHostEnd(host, entry);
+  }
+  return placeTaggerInlineUndoByNeedle(root, needle, entry);
+}
+
+/**
+ * Scan preview for `needle` and place beside the first real content hit.
+ * @param {HTMLElement} root
+ * @param {string} needle
+ * @param {TaggerCancelUndoEntry} entry
+ */
+function placeTaggerInlineUndoByNeedle(root, needle, entry) {
+  if (!root || !needle) return false;
+  for (const cell of root.querySelectorAll("td, th")) {
+    const host = /** @type {HTMLElement} */ (cell);
+    if (placeTaggerInlineUndoInHost(host, needle, entry)) return true;
+  }
+  for (const para of root.querySelectorAll(".tagger-para, p, li")) {
+    if (placeTaggerInlineUndoInHost(/** @type {HTMLElement} */ (para), needle, entry)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Append U-turn at the end of a cell/paragraph when highlight wrap isn't possible.
+ * @param {HTMLElement} host
+ * @param {TaggerCancelUndoEntry} entry
+ */
+function placeTaggerInlineUndoAtHostEnd(host, entry) {
+  if (!host) return false;
+  const btn = makeTaggerInlineUndoBtn(entry);
+  // Prefer after last non-chrome child so row-action chrome stays first in the cell.
+  let last = host.lastChild;
+  while (
+    last &&
+    last.nodeType === Node.ELEMENT_NODE &&
+    isTaggerUiChrome(/** @type {Element} */ (last))
+  ) {
+    last = last.previousSibling;
+  }
+  if (last) {
+    last.after(btn);
+  } else {
+    host.appendChild(btn);
+  }
+  return true;
+}
+
+/**
+ * Place highlight + U-turn for `needle` inside a single host (td / paragraph).
+ * Supports needles that span multiple adjacent text nodes (common in table cells).
+ * @param {HTMLElement} host
+ * @param {string} needle
+ * @param {TaggerCancelUndoEntry} entry
+ */
+function placeTaggerInlineUndoInHost(host, needle, entry) {
+  if (!host || !needle) return false;
+
+  /** @type {{ node: Text, start: number, end: number, raw: string }[]} */
+  const pieces = [];
+  const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
+  /** @type {Text | null} */
+  let node = /** @type {Text | null} */ (walker.nextNode());
+  let pos = 0;
+  while (node) {
+    if (isTaggerUndoSkipText(node)) {
+      node = /** @type {Text | null} */ (walker.nextNode());
+      continue;
+    }
+    const raw = node.textContent || "";
+    const t = normalizeTaggerDomPlain(raw);
+    if (t.length && t.length === raw.length) {
+      pieces.push({ node, start: pos, end: pos + t.length, raw });
+      pos += t.length;
+    }
+    node = /** @type {Text | null} */ (walker.nextNode());
+  }
+  if (!pieces.length) return false;
+  const joined = pieces.map((p) => normalizeTaggerDomPlain(p.raw)).join("");
+  const at = joined.indexOf(needle);
+  if (at < 0) {
+    // Row-span needles won't fit in one cell — caller may fall back to host-end.
+    return false;
+  }
+  const endAt = at + needle.length;
+
+  /** @type {Text | null} */
+  let startNode = null;
+  let startOffset = 0;
+  /** @type {Text | null} */
+  let endNode = null;
+  let endOffset = 0;
+  for (const p of pieces) {
+    if (!startNode && at >= p.start && at < p.end) {
+      startNode = p.node;
+      startOffset = at - p.start;
+    }
+    if (endAt > p.start && endAt <= p.end) {
+      endNode = p.node;
+      endOffset = endAt - p.start;
+      break;
+    }
+  }
+  if (!startNode || !endNode) return false;
+
+  const wrap = document.createElement("span");
+  wrap.className = "tagger-undo-highlight";
+  wrap.setAttribute("data-undo-id", entry.id);
+  wrap.setAttribute("contenteditable", "false");
+  const btn = makeTaggerInlineUndoBtn(entry);
+
+  try {
+    if (startNode === endNode) {
+      const mid = startNode.splitText(startOffset);
+      mid.splitText(endOffset - startOffset);
+      mid.parentNode?.insertBefore(wrap, mid);
+      wrap.appendChild(mid);
+      attachTaggerInlineUndoAfter(wrap, btn);
+      return true;
+    }
+    const range = document.createRange();
+    range.setStart(startNode, startOffset);
+    range.setEnd(endNode, endOffset);
+    range.surroundContents(wrap);
+    attachTaggerInlineUndoAfter(wrap, btn);
+    return true;
+  } catch {
+    // Partial element boundaries inside the cell — still show the U-turn at cell end.
+    return placeTaggerInlineUndoAtHostEnd(host, entry);
+  }
+}
+
+/** @param {string} [entryId] */
+async function undoTaggerCancelEntry(entryId) {
+  if (!taggerSession) return;
+  if (taggerSession.busy || taggerSession.aiDrafting) return;
+  const snap = entryId
+    ? taggerCancelUndos.find((e) => e.id === entryId)
+    : taggerCancelUndos[taggerCancelUndos.length - 1];
+  if (!snap) return;
+  // Restoring one snapshot invalidates the rest of the queue.
+  clearTaggerCancelAllUndo();
+  taggerSession.replacements = snap.replacements.map((r) => ({ ...r }));
+  taggerSession.taggedFile = snap.taggedFile;
+  const ok = await applyTaggerReplacements();
+  if (!ok) {
+    showBanner("เลิกทำไม่สำเร็จ — ลองอีกครั้ง");
+    return;
+  }
+  showBanner("เลิกทำแล้ว — คืนแท็กแล้ว", "success");
+  setTimeout(() => showBanner(""), 2400);
+}
+
+async function undoTaggerCancelAll() {
+  const toolbar = taggerCancelUndos.find((e) => e.mode === "toolbar");
+  const id = toolbar?.id || taggerCancelUndos[taggerCancelUndos.length - 1]?.id;
+  await undoTaggerCancelEntry(id);
+}
+
+/**
+ * Cancel every non-file tagger replacement (same restore path as single 「ยกเลิกแท็ก」).
+ * No confirm dialog — offers 「เลิกทำ」 for 10s instead.
+ */
+async function cancelAllTaggerReplacements() {
+  if (!taggerSession) return;
+  if (taggerSession.busy || taggerSession.aiDrafting) return;
+  const cancelable = countCancelableTaggerReplacements();
+  if (!cancelable) {
+    showBanner("ไม่มีแท็กที่ยกเลิกได้ — แท็กจากไฟล์เดิมยกเลิกไม่ได้");
+    setTimeout(() => showBanner(""), 2800);
+    return;
+  }
+  const keptExisting = taggerSession.replacements.filter((r) => r.source === "existing").length;
+  const still = cancelable;
+  const snapshotReplacements = taggerSession.replacements.map((r) => ({ ...r }));
+  const snapshotTagged = taggerSession.taggedFile;
+  taggerSession.replacements = taggerSession.replacements.filter((r) => r.source === "existing");
+  const dlg = document.getElementById("taggerEditDialog");
+  if (dlg) dlg.hidden = true;
+  const ok = await applyTaggerReplacements();
+  if (!ok || !taggerSession) return;
+  if (!taggerSession.replacements.length) {
+    taggerSession.taggedFile = taggerSession.originalFile;
+  }
+  const tip =
+    keptExisting > 0
+      ? `เลิกทำ — คืน ${still} รายการ (คงแท็กจากไฟล์เดิม ${keptExisting})`
+      : `เลิกทำ — คืนแท็กทั้งหมด ${still} รายการ`;
+  armTaggerCancelUndo(snapshotReplacements, snapshotTagged, {
+    mode: "toolbar",
+    tip,
+  });
 }
 
 function downloadTaggedTemplate() {
@@ -6169,6 +8520,8 @@ function downloadTaggedTemplate() {
   setTimeout(() => showBanner(""), 2400);
 }
 
+/** Kept for potential re-wire; sticky「ใช้กรอกต่อ」was removed. */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- intentional dead UI entry
 async function openTaggedInFillForm() {
   if (!taggerSession?.taggedFile) {
     showBanner("ยังไม่มีเทมเพลตที่แท็กแล้ว");
@@ -6417,14 +8770,17 @@ async function appendTemplateFiles(files, errorEl = null) {
     ];
   }
 
-  const room = 12 - multiSlots.length;
+  const maxMulti = getMaxMultiTemplates();
+  const room = maxMulti - multiSlots.length;
   if (room <= 0) {
-    showBanner("เลือกเทมเพลตได้ไม่เกิน 12 ไฟล์");
+    showBanner(multiLimitMessage("add"));
     return;
   }
   const toAdd = docx.slice(0, room);
   if (docx.length > room) {
-    showBanner(`เพิ่มได้สูงสุด ${room} ไฟล์จากชุดนี้ (รวมแล้วไม่เกิน 12)`);
+    showBanner(
+      `เพิ่มได้สูงสุด ${room} ไฟล์จากชุดนี้ (รวมแล้วไม่เกิน ${maxMulti} · ${planQuotaLabel()})`,
+    );
   }
 
   showBanner(`กำลังเพิ่มเทมเพลต ${toAdd.length} ไฟล์…`, "progress");
@@ -6534,21 +8890,30 @@ async function parseMultipleTemplates(files, errorEl) {
     await parseFile(docx[0], errorEl);
     return;
   }
-  if (docx.length > 12) {
-    const msg = "เลือกเทมเพลตได้ไม่เกิน 12 ไฟล์";
+  const maxMulti = getMaxMultiTemplates();
+  let overLimitNote = "";
+  let filesToParse = docx;
+  if (docx.length > maxMulti) {
+    overLimitNote = `${multiLimitMessage("select")} — จะใช้ ${maxMulti} ไฟล์แรกจากที่เลือก ${docx.length} ไฟล์`;
     if (errorEl) {
       errorEl.hidden = false;
-      errorEl.textContent = msg;
-    } else showBanner(msg);
-    return;
+      errorEl.textContent = overLimitNote;
+    }
+    showBanner(overLimitNote);
+    filesToParse = docx.slice(0, maxMulti);
   }
 
   // Fields-only for every file → paint tabs immediately → hydrate open tab.
-  showBanner(`กำลังอ่าน ${docx.length} เทมเพลต…`, "progress");
+  showBanner(
+    overLimitNote
+      ? `กำลังอ่าน ${filesToParse.length} เทมเพลต (ตัดเหลือตามโควตา)…`
+      : `กำลังอ่าน ${filesToParse.length} เทมเพลต…`,
+    "progress",
+  );
   try {
     const preferContent = state.showFullContent;
     const settled = await Promise.allSettled(
-      docx.map(async (file, index) => {
+      filesToParse.map(async (file, index) => {
         const parsed = await parseTemplatePayload(file, false);
         for (const f of parsed.fields) {
           if (f.type === "list" && !Array.isArray(parsed.values[f.name])) {
@@ -6570,12 +8935,13 @@ async function parseMultipleTemplates(files, errorEl) {
     const failures = [];
     settled.forEach((result, index) => {
       if (result.status === "fulfilled") {
-        const { order: _order, ...slot } = result.value;
+        const slot = { ...result.value };
+        delete slot.order;
         slots.push(slot);
       } else {
         const reason = result.reason;
         failures.push({
-          name: docx[index].name,
+          name: filesToParse[index].name,
           reason: reason instanceof Error ? reason.message : String(reason),
         });
       }
@@ -6591,7 +8957,7 @@ async function parseMultipleTemplates(files, errorEl) {
       showBanner(msg);
       await explainSkippedTemplates({
         ok: 0,
-        total: docx.length,
+        total: filesToParse.length,
         failures,
         mode: "open",
       });
@@ -6608,17 +8974,25 @@ async function parseMultipleTemplates(files, errorEl) {
     persistActiveSlot();
     const failNames = failures.map((f) => f.name).join(", ");
     const failNote = failures.length
-      ? `เปิดเฉพาะไฟล์ที่มีตัวแปร · ${slots.length}/${docx.length} · ข้าม: ${failNames}`
+      ? `เปิดเฉพาะไฟล์ที่มีตัวแปร · ${slots.length}/${filesToParse.length} · ข้าม: ${failNames}`
       : "";
-    if (failNote) showBanner(failNote);
+    const limitNote = overLimitNote
+      ? `รับ ${slots.length}/${docx.length} ไฟล์ตามโควตา (${planQuotaLabel()})`
+      : "";
+    const statusNote = [limitNote, failNote].filter(Boolean).join(" · ");
+    if (statusNote) showBanner(statusNote, failures.length ? undefined : "success");
     else showBanner("");
+    if (overLimitNote && errorEl) {
+      errorEl.hidden = false;
+      errorEl.textContent = overLimitNote;
+    }
     renderForm();
     scheduleSaveDraft();
     // Popup first (intentional filter), then hydrate preview in background.
     if (failures.length) {
       await explainSkippedTemplates({
         ok: slots.length,
-        total: docx.length,
+        total: filesToParse.length,
         failures,
         mode: "open",
       });
@@ -6628,7 +9002,7 @@ async function parseMultipleTemplates(files, errorEl) {
     if (preferContent) {
       void hydrateTemplateContent(slots[0], {
         silent: !!failures.length,
-        afterMessage: failNote,
+        afterMessage: statusNote,
       });
     }
   } catch (err) {
@@ -6825,9 +9199,16 @@ async function runBatchFromSource(sourceFiles) {
     return;
   }
   if (!aiStatus.connected && !getClientAiKey()) {
-    showBanner("ต้องใส่ Gemini API key ของคุณก่อน");
+    showBanner("ต้องใส่ AI API key ของคุณก่อน");
     await connectGoogleAi();
     if (!aiStatus.connected && !getClientAiKey()) return;
+  }
+  if (!providerFormAiSupported(getClientAiProvider())) {
+    showBanner(
+      providerFormAiNote(getClientAiProvider()) ||
+        "ผู้ให้บริการนี้ยังไม่รองรับ AI กรอกฟอร์ม — ใช้ Gemini / OpenAI / Claude",
+    );
+    return;
   }
   persistActiveSlot();
   if (sourceMapAbort) sourceMapAbort.abort();
@@ -6846,6 +9227,7 @@ async function runBatchFromSource(sourceFiles) {
     logs: [],
     showLogs: true,
     mode: "batch",
+    aiLabel: `${getClientAiLabel() || providerLabel(getClientAiProvider())} · ${getClientAiModel()}`,
     progress: {
       step: 0,
       total: sourceFiles.length + n + 1,
@@ -6880,8 +9262,16 @@ async function runBatchFromSource(sourceFiles) {
   for (const f of sourceFiles) fd.append("files", f, f.name);
   const byokKey = getClientAiKey();
   const byokModel = getClientAiModel();
-  if (byokKey) fd.append("geminiApiKey", byokKey);
-  if (byokModel) fd.append("geminiModel", byokModel);
+  const byokProvider = getClientAiProvider();
+  if (byokKey) {
+    fd.append("geminiApiKey", byokKey);
+    fd.append("aiApiKey", byokKey);
+  }
+  if (byokModel) {
+    fd.append("geminiModel", byokModel);
+    fd.append("aiModel", byokModel);
+  }
+  if (byokProvider) fd.append("aiProvider", byokProvider);
 
   try {
     appendSourceMapLog("ส่งคำขอ batch-from-source (สตรีมล็อกละเอียด)…");
@@ -7025,10 +9415,10 @@ function renderForm() {
     <div class="file-chip">
       <span class="file-meta">${escapeHtml(summaryText(state.fields))}${isMultiMode() ? " · แนบต้นทาง → ระบบสร้างโครง JSON → AI กรอกค่า → ใส่ลงหน้าจอ" : ""}</span>
       <div class="file-chip-actions">
-        <button type="button" class="btn-secondary btn-compact ${aiStatus.connected ? "is-ai-on" : ""}" id="googleAiBtn" title="${aiStatus.connected ? `คีย์ของคุณ · ${aiStatus.model || ""} — เปลี่ยนโมเดล / ลบคีย์` : "ใส่ Gemini API key ของคุณ (เก็บในเบราว์เซอร์ ไม่ใช่คีย์ของแอป)"}">
-          ${aiStatus.connected ? `AI · ${escapeHtml(String(aiStatus.model || "Gemini").replace(/^gemini-/i, ""))}` : "ใส่ Gemini key"}
+        <button type="button" class="btn-secondary btn-compact ${aiStatus.connected ? "is-ai-on" : ""}" id="googleAiBtn" title="${aiStatus.connected ? `คีย์「${getClientAiLabel() || aiStatus.entryLabel || "AI"}」· ${aiStatus.providerLabel || providerLabel(getClientAiProvider())} · ${aiStatus.model || ""} — จัดการคีย์` : "ใส่ AI API key ของคุณ (หลายเจ้าได้ · เก็บในเบราว์เซอร์)"}">
+          ${aiStatus.connected ? `AI · ${escapeHtml(getClientAiLabel() || aiStatus.providerLabel || String(aiStatus.model || "พร้อม").replace(/^gemini-/i, ""))}` : "ใส่ AI key"}
         </button>
-        <button type="button" class="btn-secondary btn-compact" id="attachSource" ${aiStatus.connected ? "" : "disabled"} title="${aiStatus.connected ? (isMultiMode() ? "แนบต้นทาง — ระบบสร้างโครง Export JSON เอง ส่งให้ AI กรอกค่า แล้วนำ JSON กลับมาใส่จอ (ยังไม่สร้าง Word)" : "แนบ PDF / Word / รูป — ระบบสร้างโครง JSON ส่งให้ Gemini กรอกค่า") : "ต้องใส่ Gemini key ของคุณก่อน"}">${isMultiMode() ? "ต้นทาง → ให้ AI กรอก JSON" : "แนบเอกสารต้นทาง"}</button>
+        <button type="button" class="btn-secondary btn-compact" id="attachSource" ${aiStatus.connected ? "" : "disabled"} title="${aiStatus.connected ? (isMultiMode() ? "แนบต้นทาง — ส่ง Export JSON ให้ AI กรอกค่า แล้วนำ JSON กลับมาใส่จอ" : "แนบ PDF / Word / รูป — ส่งโครง JSON ให้ AI กรอกค่า") : "ต้องใส่ AI key ของคุณก่อน"}">${isMultiMode() ? "ต้นทาง → ให้ AI กรอก JSON" : "แนบเอกสารต้นทาง"}</button>
         <input class="sr-only" type="file" id="attachSourceInput" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple />
         <button type="button" class="btn-secondary btn-compact" id="exportJson" title="ส่งออกค่าที่กรอกเป็น JSON">Export JSON</button>
         <button type="button" class="btn-secondary btn-compact" id="importJson" title="นำเข้าค่าจากไฟล์ JSON">Import JSON</button>
@@ -7073,8 +9463,8 @@ function renderForm() {
     document.getElementById("addTemplateInput")
   );
   const openAddTemplates = () => {
-    if (multiSlots.length >= 12) {
-      showBanner("เลือกเทมเพลตได้ไม่เกิน 12 ไฟล์");
+    if (multiSlots.length >= getMaxMultiTemplates()) {
+      showBanner(multiLimitMessage("add"));
       return;
     }
     addTemplateInput?.click();
@@ -7103,7 +9493,7 @@ function renderForm() {
   const attachInput = /** @type {HTMLInputElement | null} */ (document.getElementById("attachSourceInput"));
   document.getElementById("attachSource")?.addEventListener("click", () => {
     if (!aiStatus.connected && !getClientAiKey()) {
-      showBanner("ต้องใส่ Gemini API key ของคุณก่อนถึงจะแนบเอกสารได้");
+      showBanner("ต้องใส่ AI API key ของคุณก่อนถึงจะแนบเอกสารได้");
       void connectGoogleAi();
       return;
     }
@@ -7693,7 +10083,7 @@ function renderSourceMapPanel() {
     const batchHint =
       sourceMapSession.mode === "batch"
         ? "หลายเทมเพลต · ส่งไฟล์ต้นทางจริง + Export JSON แยก → AI กรอก → Import ลงจอ"
-        : "รันบนเครื่องนี้ · ส่งไฟล์ต้นทางจริง (PDF/รูป) ให้ Gemini อ่านเอง ไม่ดึงข้อความก่อน";
+        : "รันบนเครื่องนี้ · ส่งไฟล์ต้นทางให้ AI อ่านแล้วกรอก JSON";
     return `<div class="source-map-panel is-loading" id="sourceMapPanel">
       <div class="source-map-head">
         <strong>${sourceMapSession.mode === "batch" ? "กำลังแนบต้นทาง → JSON หลายเทมเพลต…" : "กำลังแนบเอกสารต้นทางให้ AI…"}</strong>
@@ -7788,7 +10178,7 @@ function renderSourceMapPanel() {
   return `<div class="source-map-panel" id="sourceMapPanel">
     <div class="source-map-head">
       <strong>ผลแมปจากเอกสารต้นทาง</strong>
-        <span class="source-map-status">${escapeHtml(sourceMapSession.aiLabel || "Google Gemini")}</span>
+        <span class="source-map-status">${escapeHtml(sourceMapSession.aiLabel || aiStatus.providerLabel || getClientAiLabel() || "AI")}</span>
     </div>
     ${extractedHtml ? `<ul class="source-map-extracted">${extractedHtml}</ul>` : ""}
     ${
@@ -7916,9 +10306,16 @@ async function runSourceMap(files) {
     return;
   }
   if (!aiStatus.connected && !getClientAiKey()) {
-    showBanner("ต้องใส่ Gemini API key ของคุณก่อนถึงจะแนบเอกสารได้");
+    showBanner("ต้องใส่ AI API key ของคุณก่อนถึงจะแนบเอกสารได้");
     await connectGoogleAi();
     if (!aiStatus.connected && !getClientAiKey()) return;
+  }
+  if (!providerFormAiSupported(getClientAiProvider())) {
+    showBanner(
+      providerFormAiNote(getClientAiProvider()) ||
+        "ผู้ให้บริการนี้ยังไม่รองรับ AI กรอกฟอร์ม — ใช้ Gemini / OpenAI / Claude",
+    );
+    return;
   }
   if (sourceMapAbort) sourceMapAbort.abort();
   sourceMapAbort = new AbortController();
@@ -7934,6 +10331,7 @@ async function runSourceMap(files) {
     logs: [],
     showLogs: true,
     mode: "single",
+    aiLabel: `${getClientAiLabel() || providerLabel(getClientAiProvider())} · ${getClientAiModel()}`,
     progress: { step: 0, total: files.length + 2, label: "อัปโหลดไฟล์ต้นทาง" },
     startedAt: Date.now(),
   };
@@ -9600,6 +11998,12 @@ function cssId(s) {
 }
 
 async function boot() {
+  // Next.js client nav remounts home with fresh #app — rebind before paint.
+  refreshShellElements();
+  if (!app) {
+    console.warn("boot skipped: #app missing");
+    return;
+  }
   // Paint the empty home UI immediately so Safari never sits on a blank sheet
   // while IndexedDB restore hangs.
   try {
@@ -9611,6 +12015,13 @@ async function boot() {
     await checkHealth();
   } catch (err) {
     console.warn("health check failed during boot", err);
+  }
+  try {
+    await refreshAiLoginState();
+    if (aiUserLoggedIn) await pullServerAiKeys();
+    await refreshAiStatus();
+  } catch (err) {
+    console.warn("ai vault sync failed during boot", err);
   }
   try {
     const restored = await restoreDraft();
@@ -9664,8 +12075,36 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
-void boot().catch((err) => {
-  console.error("boot rejected", err);
-  showBanner("โหลดหน้าไม่สำเร็จ — รีเฟรชแล้วลองใหม่");
-});
-setInterval(checkHealth, 30000);
+/** @type {ReturnType<typeof setInterval> | null} */
+let healthTimer = null;
+
+/** Drop body-portaled UI left behind after leaving home (login soft-nav, etc.). */
+function cleanupOrphanPortals() {
+  for (const id of ["appDialog", "namedDraftDialog"]) {
+    document.getElementById(id)?.remove();
+  }
+  document
+    .querySelectorAll(".dialog-overlay, .tagger-float-btn")
+    .forEach((el) => {
+      if (!document.getElementById("app")?.contains(el)) el.remove();
+    });
+}
+
+/**
+ * Entry used by React home after first script load or soft remount
+ * (e.g. /admin → / without full reload).
+ */
+window.__docxFormBoot = function docxFormBoot() {
+  if (healthTimer) {
+    clearInterval(healthTimer);
+    healthTimer = null;
+  }
+  cleanupOrphanPortals();
+  void boot().catch((err) => {
+    console.error("boot rejected", err);
+    showBanner("โหลดหน้าไม่สำเร็จ — รีเฟรชแล้วลองใหม่");
+  });
+  healthTimer = setInterval(checkHealth, 30000);
+};
+
+window.__docxFormBoot();

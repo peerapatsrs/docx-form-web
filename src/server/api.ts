@@ -8,21 +8,45 @@ import {
   type FormField,
 } from "./docx-engine";
 import {
+  ensureAdminSchema,
+  getAiAdminSettings,
+  getAppLimits,
+  listAuditLogs,
+  listUsersForAdmin,
+  setAiAdminSettings,
+  setAppLimits,
+  setUserBanned,
+  setUserPlan,
+  setUserRole,
+  writeAuditLog,
+} from "./admin-store";
+import {
   clearGeminiKey,
   geminiStatus,
   getGeminiApiKey,
+  getRequestAiCredentials,
+  getRequestAiProvider,
   getRequestGeminiKey,
-  getRequestGeminiModel,
+  hasRequestAiKey,
   isByokOnly,
   maskGeminiKey,
   normalizeGeminiModel,
   writeAiConfig,
 } from "./ai-config";
+import {
+  defaultModelForProvider,
+  getAiProvider,
+  listAiProvidersPublic,
+  normalizeProviderModel,
+} from "./ai-providers";
 import type { DocxFormValuesJson } from "./source-map";
 import {
   canUseFeature,
   PremiumFeature,
   premiumDeniedPayload,
+  requireSuperAdmin,
+  resolveEntitlement,
+  roleIsStaffPaid,
   type PremiumFeatureId,
 } from "./premium";
 
@@ -98,10 +122,67 @@ export function createApi(options: { startedAt: Date; version?: string }) {
     return c.json(premiumDeniedPayload(feature), 402);
   }
 
+  /** Current user profile + live plan/limits (for /account). */
+  api.get("/me", async (c) => {
+    try {
+      const { auth } = await import("./auth");
+      const session = await auth.api.getSession({ headers: c.req.raw.headers });
+      if (!session?.user) {
+        return c.json({ error: "unauthorized" }, 401);
+      }
+      await ensureAdminSchema().catch(() => undefined);
+      const ent = await resolveEntitlement(c.req.raw);
+      const limits = await getAppLimits().catch(() => ({
+        freeMaxMulti: 2,
+        paidMaxMulti: 10,
+      }));
+      const u = session.user as {
+        id: string;
+        name?: string | null;
+        email?: string | null;
+        image?: string | null;
+        role?: string | null;
+        plan?: string | null;
+        emailVerified?: boolean;
+        createdAt?: string | Date;
+      };
+      return c.json({
+        user: {
+          id: u.id,
+          name: u.name || null,
+          email: u.email || null,
+          image: u.image || null,
+          role: u.role || "user",
+          plan: ent.plan || u.plan || "free",
+          emailVerified: Boolean(u.emailVerified),
+          createdAt: u.createdAt || null,
+        },
+        premium: {
+          paid: ent.paid,
+          plan: ent.plan || "free",
+          maxMultiTemplates: ent.maxMultiTemplates,
+          freeMaxMulti: limits.freeMaxMulti,
+          paidMaxMulti: limits.paidMaxMulti,
+        },
+        session: {
+          id: session.session.id,
+          expiresAt: session.session.expiresAt,
+        },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message }, 500);
+    }
+  });
+
   api.get("/health", async (c) => {
+    await ensureAdminSchema().catch(() => undefined);
     const ent = await canUseFeature(PremiumFeature.AiSourceMap, c.req.raw);
-    const reqKey = getRequestGeminiKey(c.req.raw);
-    const reqModel = getRequestGeminiModel(c.req.raw);
+    const aiCreds = getRequestAiCredentials(c.req.raw);
+    const aiAdmin = await getAiAdminSettings().catch(() => ({
+      defaultModel: "gemini-3.8-flash",
+    }));
+    const limits = await getAppLimits().catch(() => null);
     return c.json({
       ok: true,
       name: "docx-form-web",
@@ -109,63 +190,320 @@ export function createApi(options: { startedAt: Date; version?: string }) {
       author: "Peerapat Surasing",
       email: "peerapat.srs@gmail.com",
       startedAt: options.startedAt.toISOString(),
-      ai: geminiStatus({ requestKey: reqKey, requestModel: reqModel }),
+      ai: geminiStatus({
+        requestKey: aiCreds.apiKey,
+        requestModel: aiCreds.model,
+        requestProvider: aiCreds.provider,
+        adminDefaultModel: aiAdmin.defaultModel,
+      }),
       premium: {
         enforce: String(process.env.PREMIUM_ENFORCE || "") === "1",
         paid: ent.entitlement.paid,
         plan: ent.entitlement.plan || "unknown",
+        maxMultiTemplates: ent.entitlement.maxMultiTemplates,
+        freeMaxMulti: limits?.freeMaxMulti,
+        paidMaxMulti: limits?.paidMaxMulti,
       },
     });
   });
 
-  api.get("/ai/status", (c) =>
-    c.json(
-      geminiStatus({
-        requestKey: getRequestGeminiKey(c.req.raw),
-        requestModel: getRequestGeminiModel(c.req.raw),
-      }),
-    ),
-  );
+  /** Superadmin: list users with live plan from Postgres */
+  api.get("/admin/users", async (c) => {
+    const gate = await requireSuperAdmin(c.req.raw);
+    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    const q = c.req.query("q") || "";
+    const users = await listUsersForAdmin({ q });
+    return c.json({ users });
+  });
 
-  api.post("/ai/google", async (c) => {
+  /** Superadmin: set free|pro */
+  api.post("/admin/plan", async (c) => {
+    const gate = await requireSuperAdmin(c.req.raw);
+    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      userId?: string;
+      plan?: string;
+    };
+    const userId = String(body.userId || "").trim();
+    const planRaw = String(body.plan || "")
+      .trim()
+      .toLowerCase();
+    const plan = planRaw === "pro" ? "pro" : planRaw === "free" ? "free" : null;
+    if (!userId || !plan) {
+      return c.json({ error: "ต้องส่ง userId และ plan=free|pro" }, 400);
+    }
+    const updated = await setUserPlan(userId, plan);
+    if (!updated) return c.json({ error: "ไม่พบผู้ใช้" }, 404);
+    await writeAuditLog({
+      actorId: gate.userId,
+      actorEmail: gate.email,
+      action: "user.plan",
+      targetId: userId,
+      targetEmail: updated.email,
+      detail: { plan },
+    });
+    return c.json({
+      ok: true,
+      user: {
+        id: userId,
+        email: updated.email,
+        role: updated.role,
+        plan: updated.plan,
+      },
+    });
+  });
+
+  api.post("/admin/role", async (c) => {
+    const gate = await requireSuperAdmin(c.req.raw);
+    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      userId?: string;
+      role?: string;
+    };
+    const userId = String(body.userId || "").trim();
+    const role = String(body.role || "")
+      .trim()
+      .toLowerCase();
+    if (!userId || !role) {
+      return c.json({ error: "ต้องส่ง userId และ role" }, 400);
+    }
+    if (userId === gate.userId && role !== "superadmin") {
+      return c.json({ error: "ห้ามลด role ของตัวเอง" }, 400);
+    }
+    const updated = await setUserRole(userId, role);
+    if (!updated) {
+      return c.json({ error: "role ต้องเป็น user|admin|superadmin" }, 400);
+    }
+    await writeAuditLog({
+      actorId: gate.userId,
+      actorEmail: gate.email,
+      action: "user.role",
+      targetId: userId,
+      targetEmail: updated.email,
+      detail: { role: updated.role },
+    });
+    return c.json({ ok: true, user: { id: userId, ...updated } });
+  });
+
+  api.post("/admin/ban", async (c) => {
+    const gate = await requireSuperAdmin(c.req.raw);
+    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      userId?: string;
+      banned?: boolean;
+      banReason?: string;
+    };
+    const userId = String(body.userId || "").trim();
+    if (!userId || typeof body.banned !== "boolean") {
+      return c.json({ error: "ต้องส่ง userId และ banned" }, 400);
+    }
+    if (userId === gate.userId) {
+      return c.json({ error: "ห้ามแบนตัวเอง" }, 400);
+    }
+    const updated = await setUserBanned(userId, body.banned, body.banReason);
+    if (!updated) return c.json({ error: "ไม่พบผู้ใช้" }, 404);
+    await writeAuditLog({
+      actorId: gate.userId,
+      actorEmail: gate.email,
+      action: body.banned ? "user.ban" : "user.unban",
+      targetId: userId,
+      targetEmail: updated.email,
+      detail: { banned: updated.banned, banReason: updated.banReason },
+    });
+    return c.json({ ok: true, user: { id: userId, ...updated } });
+  });
+
+  api.get("/admin/limits", async (c) => {
+    const gate = await requireSuperAdmin(c.req.raw);
+    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    const limits = await getAppLimits();
+    return c.json({ limits });
+  });
+
+  api.post("/admin/limits", async (c) => {
+    const gate = await requireSuperAdmin(c.req.raw);
+    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      freeMaxMulti?: number;
+      paidMaxMulti?: number;
+    };
+    const limits = await setAppLimits({
+      freeMaxMulti: body.freeMaxMulti,
+      paidMaxMulti: body.paidMaxMulti,
+    });
+    await writeAuditLog({
+      actorId: gate.userId,
+      actorEmail: gate.email,
+      action: "limits.update",
+      detail: limits,
+    });
+    return c.json({ ok: true, limits });
+  });
+
+  api.get("/admin/ai", async (c) => {
+    const gate = await requireSuperAdmin(c.req.raw);
+    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    const aiAdmin = await getAiAdminSettings();
+    return c.json({
+      settings: aiAdmin,
+      status: geminiStatus({ adminDefaultModel: aiAdmin.defaultModel }),
+    });
+  });
+
+  api.post("/admin/ai", async (c) => {
+    const gate = await requireSuperAdmin(c.req.raw);
+    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      defaultModel?: string;
+    };
+    const model = normalizeGeminiModel(body.defaultModel);
+    if (!model) return c.json({ error: "โมเดลไม่ถูกต้อง" }, 400);
+    const settings = await setAiAdminSettings({ defaultModel: model });
+    if (!isByokOnly()) {
+      writeAiConfig({ geminiModel: model });
+    }
+    await writeAuditLog({
+      actorId: gate.userId,
+      actorEmail: gate.email,
+      action: "ai.settings",
+      detail: settings,
+    });
+    return c.json({
+      ok: true,
+      settings,
+      status: geminiStatus({ adminDefaultModel: settings.defaultModel }),
+    });
+  });
+
+  api.get("/admin/audit", async (c) => {
+    const gate = await requireSuperAdmin(c.req.raw);
+    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    const limit = Number(c.req.query("limit") || 100);
+    const rows = await listAuditLogs(limit);
+    return c.json({ rows });
+  });
+
+  api.get("/ai/providers", (c) => {
+    return c.json({
+      providers: listAiProvidersPublic(),
+      defaultProvider: "google",
+    });
+  });
+
+  /** Live model list for a provider (needs the user's API key). */
+  api.post("/ai/models", async (c) => {
+    try {
+      const body = (await c.req.json().catch(() => ({}))) as {
+        provider?: string;
+        apiKey?: string;
+      };
+      const provider =
+        getAiProvider(body.provider)?.id ||
+        getRequestAiProvider(c.req.raw) ||
+        "google";
+      const apiKey =
+        String(body.apiKey || "").trim() ||
+        getRequestGeminiKey(c.req.raw) ||
+        "";
+      if (!apiKey) {
+        return c.json({ error: "ต้องส่ง apiKey เพื่อดึงรายการโมเดล" }, 400);
+      }
+      const { listProviderModels } = await import("./ai-models-list");
+      const result = await listProviderModels({ provider, apiKey });
+      return c.json({
+        ok: true,
+        provider,
+        providerLabel: result.providerLabel,
+        models: result.models,
+        defaultModel: result.defaultModel,
+        source: result.source,
+        warning: result.error || null,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message }, 400);
+    }
+  });
+
+  api.get("/ai/status", async (c) => {
+    const aiAdmin = await getAiAdminSettings().catch(() => ({
+      defaultModel: "gemini-3.8-flash",
+    }));
+    const creds = getRequestAiCredentials(c.req.raw);
+    return c.json(
+      geminiStatus({
+        requestKey: creds.apiKey,
+        requestModel: creds.model,
+        requestProvider: creds.provider,
+        adminDefaultModel: aiAdmin.defaultModel,
+      }),
+    );
+  });
+
+  const postAiConnect = async (c: Parameters<typeof requirePremium>[0] & {
+    req: { json: () => Promise<unknown> };
+  }) => {
     const denied = await requirePremium(c, PremiumFeature.AiLogin);
     if (denied) return denied;
     try {
       const body = (await c.req.json().catch(() => ({}))) as {
         apiKey?: string;
         model?: string;
+        provider?: string;
         /** Legacy: persist on server (disabled when BYOK-only) */
         persist?: boolean;
       };
+      const provider =
+        getAiProvider(body.provider)?.id ||
+        getRequestAiProvider(c.req.raw) ||
+        "google";
       const key = String(body.apiKey || "").trim();
-      const model = normalizeGeminiModel(body.model);
+      const model =
+        normalizeProviderModel(provider, body.model) ||
+        defaultModelForProvider(provider);
 
-      if (key && key.length < 20) {
-        return c.json({ error: "กรุณาใส่ Gemini API key จาก Google AI Studio" }, 400);
+      const minLen = provider === "google" ? 20 : 8;
+      if (key && key.length < minLen) {
+        const label = getAiProvider(provider)?.label || "AI";
+        return c.json({ error: `กรุณาใส่ ${label} API key ที่ถูกต้อง` }, 400);
       }
       if (!key && !model) {
         return c.json({ error: "ส่ง apiKey และ/หรือ model" }, 400);
       }
 
-      // BYOK (default on web): validate + return status — key stays in the browser.
       if (isByokOnly() || body.persist === false) {
         if (!key && !getRequestGeminiKey(c.req.raw)) {
           return c.json(
-            { error: "ต้องส่ง API key ของคุณ (เก็บในเบราว์เซอร์ ไม่บันทึกลงเซิร์ฟเวอร์)" },
+            {
+              error:
+                "ต้องส่ง API key ของคุณ (เก็บในเบราว์เซอร์ ไม่บันทึกลงเซิร์ฟเวอร์)",
+            },
             400,
           );
         }
         const effectiveKey = key || getRequestGeminiKey(c.req.raw) || "";
         return c.json({
           ok: true,
-          ...geminiStatus({ requestKey: effectiveKey, requestModel: model }),
+          ...geminiStatus({
+            requestKey: effectiveKey,
+            requestModel: model,
+            requestProvider: provider,
+          }),
           maskedKey: maskGeminiKey(effectiveKey),
           connected: true,
           byok: true,
         });
       }
 
-      // Legacy server-side store (local CLI style) — only when BYOK is off.
+      if (provider !== "google") {
+        return c.json(
+          {
+            error:
+              "โหมดเซิร์ฟเวอร์รองรับเฉพาะ Gemini — เปิด BYOK หรือใช้ provider=google",
+          },
+          400,
+        );
+      }
       const patch: { geminiApiKey?: string; geminiModel?: string } = {};
       if (key) patch.geminiApiKey = key;
       if (model) patch.geminiModel = model;
@@ -173,14 +511,17 @@ export function createApi(options: { startedAt: Date; version?: string }) {
         return c.json({ error: "ต้องเชื่อมต่อ API key ก่อนเปลี่ยนโมเดล" }, 401);
       }
       writeAiConfig(patch);
-      return c.json({ ok: true, ...geminiStatus() });
+      return c.json({ ok: true, ...geminiStatus({ requestProvider: "google" }) });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return c.json({ error: message }, 400);
     }
-  });
+  };
 
-  api.delete("/ai/google", (c) => {
+  api.post("/ai/connect", (c) => postAiConnect(c));
+  api.post("/ai/google", (c) => postAiConnect(c));
+
+  const deleteAiConnect = (c: Parameters<typeof requirePremium>[0]) => {
     if (!isByokOnly()) clearGeminiKey();
     return c.json({
       ok: true,
@@ -188,6 +529,119 @@ export function createApi(options: { startedAt: Date; version?: string }) {
       connected: false,
       byok: isByokOnly(),
     });
+  };
+  api.delete("/ai/google", (c) => deleteAiConnect(c));
+  api.delete("/ai/connect", (c) => deleteAiConnect(c));
+
+  async function requireSessionUserId(req: Request): Promise<
+    | { ok: true; userId: string }
+    | { ok: false; status: 401 | 500; error: string }
+  > {
+    try {
+      const { auth } = await import("./auth");
+      const session = await auth.api.getSession({ headers: req.headers });
+      const userId = session?.user?.id ? String(session.user.id) : "";
+      if (!userId) return { ok: false, status: 401, error: "ต้องเข้าสู่ระบบก่อน" };
+      return { ok: true, userId };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ok: false, status: 500, error: message };
+    }
+  }
+
+  /** Logged-in user: list decrypted AI keys stored on server. */
+  api.get("/ai/keys", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    try {
+      const { listUserAiKeys } = await import("./ai-key-vault");
+      const entries = await listUserAiKeys(gate.userId);
+      return c.json({
+        entries: entries.map((e) => ({
+          id: e.id,
+          provider: e.provider,
+          label: e.label,
+          model: e.model,
+          apiKey: e.apiKey,
+          storeOnServer: true,
+        })),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message }, 500);
+    }
+  });
+
+  /** Upsert one or many keys the user opted to sync. */
+  api.put("/ai/keys", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    try {
+      const body = (await c.req.json().catch(() => ({}))) as {
+        entries?: Array<{
+          id?: string;
+          provider?: string;
+          label?: string;
+          model?: string;
+          apiKey?: string;
+        }>;
+        entry?: {
+          id?: string;
+          provider?: string;
+          label?: string;
+          model?: string;
+          apiKey?: string;
+        };
+      };
+      const rawList = Array.isArray(body.entries)
+        ? body.entries
+        : body.entry
+          ? [body.entry]
+          : [];
+      if (!rawList.length) {
+        return c.json({ error: "ต้องส่ง entry หรือ entries" }, 400);
+      }
+      const { upsertUserAiKeys } = await import("./ai-key-vault");
+      const saved = await upsertUserAiKeys(
+        gate.userId,
+        rawList.map((e) => ({
+          id: String(e.id || "").trim(),
+          provider: String(e.provider || "google").trim(),
+          label: String(e.label || "").trim(),
+          model: String(e.model || "").trim(),
+          apiKey: String(e.apiKey || "").trim(),
+        })),
+      );
+      return c.json({
+        ok: true,
+        entries: saved.map((e) => ({
+          id: e.id,
+          provider: e.provider,
+          label: e.label,
+          model: e.model,
+          storeOnServer: true,
+          maskedKey: maskGeminiKey(e.apiKey),
+        })),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message }, 400);
+    }
+  });
+
+  api.delete("/ai/keys/:id", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    const id = String(c.req.param("id") || "").trim();
+    if (!id) return c.json({ error: "ต้องระบุ id" }, 400);
+    try {
+      const { deleteUserAiKey } = await import("./ai-key-vault");
+      const removed = await deleteUserAiKey(gate.userId, id);
+      return c.json({ ok: true, removed });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message }, 500);
+    }
   });
 
   api.post("/parse", async (c) => {
@@ -257,13 +711,15 @@ export function createApi(options: { startedAt: Date; version?: string }) {
     const denied = await requirePremium(c, PremiumFeature.AiSourceMap);
     if (denied) return denied;
 
-    const clientKey = getRequestGeminiKey(c.req.raw);
-    const clientModel = getRequestGeminiModel(c.req.raw);
-    if (!getGeminiApiKey(clientKey)) {
+    const aiCreds = getRequestAiCredentials(c.req.raw);
+    const clientKey = aiCreds.apiKey;
+    const clientModel = aiCreds.model;
+    const clientProvider = aiCreds.provider;
+    if (!hasRequestAiKey(clientProvider, clientKey)) {
       return c.json(
         {
           error:
-            "ยังไม่มี Gemini API key — กด «ใส่ Gemini key» แล้วใส่ key ของคุณ (เก็บในเบราว์เซอร์ ไม่ใช่คีย์ของแอป)",
+            "ยังไม่มี AI API key — กด «ใส่ AI key» แล้วเลือกผู้ให้บริการและใส่ key ของคุณ (เก็บในเบราว์เซอร์)",
         },
         401,
       );
@@ -375,16 +831,18 @@ export function createApi(options: { startedAt: Date; version?: string }) {
       };
 
       const runMap = async (emit: (evt: ProgressEvt) => void | Promise<void>) => {
-        const [{ detectKind }, { geminiFillDocxFormValues }, { sourceFilesMeta }] =
+        const [{ detectKind }, { fillDocxFormValues }, { sourceFilesMeta }] =
           await Promise.all([
             import("./source-extract"),
-            import("./gemini-map"),
+            import("./ai-fill"),
             import("./source-map"),
           ]);
-        const totalSteps = payloads.length + 2; // prepare*N + gemini once + done
+        const providerLabel =
+          getAiProvider(clientProvider)?.label || clientProvider;
+        const totalSteps = payloads.length + 2; // prepare*N + AI once + done
         emit({
           type: "log",
-          message: `เริ่มแมป ${payloads.length} ไฟล์ · โมเดล ${geminiStatus({ requestKey: clientKey, requestModel: clientModel }).model} · ส่งไฟล์ต้นทางจริง (PDF/รูป) ให้ AI อ่านเอง ไม่ดึงข้อความ/OCR ก่อน`,
+          message: `เริ่มแมป ${payloads.length} ไฟล์ · ${providerLabel} · ${clientModel} · ส่งไฟล์ต้นทางให้ AI อ่าน`,
         });
         emit({
           type: "progress",
@@ -419,7 +877,7 @@ export function createApi(options: { startedAt: Date; version?: string }) {
 
         await emit({
           type: "log",
-          message: `ส่งโครง Export JSON + ไฟล์ต้นทางให้ Gemini กรอกค่า แล้วรอ JSON กลับ (1 ครั้ง)…`,
+          message: `ส่งโครง Export JSON + ไฟล์ต้นทางให้ ${providerLabel} กรอกค่า แล้วรอ JSON กลับ (1 ครั้ง)…`,
         });
         await emit({
           type: "progress",
@@ -431,9 +889,10 @@ export function createApi(options: { startedAt: Date; version?: string }) {
         assertNotAborted(c.req.raw.signal);
         await emit({
           type: "log",
-          message: `ส่งไฟล์ต้นทางจริง + Export JSON · ฟิลด์ ${fields.length} ตัว (AI อ่าน PDF/รูปเอง)`,
+          message: `ส่งไฟล์ต้นทางจริง + Export JSON · ฟิลด์ ${fields.length} ตัว`,
         });
-        const valuesJson = await geminiFillDocxFormValues(skeleton, payloads, {
+        const valuesJson = await fillDocxFormValues(skeleton, payloads, {
+          provider: clientProvider,
           apiKey: clientKey,
           model: clientModel,
           fields,
@@ -589,6 +1048,112 @@ export function createApi(options: { startedAt: Date; version?: string }) {
     }
   });
 
+  /** AI draft {{tags}} for template tagger — BYOK; free via AiTagDraft. */
+  api.post("/template/suggest-tags", async (c) => {
+    const denied = await requirePremium(c, PremiumFeature.AiTagDraft);
+    if (denied) return denied;
+    try {
+      const form = await c.req.formData();
+      const file = form.get("file");
+      if (!(file instanceof File)) {
+        return c.json({ error: "กรุณาอัปโหลดไฟล์ .docx" }, 400);
+      }
+      if (!isDocx(file)) {
+        return c.json(
+          {
+            error:
+              file.name.toLowerCase().endsWith(".doc")
+                ? "รองรับเฉพาะ .docx — ให้ Save As เป็น .docx ใน Word ก่อน"
+                : "ไฟล์ต้องเป็น .docx เท่านั้น",
+          },
+          400,
+        );
+      }
+      if (file.size > MAX_DOCX_BYTES) {
+        return c.json({ error: "ไฟล์ใหญ่เกินไป (สูงสุด 25 MB)" }, 400);
+      }
+
+      const formKey =
+        typeof form.get("geminiApiKey") === "string"
+          ? String(form.get("geminiApiKey") || "").trim()
+          : typeof form.get("aiApiKey") === "string"
+            ? String(form.get("aiApiKey") || "").trim()
+            : "";
+      const formModel =
+        typeof form.get("geminiModel") === "string"
+          ? String(form.get("geminiModel") || "").trim()
+          : typeof form.get("aiModel") === "string"
+            ? String(form.get("aiModel") || "").trim()
+            : "";
+      const formProvider =
+        typeof form.get("aiProvider") === "string"
+          ? String(form.get("aiProvider") || "").trim()
+          : "";
+      const formNameLanguage =
+        typeof form.get("nameLanguage") === "string"
+          ? String(form.get("nameLanguage") || "").trim()
+          : typeof form.get("tagNameLang") === "string"
+            ? String(form.get("tagNameLang") || "").trim()
+            : "";
+      const headerCreds = getRequestAiCredentials(c.req.raw);
+      const clientProvider =
+        getAiProvider(formProvider)?.id || headerCreds.provider;
+      const clientKey = headerCreds.apiKey || formKey || undefined;
+      const clientModel =
+        normalizeProviderModel(clientProvider, formModel || headerCreds.model) ||
+        defaultModelForProvider(clientProvider);
+
+      if (!clientKey) {
+        return c.json(
+          { error: "ต้องใส่ AI API key ของคุณก่อน (BYOK)" },
+          400,
+        );
+      }
+
+      const buffer = Buffer.from(await file.arrayBuffer());
+      const { parseAiTagNameLanguage, suggestTemplateTags } = await import(
+        "./ai-tag-draft"
+      );
+      const nameLanguage = parseAiTagNameLanguage(formNameLanguage);
+      const result = await suggestTemplateTags(buffer, {
+        provider: clientProvider,
+        apiKey: clientKey,
+        model: clientModel,
+        filename: file.name,
+        nameLanguage,
+      });
+
+      /** Raw model JSON is staff-only (admin / superadmin). */
+      let staffRaw = false;
+      try {
+        const { auth } = await import("./auth");
+        const session = await auth.api.getSession({
+          headers: c.req.raw.headers,
+        });
+        staffRaw = roleIsStaffPaid(
+          (session?.user as { role?: string } | undefined)?.role,
+        );
+      } catch {
+        staffRaw = false;
+      }
+
+      return c.json({
+        suggestions: result.suggestions,
+        count: result.suggestions.length,
+        plainText: result.plainText,
+        ...(staffRaw
+          ? { rawAi: result.rawAi, rawText: result.rawText }
+          : {}),
+        provider: clientProvider,
+        model: clientModel,
+        nameLanguage,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: `AI ดราฟตัวแปรไม่สำเร็จ: ${message}` }, 400);
+    }
+  });
+
   /**
    * One source pack → AI map to JSON per template schema (no document fill).
    * Form: files (sources×M), schemas = JSON [{ id, filename, fields }]
@@ -602,21 +1167,32 @@ export function createApi(options: { startedAt: Date; version?: string }) {
       const formKey =
         typeof form.get("geminiApiKey") === "string"
           ? String(form.get("geminiApiKey") || "").trim()
-          : "";
+          : typeof form.get("aiApiKey") === "string"
+            ? String(form.get("aiApiKey") || "").trim()
+            : "";
       const formModel =
         typeof form.get("geminiModel") === "string"
           ? String(form.get("geminiModel") || "").trim()
+          : typeof form.get("aiModel") === "string"
+            ? String(form.get("aiModel") || "").trim()
+            : "";
+      const formProvider =
+        typeof form.get("aiProvider") === "string"
+          ? String(form.get("aiProvider") || "").trim()
           : "";
-      const clientKey = getRequestGeminiKey(c.req.raw) || formKey || undefined;
+      const headerCreds = getRequestAiCredentials(c.req.raw);
+      const clientProvider =
+        getAiProvider(formProvider)?.id || headerCreds.provider;
+      const clientKey = headerCreds.apiKey || formKey || undefined;
       const clientModel =
-        getRequestGeminiModel(c.req.raw) ||
-        normalizeGeminiModel(formModel) ||
-        undefined;
-      if (!getGeminiApiKey(clientKey)) {
+        normalizeProviderModel(clientProvider, formModel) ||
+        headerCreds.model ||
+        defaultModelForProvider(clientProvider);
+      if (!hasRequestAiKey(clientProvider, clientKey)) {
         return c.json(
           {
             error:
-              "ยังไม่มี Gemini API key — กด «ใส่ Gemini key» แล้วใส่ key ของคุณ (เก็บในเบราว์เซอร์ ไม่ใช่คีย์ของแอป)",
+              "ยังไม่มี AI API key — กด «ใส่ AI key» แล้วเลือกผู้ให้บริการและใส่ key ของคุณ (เก็บในเบราว์เซอร์)",
           },
           401,
         );
@@ -650,8 +1226,21 @@ export function createApi(options: { startedAt: Date; version?: string }) {
       } catch {
         return c.json({ error: "schemas ต้องเป็น JSON ที่ถูกต้อง" }, 400);
       }
-      if (schemas.length > 12) {
-        return c.json({ error: "แมปได้ไม่เกิน 12 เทมเพลตต่อครั้ง" }, 400);
+      {
+        const ent = await resolveEntitlement(c.req.raw);
+        const maxT = ent.maxMultiTemplates;
+        if (schemas.length > maxT) {
+          const paidCap =
+            (await getAppLimits().catch(() => null))?.paidMaxMulti ?? 10;
+          return c.json(
+            {
+              error: ent.paid
+                ? `แมปได้ไม่เกิน ${maxT} เทมเพลตต่อครั้ง (จ่ายแล้ว)`
+                : `บัญชีฟรีแมปได้ไม่เกิน ${maxT} เทมเพลตต่อครั้ง — จ่ายแล้วได้ถึง ${paidCap}`,
+            },
+            400,
+          );
+        }
       }
 
       const seenS = new Set<File>();
@@ -720,21 +1309,23 @@ export function createApi(options: { startedAt: Date; version?: string }) {
         | { type: "error"; error: string; message?: string };
 
       const runBatch = async (emit: (evt: BatchEvt) => void | Promise<void>) => {
-        const [{ detectKind }, { geminiFillDocxFormValuesBatch }, { sourceFilesMeta }] =
+        const [{ detectKind }, { fillDocxFormValuesBatch }, { sourceFilesMeta }] =
           await Promise.all([
             import("./source-extract"),
-            import("./gemini-map"),
+            import("./ai-fill"),
             import("./source-map"),
           ]);
         // prepare*N + 1 AI batch (N separate JSONs + source files once) + done
         const totalSteps = payloads.length + 2;
+        const providerLabel =
+          getAiProvider(clientProvider)?.label || clientProvider;
         await emit({
           type: "log",
-          message: `เริ่มแมปหลายเทมเพลต · ต้นทาง ${payloads.length} ไฟล์ · เทมเพลต ${schemas.length} · โมเดล ${geminiStatus({ requestKey: clientKey, requestModel: clientModel }).model}`,
+          message: `เริ่มแมปหลายเทมเพลต · ต้นทาง ${payloads.length} ไฟล์ · เทมเพลต ${schemas.length} · ${providerLabel} · ${clientModel}`,
         });
         await emit({
           type: "log",
-          message: `จะส่ง Export JSON แยกต่อเทมเพลต + ไฟล์ต้นทางจริง (PDF/รูป) ให้ AI อ่านเอง · ไม่ดึงข้อความ/OCR ก่อน`,
+          message: `จะส่ง Export JSON แยกต่อเทมเพลต + ไฟล์ต้นทางให้ AI อ่าน`,
         });
         await emit({
           type: "progress",
@@ -855,10 +1446,11 @@ export function createApi(options: { startedAt: Date; version?: string }) {
           });
 
           try {
-            const filled = await geminiFillDocxFormValuesBatch(
+            const filled = await fillDocxFormValuesBatch(
               fillItems,
               payloads,
               {
+                provider: clientProvider,
                 apiKey: clientKey,
                 model: clientModel,
               },
@@ -1012,8 +1604,21 @@ export function createApi(options: { startedAt: Date; version?: string }) {
       if (!templates.length) {
         return c.json({ error: "ต้องส่งเทมเพลต .docx อย่างน้อย 1 ไฟล์" }, 400);
       }
-      if (templates.length > 12) {
-        return c.json({ error: "สร้างได้ไม่เกิน 12 ไฟล์ต่อครั้ง" }, 400);
+      {
+        const ent = await resolveEntitlement(c.req.raw);
+        const maxT = ent.maxMultiTemplates;
+        if (templates.length > maxT) {
+          const paidCap =
+            (await getAppLimits().catch(() => null))?.paidMaxMulti ?? 10;
+          return c.json(
+            {
+              error: ent.paid
+                ? `สร้างได้ไม่เกิน ${maxT} ไฟล์ต่อครั้ง (จ่ายแล้ว)`
+                : `บัญชีฟรีสร้างได้ไม่เกิน ${maxT} ไฟล์ต่อครั้ง — จ่ายแล้วได้ถึง ${paidCap}`,
+            },
+            400,
+          );
+        }
       }
 
       const itemsRaw = form.get("items");

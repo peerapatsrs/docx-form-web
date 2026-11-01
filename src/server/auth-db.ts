@@ -1,26 +1,24 @@
-import fs from "node:fs";
-import path from "node:path";
-import Database from "better-sqlite3";
+import { Pool } from "pg";
 
 /**
- * SQLite path for Better Auth.
- * - Local: ./data/auth.db
- * - Docker/Render disk: set AUTH_DB_PATH=/data/auth.db (persistent volume)
+ * PostgreSQL pool for Better Auth.
+ * Set DATABASE_URL (e.g. postgres://user:pass@host:5432/dbname).
+ * Cloud hosts (Render, etc.): add ?sslmode=require when required.
  */
-export function getAuthDbPath(): string {
-  const fromEnv = String(process.env.AUTH_DB_PATH || "").trim();
+export function getDatabaseUrl(): string {
+  const fromEnv = String(process.env.DATABASE_URL || "").trim();
   if (fromEnv) return fromEnv;
-  return path.join(process.cwd(), "data", "auth.db");
+  // Local default matching docker-compose.yml
+  return "postgres://docx:docx@127.0.0.1:5432/docx_form";
 }
 
-let cached: Database.Database | null = null;
+let cached: Pool | null = null;
 
-export function getAuthSqlite(): Database.Database {
+export function getAuthPool(): Pool {
   if (cached) return cached;
-  const dbPath = getAuthDbPath();
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  cached = new Database(dbPath);
-  cached.pragma("journal_mode = WAL");
-  cached.pragma("foreign_keys = ON");
+  cached = new Pool({
+    connectionString: getDatabaseUrl(),
+    max: 10,
+  });
   return cached;
 }

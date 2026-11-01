@@ -1,40 +1,33 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
 import { getSessionCookie } from "better-auth/cookies";
 
 /**
- * Optional gate: set AUTH_REQUIRED=1 to force login for app pages.
- * Auth API + static assets stay public.
+ * Optimistic edge gate only — cookie presence, no DB.
+ * Real auth/role checks live in server layouts + /api/*.
+ * Guests hitting /account|/admin get a hard redirect to /login (avoids
+ * Next soft-nav leaving the home app.js shell in a broken state).
+ * @see .cursor/rules/page-auth-guards.mdc
  */
 export function proxy(request: NextRequest) {
-  const required =
-    String(process.env.AUTH_REQUIRED || "").trim() === "1" ||
-    String(process.env.AUTH_REQUIRED || "").toLowerCase() === "true";
-  if (!required) return NextResponse.next();
-
   const { pathname } = request.nextUrl;
-  if (
-    pathname.startsWith("/api/auth") ||
-    pathname.startsWith("/api/auth-config") ||
-    pathname.startsWith("/api/health") ||
-    pathname.startsWith("/login") ||
-    pathname.startsWith("/_next") ||
-    pathname.startsWith("/style.css") ||
-    pathname.startsWith("/app.js") ||
-    pathname === "/favicon.ico"
-  ) {
-    return NextResponse.next();
-  }
+  const needsAuth =
+    pathname === "/account" ||
+    pathname.startsWith("/account/") ||
+    pathname === "/admin" ||
+    pathname.startsWith("/admin/");
 
-  const sessionCookie = getSessionCookie(request);
-  if (!sessionCookie) {
-    const url = request.nextUrl.clone();
-    url.pathname = "/login";
-    url.searchParams.set("next", pathname);
-    return NextResponse.redirect(url);
-  }
-  return NextResponse.next();
+  if (!needsAuth) return NextResponse.next();
+
+  const token = getSessionCookie(request);
+  if (token) return NextResponse.next();
+
+  const login = new URL("/login", request.url);
+  login.searchParams.set("next", pathname);
+  // 307 keeps method; browsers treat this as a full document navigation.
+  return NextResponse.redirect(login, 307);
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image).*)"],
+  matcher: ["/account", "/account/:path*", "/admin", "/admin/:path*"],
 };

@@ -1,6 +1,10 @@
 import { betterAuth } from "better-auth";
 import { passkey } from "@better-auth/passkey";
-import { getAuthSqlite } from "./auth-db";
+import { admin } from "better-auth/plugins";
+import { getAuthPool } from "./auth-db";
+import { ac, roles } from "@/lib/auth-permissions";
+import { isSuperAdminEmail } from "./auth-superadmin";
+import { devAuthPlugin } from "./dev-auth-plugin";
 
 function env(name: string): string | undefined {
   const v = String(process.env[name] || "").trim();
@@ -80,12 +84,38 @@ export const auth = betterAuth({
     env("AUTH_SECRET") ||
     // Build-time / local fallback only — set BETTER_AUTH_SECRET in production.
     "docx-form-dev-secret-change-me-32b",
-  database: getAuthSqlite(),
+  database: getAuthPool(),
   emailAndPassword: {
     // Password auth off — OAuth + passkeys only (phishing-resistant by default).
     enabled: false,
   },
+  user: {
+    additionalFields: {
+      /**
+       * Billing plan until Stripe — superadmin toggles via /admin.
+       * free → multi-file cap 2 · pro → cap 10
+       */
+      plan: {
+        type: "string",
+        required: false,
+        defaultValue: "free",
+        // Admin UI writes via /api/admin/plan; keep readable on session.
+        input: false,
+      },
+    },
+  },
   socialProviders,
+  /**
+   * OAuth state lives in Postgres (`verification`). Skip the extra signed
+   * `better-auth.state` cookie check — Cursor preview / some browsers drop that
+   * short-lived cookie on the Google → localhost round-trip, which surfaces as
+   * `state_mismatch` ("State not persisted correctly") even when the DB row exists.
+   * CSRF is still covered by the random `state` param stored server-side.
+   */
+  account: {
+    storeStateStrategy: "database",
+    skipStateCookieCheck: true,
+  },
   session: {
     expiresIn: 60 * 60 * 24 * 7, // 7 days
     updateAge: 60 * 60 * 24, // refresh daily
@@ -101,6 +131,12 @@ export const auth = betterAuth({
   },
   advanced: {
     useSecureCookies: process.env.NODE_ENV === "production",
+    defaultCookieAttributes: {
+      sameSite: "lax",
+      path: "/",
+      // Dev is http://localhost — never force Secure here.
+      secure: process.env.NODE_ENV === "production",
+    },
     database: {
       // Generate IDs server-side
       generateId: undefined,
@@ -111,7 +147,25 @@ export const auth = betterAuth({
     "http://localhost:3000",
     "http://127.0.0.1:3000",
   ].filter(Boolean),
+  databaseHooks: {
+    user: {
+      create: {
+        async before(user) {
+          if (!isSuperAdminEmail(user.email)) return;
+          return {
+            data: { ...user, role: "superadmin", plan: "pro" },
+          };
+        },
+      },
+    },
+  },
   plugins: [
+    admin({
+      ac,
+      roles,
+      defaultRole: "user",
+      adminRoles: ["admin", "superadmin"],
+    }),
     passkey({
       rpID: rpID(),
       rpName: "docx-form",
@@ -121,6 +175,11 @@ export const auth = betterAuth({
         userVerification: "required",
       },
     }),
+    // Local only: /api/auth/dev/users + /api/auth/dev/login-as
+    ...(process.env.NODE_ENV === "production" &&
+    String(process.env.DEV_AUTH || "").trim() !== "1"
+      ? []
+      : [devAuthPlugin()]),
   ],
 });
 

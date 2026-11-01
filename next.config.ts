@@ -9,9 +9,10 @@ const nextConfig: NextConfig = {
     "tesseract.js",
     "jszip",
     "easy-template-x",
-    "better-sqlite3",
+    "pg",
     "better-auth",
     "@better-auth/passkey",
+    "@cursor/sdk",
   ],
 };
 

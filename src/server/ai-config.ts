@@ -1,11 +1,24 @@
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  defaultModelForProvider,
+  getAiProvider,
+  listAiProvidersPublic,
+  normalizeProviderModel,
+  type AiProviderId,
+} from "./ai-providers";
 
 export type AiConfig = {
   /** Google AI Studio / Gemini API key — only used when BYOK is off (legacy/local) */
   geminiApiKey?: string;
   geminiModel?: string;
+};
+
+export type RequestAiCredentials = {
+  provider: AiProviderId | string;
+  apiKey?: string;
+  model?: string;
 };
 
 function resolveConfigDir(): string {
@@ -94,6 +107,7 @@ export function maskGeminiKey(key: string): string {
 export function getRequestGeminiKey(req?: Request | null): string | undefined {
   if (!req) return undefined;
   const raw =
+    req.headers.get("x-ai-api-key") ||
     req.headers.get("x-gemini-api-key") ||
     req.headers.get("x-goog-api-key") ||
     "";
@@ -103,7 +117,37 @@ export function getRequestGeminiKey(req?: Request | null): string | undefined {
 
 export function getRequestGeminiModel(req?: Request | null): string | undefined {
   if (!req) return undefined;
-  return normalizeGeminiModel(req.headers.get("x-gemini-model")) || undefined;
+  return (
+    normalizeProviderModel(
+      getRequestAiProvider(req),
+      req.headers.get("x-ai-model") || req.headers.get("x-gemini-model"),
+    ) || undefined
+  );
+}
+
+export function getRequestAiProvider(req?: Request | null): string {
+  if (!req) return "google";
+  const raw = String(
+    req.headers.get("x-ai-provider") ||
+      req.headers.get("x-docx-ai-provider") ||
+      "",
+  )
+    .trim()
+    .toLowerCase();
+  if (!raw) return "google";
+  const p = getAiProvider(raw);
+  return p?.id || "google";
+}
+
+/** Unified BYOK credentials from headers (new + legacy Gemini). */
+export function getRequestAiCredentials(
+  req?: Request | null,
+): RequestAiCredentials {
+  const provider = getRequestAiProvider(req);
+  const apiKey = getRequestGeminiKey(req);
+  const model =
+    getRequestGeminiModel(req) || defaultModelForProvider(provider);
+  return { provider, apiKey, model };
 }
 
 /**
@@ -141,21 +185,87 @@ export function getGeminiModel(override?: string | null): string {
   );
 }
 
+/** Async resolve: request → file config → admin app_settings → default */
+export async function getGeminiModelAsync(
+  override?: string | null,
+): Promise<string> {
+  const fromOverride = normalizeGeminiModel(override);
+  if (fromOverride) return fromOverride;
+  const fromFile = normalizeGeminiModel(readAiConfig().geminiModel);
+  if (fromFile) return fromFile;
+  try {
+    const { getAiAdminSettings } = await import("./admin-store");
+    const admin = await getAiAdminSettings();
+    return normalizeGeminiModel(admin.defaultModel) || DEFAULT_GEMINI_MODEL;
+  } catch {
+    return DEFAULT_GEMINI_MODEL;
+  }
+}
+
 export function geminiStatus(opts?: {
   requestKey?: string | null;
   requestModel?: string | null;
+  requestProvider?: string | null;
+  /** Admin-configured default when file/env has none */
+  adminDefaultModel?: string | null;
 }) {
-  const key = getGeminiApiKey(opts?.requestKey);
-  const model = getGeminiModel(opts?.requestModel);
+  const providerId =
+    getAiProvider(opts?.requestProvider)?.id ||
+    getAiProvider("google")?.id ||
+    "google";
+  const provider = getAiProvider(providerId)!;
+  const key =
+    provider.apiFamily === "gemini"
+      ? getGeminiApiKey(opts?.requestKey)
+      : opts?.requestKey && String(opts.requestKey).trim()
+        ? String(opts.requestKey).trim()
+        : undefined;
+  const model =
+    normalizeProviderModel(providerId, opts?.requestModel) ||
+    (provider.apiFamily === "gemini"
+      ? normalizeGeminiModel(readAiConfig().geminiModel)
+      : null) ||
+    (provider.apiFamily === "gemini"
+      ? normalizeGeminiModel(opts?.adminDefaultModel)
+      : null) ||
+    provider.defaultModel;
   return {
     connected: !!key,
     byok: isByokOnly(),
-    provider: "google-gemini" as const,
+    provider: providerId,
+    providerLabel: provider.label,
+    apiFamily: provider.apiFamily,
     model,
-    models: GEMINI_MODEL_OPTIONS,
-    defaultModel: DEFAULT_GEMINI_MODEL,
+    models: provider.models,
+    defaultModel: provider.defaultModel,
+    adminDefaultModel: normalizeGeminiModel(opts?.adminDefaultModel) || null,
     maskedKey: key ? maskGeminiKey(key) : null,
+    hasServerEnvKey: !!(
+      process.env.DOCX_FORM_GEMINI_API_KEY ||
+      process.env.GEMINI_API_KEY ||
+      process.env.GOOGLE_API_KEY ||
+      process.env.GOOGLE_GENERATIVE_AI_API_KEY
+    ),
+    premiumEnforce:
+      String(process.env.PREMIUM_ENFORCE || "").trim() === "1" ||
+      String(process.env.PREMIUM_ENFORCE || "")
+        .trim()
+        .toLowerCase() === "true",
     configPath: isByokOnly() ? "(browser session — not stored on server)" : CONFIG_PATH,
-    studioUrl: "https://aistudio.google.com/apikey",
+    studioUrl: provider.docsUrl,
+    docsUrl: provider.docsUrl,
+    providers: listAiProvidersPublic(),
   };
+}
+
+/** True when request carries a usable BYOK key for the given provider. */
+export function hasRequestAiKey(
+  provider: string | null | undefined,
+  apiKey?: string | null,
+): boolean {
+  const p = getAiProvider(provider) || getAiProvider("google");
+  const key = String(apiKey || "").trim();
+  if (!key) return false;
+  if (p?.apiFamily === "gemini") return !!getGeminiApiKey(key);
+  return key.length >= 8;
 }

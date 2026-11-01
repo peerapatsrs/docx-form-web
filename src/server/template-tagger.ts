@@ -221,18 +221,19 @@ function collectWtNodes(xml: string): { nodes: WtNode[]; plainText: string } {
 }
 
 /**
- * Pure-digit needles must be a complete token — not a prefix of a longer number
- * ("2" in "281"). Short runnos also must not steal leading digits of Thai-glued
- * text ("1" in "1โฉนด…"). Longer IDs (tax / ทะเบียน) often sit flush against the
- * next Thai label with no <w:tab/> — those must still match.
- * Only the following character is checked (a digit on the left e.g. "N2"+"281"
- * → "N2281" must still allow "281").
+ * Pure-digit needles must be a complete token — not a shard of a phone/id.
+ * Rejects: "3" inside "02-023-2599", "2" in "281", "1" in "1โฉนด…".
+ * Longer IDs flush against a following Thai label (no tab) still match.
  */
 function plainMatchAllowed(haystack: string, idx: number, needle: string): boolean {
   if (!/^\d+$/.test(needle)) return true;
-  const next = haystack[idx + needle.length] || "";
+  const end = idx + needle.length;
+  const next = haystack[end] || "";
+  const prev = idx > 0 ? haystack[idx - 1]! : "";
   if (/\d/.test(next)) return false;
   if (needle.length <= 4 && /[\u0E00-\u0E7F]/u.test(next)) return false;
+  if (/[\d\-/.]/.test(prev)) return false;
+  if (/[\-/.]/.test(next)) return false;
   return true;
 }
 
@@ -609,6 +610,509 @@ function expandToTableRow(
 }
 
 /**
+ * Plain [start,end) of the <w:tr> that contains the range, or null if outside a table row.
+ * Used by AI tag draft to reject any span that lives inside a table.
+ */
+export function tryPlainSpanOfTableRow(
+  xml: string,
+  rangeStart: number,
+  rangeEnd: number,
+): { start: number; end: number } | null {
+  try {
+    const { nodes } = collectWtNodes(xml);
+    const span = expandToTableRow(xml, nodes, rangeStart, rangeEnd, true);
+    if (!(span.end > span.start)) return null;
+    // Guard false positives from findContainingTrOpen (last <w:tr before offset
+    // may be a prior closed row). Require the query to actually sit in that row.
+    if (rangeStart < span.start || rangeEnd > span.end) return null;
+    return { start: span.start, end: span.end };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every non-empty <w:tr> plain span in document order (all tables).
+ * Prefer this for AI draft table rejection — does not rely on expandToTableRow.
+ */
+export function listAllTableRowPlainSpans(
+  xml: string,
+): { start: number; end: number }[] {
+  if (!xml) return [];
+  const { nodes } = collectWtNodes(xml);
+  const tblOpens = listTblOpens(xml);
+  const out: { start: number; end: number }[] = [];
+  for (let ti = 0; ti < tblOpens.length; ti += 1) {
+    const trOpens = listTrOpensInTable(xml, tblOpens[ti]);
+    for (let ri = 0; ri < trOpens.length; ri += 1) {
+      let bounds: { xmlStart: number; xmlEnd: number };
+      try {
+        bounds = trXmlBounds(xml, trOpens[ri]);
+      } catch {
+        continue;
+      }
+      const rowNodes = nodes.filter(
+        (n) => n.contentStart >= bounds.xmlStart && n.contentEnd <= bounds.xmlEnd,
+      );
+      if (!rowNodes.length) continue;
+      const start = rowNodes[0].plainStart;
+      const end = rowNodes[rowNodes.length - 1].plainEnd;
+      if (end > start) out.push({ start, end });
+    }
+  }
+  return out;
+}
+
+/** Blank <w:tc> under a column header — AI/manual fill-empty-tc candidates. */
+export type TableEmptyCellHint = {
+  /** Distinctive non-empty text from the same data row (plainText anchor). */
+  rowAnchor: string;
+  /** 0-based occurrence of rowAnchor in document plain that lands in this row. */
+  occurrence: number;
+  /** Absolute plain start of the row (may equal 0 for empty-leading rows). */
+  plainStart: number;
+  /** Absolute plain end of the row. */
+  plainEnd: number;
+  /** 0-based <w:tc> index in the row. */
+  cellIndex: number;
+  /** Header label from a row above (same cell index), if any. */
+  header: string;
+  tableIndex: number;
+  rowIndexInTable: number;
+};
+
+/** Non-empty data-row cell under a header — AI replace / fill candidates inside list-table. */
+export type TableSampleCellHint = TableEmptyCellHint & {
+  /** Visible sample text currently in the cell (e.g. "1", "นาย…"). */
+  cellText: string;
+};
+
+function normalizeTcPlain(s: string): string {
+  return String(s || "")
+    .replace(/\u00A0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isNoiseHeaderLabel(text: string): boolean {
+  return !text || /^[✓√✖×xX\-–—·.•]+$/u.test(text);
+}
+
+type TableRowScanInfo = {
+  cells: { text: string }[];
+  plainStart: number;
+  plainEnd: number;
+  rowIndexInTable: number;
+  tableIndex: number;
+  headers: string[];
+  rowAnchor: string;
+  occurrence: number;
+};
+
+/**
+ * Shared table walk for empty/sample cell hints under column headers.
+ * By default only the first body/data row per <w:tbl> (list-table prototype) —
+ * matches manual tagger: wrap one sample row, leave later samples/footers alone.
+ */
+function scanDataRowsWithHeaders(
+  xml: string,
+  opts?: { firstDataRowOnly?: boolean },
+): TableRowScanInfo[] {
+  if (!xml) return [];
+  const firstOnly = opts?.firstDataRowOnly !== false;
+  const { nodes, plainText } = collectWtNodes(xml);
+  const tblOpens = listTblOpens(xml);
+  const out: TableRowScanInfo[] = [];
+
+  for (let ti = 0; ti < tblOpens.length; ti += 1) {
+    const trOpens = listTrOpensInTable(xml, tblOpens[ti]);
+    type RowInfo = {
+      cells: { text: string }[];
+      plainStart: number;
+      plainEnd: number;
+      rowIndexInTable: number;
+      isTblHeader: boolean;
+    };
+    const rows: RowInfo[] = [];
+
+    for (let ri = 0; ri < trOpens.length; ri += 1) {
+      const trOpen = trOpens[ri];
+      let bounds: { xmlStart: number; xmlEnd: number };
+      try {
+        bounds = trXmlBounds(xml, trOpen);
+      } catch {
+        continue;
+      }
+      const trXml = xml.slice(bounds.xmlStart, bounds.xmlEnd);
+      const tcs = findTopLevelTcSpans(trXml);
+      const cells = tcs.map((span) => {
+        const cellXml = trXml.slice(span.start, span.end);
+        return { text: normalizeTcPlain(trPlainText(cellXml)) };
+      });
+      const rowNodes = nodes.filter(
+        (n) => n.contentStart >= bounds.xmlStart && n.contentEnd <= bounds.xmlEnd,
+      );
+      const plainStart = rowNodes.length ? rowNodes[0].plainStart : -1;
+      const plainEnd = rowNodes.length ? rowNodes[rowNodes.length - 1].plainEnd : -1;
+      rows.push({
+        cells,
+        plainStart,
+        plainEnd,
+        rowIndexInTable: ri,
+        isTblHeader: /<w:tblHeader\b/.test(trXml),
+      });
+    }
+
+    let emittedDataRow = false;
+    for (let ri = 0; ri < rows.length; ri += 1) {
+      const row = rows[ri];
+      if (row.plainStart < 0 || !(row.plainEnd > row.plainStart)) continue;
+      // Word repeating header rows are never the list-table prototype.
+      if (row.isTblHeader) continue;
+      const nonEmpty = row.cells
+        .map((c, i) => ({ text: c.text, i }))
+        .filter((c) => !!c.text);
+      if (!nonEmpty.length) continue;
+      // Skip pure header-like rows (no digit/checkbox/sample token).
+      // Short label-only rows (「ลำดับ」「ชื่อ」「เขต / อำเภอ」) are headers even
+      // without w:tblHeader — don't treat them as the list-table prototype.
+      // Long merged titles (「สืบตามเขตอำนาจศาล / ภูมิลำเนา…」) also lack
+      // tblHeader; when a later row has digits/checkboxes, keep skipping.
+      const hasSampleToken = nonEmpty.some(
+        (c) =>
+          /\d/.test(c.text) ||
+          /^[✓√✔☑✖×xX]$/u.test(c.text),
+      );
+      if (!hasSampleToken) {
+        const laterHasSample = rows.slice(ri + 1).some((later) =>
+          later.cells.some(
+            (c) =>
+              !!c.text &&
+              (/\d/.test(c.text) || /^[✓√✔☑✖×xX]$/u.test(c.text)),
+          ),
+        );
+        if (laterHasSample) continue;
+      }
+      const looksLikeLabelOnly =
+        !hasSampleToken &&
+        nonEmpty.every((c) => c.text.length > 0 && c.text.length <= 80);
+      if (looksLikeLabelOnly) continue;
+      const looksLikeData =
+        hasSampleToken || nonEmpty.some((c) => c.text.length >= 2);
+      if (!looksLikeData) continue;
+      if (firstOnly && emittedDataRow) continue;
+
+      const headers = row.cells.map((_, ci) => {
+        for (let hj = ri - 1; hj >= 0; hj -= 1) {
+          const ht = rows[hj].cells[ci]?.text || "";
+          if (!isNoiseHeaderLabel(ht)) return ht;
+        }
+        return "";
+      });
+
+      // Prefer the full row TAGGER_PLAIN span as anchor so fill-empty-tc plainText
+      // is the prototype row (not a single long cell that looks like column bleed).
+      // Fall back to the longest non-empty cell if the row slice is empty.
+      const rowSlice = plainText.slice(row.plainStart, row.plainEnd);
+      const anchor = nonEmpty.slice().sort((a, b) => b.text.length - a.text.length)[0];
+      const rowAnchor = rowSlice.trim() ? rowSlice : anchor.text;
+      let occurrence = -1;
+      let found = -1;
+      let from = 0;
+      while (from <= plainText.length) {
+        const idx = plainText.indexOf(rowAnchor, from);
+        if (idx < 0) break;
+        found += 1;
+        if (
+          idx >= row.plainStart &&
+          idx + rowAnchor.length <= row.plainEnd
+        ) {
+          occurrence = found;
+          break;
+        }
+        from = idx + Math.max(1, rowAnchor.length);
+      }
+      if (occurrence < 0) continue;
+
+      out.push({
+        cells: row.cells,
+        plainStart: row.plainStart,
+        plainEnd: row.plainEnd,
+        rowIndexInTable: row.rowIndexInTable,
+        tableIndex: ti,
+        headers,
+        rowAnchor,
+        occurrence,
+      });
+      emittedDataRow = true;
+    }
+  }
+
+  return out;
+}
+
+/** First body/data row per table — the list-table prototype the manual tagger wraps. */
+export type PrototypeTableRowSpan = {
+  plainStart: number;
+  plainEnd: number;
+  tableIndex: number;
+  rowIndexInTable: number;
+};
+
+/**
+ * Plain spans of the first data row in each <w:tbl> (skips tblHeader / header-like rows).
+ * Used by AI tag draft to reject wrap-row / cell tags on later sample rows.
+ */
+export function listPrototypeTableRowSpans(xml: string): PrototypeTableRowSpan[] {
+  return scanDataRowsWithHeaders(xml, { firstDataRowOnly: true }).map((row) => ({
+    plainStart: row.plainStart,
+    plainEnd: row.plainEnd,
+    tableIndex: row.tableIndex,
+    rowIndexInTable: row.rowIndexInTable,
+  }));
+}
+
+/** Body-level paragraph (outside any <w:tbl>) with its TAGGER_PLAIN span. */
+export type BodyParagraphPlainSpan = {
+  plainStart: number;
+  plainEnd: number;
+  text: string;
+};
+
+/**
+ * Non-empty top-level <w:p> spans outside tables — for paragraph-list prototype detection.
+ * TAGGER_PLAIN concatenates runs with no paragraph separators; these spans still map 1:1.
+ */
+export function listBodyParagraphPlainSpans(xml: string): BodyParagraphPlainSpan[] {
+  if (!xml) return [];
+  // Use full TAGGER_PLAIN (w:t + w:tab→\t). Joining only <w:t> texts drops tabs
+  // between runs, so seeded paragraph-list plainText never matches findOccurrence.
+  const { nodes, plainText: fullPlain } = collectWtNodes(xml);
+  const bodyOpen = /<w:body\b[^>]*>/i.exec(xml);
+  if (!bodyOpen) return [];
+  const bodyStart = bodyOpen.index + bodyOpen[0].length;
+  const bodyClose = xml.lastIndexOf("</w:body>");
+  if (bodyClose < bodyStart) return [];
+
+  const out: BodyParagraphPlainSpan[] = [];
+  let pos = bodyStart;
+  while (pos < bodyClose) {
+    const tblAt = xml.indexOf("<w:tbl", pos);
+    let pAt = -1;
+    const pRe = /<w:p(?:\s[^>]*)?>/g;
+    pRe.lastIndex = pos;
+    let pm: RegExpExecArray | null;
+    while ((pm = pRe.exec(xml)) !== null) {
+      if (pm.index >= bodyClose) break;
+      if (tblAt >= 0 && pm.index >= tblAt) break;
+      pAt = pm.index;
+      break;
+    }
+
+    if (tblAt >= 0 && (pAt < 0 || tblAt <= pAt)) {
+      const tblEnd = xml.indexOf("</w:tbl>", tblAt);
+      if (tblEnd < 0) break;
+      pos = tblEnd + "</w:tbl>".length;
+      continue;
+    }
+    if (pAt < 0) break;
+
+    const pClose = xml.indexOf("</w:p>", pAt);
+    if (pClose < 0) break;
+    const xmlStart = pAt;
+    const xmlEnd = pClose + "</w:p>".length;
+    const pNodes = nodes.filter(
+      (n) => n.contentStart >= xmlStart && n.contentEnd <= xmlEnd,
+    );
+    if (pNodes.length) {
+      const plainStart = pNodes[0].plainStart;
+      const plainEnd = pNodes[pNodes.length - 1].plainEnd;
+      const text = fullPlain.slice(plainStart, plainEnd);
+      if (text.trim()) out.push({ plainStart, plainEnd, text });
+    }
+    pos = xmlEnd;
+  }
+  return out;
+}
+
+/**
+ * Repeating paragraph-block prototype for AI kind "list" / mode "wrap".
+ * Same product model as list-table first row: wrap only the first unit.
+ */
+export type ParagraphListHint = {
+  /** Exact TAGGER_PLAIN substring of the first repeating unit. */
+  plainText: string;
+  plainStart: number;
+  plainEnd: number;
+  /** Exclusive end of the whole repeating group (later sample units). */
+  groupEnd: number;
+  unitCount: number;
+  /** Label stem e.g. 「จำเลยที่」. */
+  stem: string;
+  suggestedNameTh: string;
+  suggestedNameEn: string;
+};
+
+const PARA_LIST_STEM_RE =
+  /^(จำเลยที่|จำลยที่|โจทก์ที่|คู่ความที่|ลำดับที่|รายการที่|ข้อที่|ข้อ)\s*[0-9๐-๙]+/u;
+const PARA_LIST_STEM_EN_RE =
+  /^(Defendant|Plaintiff|Party|Item|Clause|Article)\s*(?:No\.?\s*)?[0-9]+/i;
+
+function matchParagraphListStem(text: string): string | null {
+  const t = String(text || "").replace(/^\s+/, "");
+  const th = PARA_LIST_STEM_RE.exec(t);
+  if (th) {
+    const stem = th[1].replace(/จำลยที่/g, "จำเลยที่");
+    return stem;
+  }
+  const en = PARA_LIST_STEM_EN_RE.exec(t);
+  if (en) return en[1];
+  return null;
+}
+
+function inventParagraphListNames(stem: string): {
+  th: string;
+  en: string;
+} {
+  const s = stem.replace(/จำลยที่/g, "จำเลยที่");
+  if (/จำเลย/.test(s) || /defendant/i.test(s)) {
+    return { th: "รายการจำเลย", en: "defendants" };
+  }
+  if (/โจทก์/.test(s) || /plaintiff/i.test(s)) {
+    return { th: "รายการโจทก์", en: "plaintiffs" };
+  }
+  if (/คู่ความ/.test(s) || /party/i.test(s)) {
+    return { th: "รายการคู่ความ", en: "parties" };
+  }
+  if (/ข้อ|clause|article/i.test(s)) {
+    return { th: "รายการข้อ", en: "clauses" };
+  }
+  if (/ลำดับ|รายการ|item/i.test(s)) {
+    return { th: "รายการ", en: "items" };
+  }
+  return { th: "รายการ", en: "items" };
+}
+
+/**
+ * Detect consecutive numbered prose blocks outside tables (e.g. จำเลยที่ 1 / 2 / 3).
+ * Returns one hint per stem group — prototype = first unit only (may span multiple <w:p>
+ * until the next numbered start), matching manual「ลิสต์ (ย่อหน้า)」on the first sample.
+ */
+export function listParagraphListHints(xml: string): ParagraphListHint[] {
+  if (!xml) return [];
+  const paras = listBodyParagraphPlainSpans(xml);
+  if (paras.length < 2) return [];
+  const { plainText: fullPlain } = collectWtNodes(xml);
+
+  type Start = { paraIndex: number; stem: string; plainStart: number; plainEnd: number };
+  const starts: Start[] = [];
+  for (let i = 0; i < paras.length; i += 1) {
+    const stem = matchParagraphListStem(paras[i].text);
+    if (!stem) continue;
+    starts.push({
+      paraIndex: i,
+      stem,
+      plainStart: paras[i].plainStart,
+      plainEnd: paras[i].plainEnd,
+    });
+  }
+  if (starts.length < 2) return [];
+
+  const out: ParagraphListHint[] = [];
+  let i = 0;
+  while (i < starts.length) {
+    const stem = starts[i].stem;
+    let j = i + 1;
+    while (j < starts.length && starts[j].stem === stem) j += 1;
+    const group = starts.slice(i, j);
+    i = j;
+    if (group.length < 2) continue;
+
+    const first = group[0];
+    const second = group[1];
+    const last = group[group.length - 1];
+    // Prototype unit: from first numbered start up to (not including) the next.
+    // Slice TAGGER_PLAIN directly so <w:tab/> between runs stay in plainText.
+    const plainStart = first.plainStart;
+    const plainEnd = second.plainStart;
+    if (!(plainEnd > plainStart)) continue;
+    const resolvedText = fullPlain.slice(plainStart, plainEnd);
+    if (!resolvedText.trim()) continue;
+
+    const names = inventParagraphListNames(stem);
+    out.push({
+      plainText: resolvedText,
+      plainStart,
+      plainEnd,
+      groupEnd: last.plainEnd,
+      unitCount: group.length,
+      stem,
+      suggestedNameTh: names.th,
+      suggestedNameEn: names.en,
+    });
+  }
+  return out;
+}
+
+/**
+ * Scan document.xml for empty cells on the first data row under a meaningful header
+ * (e.g. blank 「เขต / อำเภอ」). Used by AI tag draft for fill-empty-tc suggestions.
+ * Only the list-table prototype row per table (not later sample rows).
+ */
+export function listEmptyTableCellHints(xml: string): TableEmptyCellHint[] {
+  const out: TableEmptyCellHint[] = [];
+  for (const row of scanDataRowsWithHeaders(xml, { firstDataRowOnly: true })) {
+    for (let cellIndex = 0; cellIndex < row.cells.length; cellIndex += 1) {
+      if (row.cells[cellIndex].text) continue;
+      const header = row.headers[cellIndex] || "";
+      if (isNoiseHeaderLabel(header)) continue;
+      out.push({
+        rowAnchor: row.rowAnchor,
+        occurrence: row.occurrence,
+        plainStart: row.plainStart,
+        plainEnd: row.plainEnd,
+        cellIndex,
+        header,
+        tableIndex: row.tableIndex,
+        rowIndexInTable: row.rowIndexInTable,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Non-empty cells on the first data row under a meaningful header (incl. runnos).
+ * Used by AI tag draft so list-table wraps also tag prototype cell values.
+ * Only the list-table prototype row per table (not later sample rows).
+ */
+export function listSampleTableCellHints(xml: string): TableSampleCellHint[] {
+  const out: TableSampleCellHint[] = [];
+  for (const row of scanDataRowsWithHeaders(xml, { firstDataRowOnly: true })) {
+    for (let cellIndex = 0; cellIndex < row.cells.length; cellIndex += 1) {
+      const cellText = row.cells[cellIndex].text;
+      if (!cellText) continue;
+      const header = row.headers[cellIndex] || "";
+      if (isNoiseHeaderLabel(header)) continue;
+      // Skip cells that already look tagged.
+      if (/\{\{[^{}]+\}\}/.test(cellText)) continue;
+      out.push({
+        rowAnchor: row.rowAnchor,
+        occurrence: row.occurrence,
+        plainStart: row.plainStart,
+        plainEnd: row.plainEnd,
+        cellIndex,
+        header,
+        tableIndex: row.tableIndex,
+        rowIndexInTable: row.rowIndexInTable,
+        cellText,
+      });
+    }
+  }
+  return out;
+}
+
+/**
  * Expand a plain-text range to the full <w:p> that contains it.
  */
 function expandToParagraph(
@@ -900,10 +1404,6 @@ function isDeleteMode(mode: ResolvedOp["mode"]): boolean {
 
 function isWrapMode(mode: ResolvedOp["mode"]): boolean {
   return mode === "wrap" || mode === "wrap-row";
-}
-
-function isFillEmptyTcMode(mode: ResolvedOp["mode"]): boolean {
-  return mode === "fill-empty-tc";
 }
 
 /**

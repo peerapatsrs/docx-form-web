@@ -1,5 +1,6 @@
 import type { FormField } from "./docx-engine";
 import { getGeminiApiKey, getGeminiModel } from "./ai-config";
+import { getGeminiApiBase } from "./ai-providers";
 import type { ExtractedSource } from "./source-extract";
 import type { DocxFormValuesJson, MapCandidate } from "./source-map";
 import { mergeAiIntoValuesJson } from "./source-map";
@@ -350,7 +351,17 @@ export function formatGeminiHttpError(status: number, body: string): string {
   if (status === 429) {
     return format429Message(body);
   }
-  if (status === 400 || status === 403) {
+  const parsed = parseGeminiErrorBody(body);
+  const hay = `${parsed.status} ${parsed.message}`.toLowerCase();
+  if (
+    status === 402 ||
+    /insufficient[_\s-]?balance|insufficient[_\s-]?credits|out of credits|no credits/i.test(
+      hay,
+    )
+  ) {
+    return "Google AI: เครดิต/ยอดเงินไม่พอ — เติมที่คอนโซล หรือเปลี่ยนคีย์";
+  }
+  if (status === 400 || status === 401 || status === 403) {
     return "API key หรือสิทธิ์ไม่ถูกต้อง";
   }
   if (status === 404) {
@@ -363,7 +374,8 @@ export function formatGeminiHttpError(status: number, body: string): string {
 }
 
 /** Network / timeout / DNS failures talking to Google. */
-export function formatGeminiNetworkError(_err?: unknown): string {
+export function formatGeminiNetworkError(_cause?: unknown): string {
+  void _cause;
   return "เชื่อมต่อ Google ไม่ได้";
 }
 
@@ -403,7 +415,7 @@ async function uploadGeminiFile(
   displayName: string,
 ): Promise<{ uri: string; mimeType: string }> {
   const startRes = await fetch(
-    `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodeURIComponent(apiKey)}`,
+    `${getGeminiApiBase()}/upload/v1beta/files?key=${encodeURIComponent(apiKey)}`,
     {
       method: "POST",
       headers: {
@@ -551,7 +563,7 @@ async function callGeminiJson(
   const apiKey = getGeminiApiKey(opts?.apiKey);
   if (!apiKey) throw new Error("ยังไม่ได้เชื่อมต่อ Google AI — ใส่ Gemini API key ก่อน");
   const model = getGeminiModel(opts?.model);
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const url = `${getGeminiApiBase()}/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
   const parts: GeminiPart[] = [{ text: prompt }];
   if (opts?.sourceFiles?.length) {

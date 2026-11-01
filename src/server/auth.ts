@@ -33,8 +33,16 @@ function rpID(): string {
  */
 function buildSocialProviders() {
   /** @type {NonNullable<Parameters<typeof betterAuth>[0]>['socialProviders']} */
-  const social: Record<string, { clientId: string; clientSecret: string; enabled?: boolean }> =
-    {};
+  const social: Record<
+    string,
+    {
+      clientId: string;
+      clientSecret: string;
+      enabled?: boolean;
+      /** Refresh name/image from the IdP on every sign-in (per-account avatars). */
+      overrideUserInfoOnSignIn?: boolean;
+    }
+  > = {};
 
   const pairs: [string, string, string][] = [
     ["google", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"],
@@ -65,7 +73,12 @@ function buildSocialProviders() {
     const clientId = env(idKey);
     const clientSecret = env(secretKey);
     if (clientId && clientSecret) {
-      social[id] = { clientId, clientSecret };
+      social[id] = {
+        clientId,
+        clientSecret,
+        // Keep avatar/name in sync with Google / Facebook / … on each login.
+        overrideUserInfoOnSignIn: true,
+      };
     }
   }
 
@@ -115,13 +128,16 @@ export const auth = betterAuth({
   account: {
     storeStateStrategy: "database",
     skipStateCookieCheck: true,
+    // When linking Google/Facebook/… copy that account's profile image/name.
+    updateUserInfoOnLink: true,
   },
   session: {
     expiresIn: 60 * 60 * 24 * 7, // 7 days
     updateAge: 60 * 60 * 24, // refresh daily
+    // Cookie cache can serve a stale user.image after IdP refresh — always
+    // read the live session so per-account avatars stay correct.
     cookieCache: {
-      enabled: true,
-      maxAge: 5 * 60,
+      enabled: false,
     },
   },
   rateLimit: {

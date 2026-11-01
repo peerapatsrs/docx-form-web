@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { authClient } from "@/lib/auth-client";
+import { ProfileAvatar } from "@/components/ProfileAvatar";
 
 type SessionUser = {
   name?: string | null;
@@ -78,14 +79,12 @@ export function AuthBar() {
 
   return (
     <div className="auth-bar">
-      {user.image ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img className="auth-bar-avatar" src={user.image} alt="" width={28} height={28} />
-      ) : (
-        <span className="auth-bar-avatar auth-bar-avatar-fallback" aria-hidden>
-          {(label[0] || "?").toUpperCase()}
-        </span>
-      )}
+      <ProfileAvatar
+        image={user.image}
+        name={user.name}
+        email={user.email}
+        size={28}
+      />
       <Link className="auth-bar-name" href="/account" title="บัญชี · พาสคีย์ · แผน">
         {label}
       </Link>

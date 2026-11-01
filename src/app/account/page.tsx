@@ -6,6 +6,7 @@ import { authClient } from "@/lib/auth-client";
 import { getAuthenticatorName } from "@better-auth/passkey";
 import { PasskeyMark } from "@/components/AuthIcons";
 import { BrandLockup } from "@/components/BrandLogo";
+import { ProfileAvatar } from "@/components/ProfileAvatar";
 
 type PasskeyRow = {
   id: string;
@@ -346,20 +347,14 @@ export default function AccountPage() {
       <div className="account-shell">
         <BrandLockup className="brand account-brand" />
         <header className="account-hero">
-          {user.image ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              className="account-avatar"
-              src={user.image}
-              alt=""
-              width={72}
-              height={72}
-            />
-          ) : (
-            <span className="account-avatar account-avatar-fallback" aria-hidden>
-              {(user.name || user.email || "?")[0]?.toUpperCase()}
-            </span>
-          )}
+          <ProfileAvatar
+            image={user.image}
+            name={user.name}
+            email={user.email}
+            className="account-avatar"
+            fallbackClassName="account-avatar account-avatar-fallback"
+            size={72}
+          />
           <div className="account-hero-copy">
             <p className="auth-eyebrow">บัญชีของฉัน</p>
             <h1 className="auth-title">{user.name || "ผู้ใช้"}</h1>

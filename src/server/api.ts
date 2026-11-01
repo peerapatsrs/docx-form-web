@@ -122,6 +122,71 @@ export function createApi(options: { startedAt: Date; version?: string }) {
     return c.json(premiumDeniedPayload(feature), 402);
   }
 
+  /**
+   * Same-origin avatar proxy for OAuth provider image URLs (Google, Facebook, …).
+   * Avoids browser referrer / hotlink blocks that leave AuthBar on the letter fallback.
+   */
+  api.get("/avatar", async (c) => {
+    const raw = String(c.req.query("src") || "").trim();
+    if (!raw) return c.json({ error: "missing src" }, 400);
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      return c.json({ error: "invalid src" }, 400);
+    }
+    if (url.protocol !== "https:" && url.protocol !== "http:") {
+      return c.json({ error: "invalid protocol" }, 400);
+    }
+    // Allow common IdP avatar hosts only — not an open proxy.
+    const host = url.hostname.toLowerCase();
+    const allowed =
+      host.endsWith(".googleusercontent.com") ||
+      host === "lh3.googleusercontent.com" ||
+      host.endsWith(".ggpht.com") ||
+      host.endsWith(".fbsbx.com") ||
+      host.endsWith("facebook.com") ||
+      host.endsWith("fbcdn.net") ||
+      host.endsWith("githubusercontent.com") ||
+      host.endsWith("discordapp.com") ||
+      host.endsWith("discordcdn.com") ||
+      host.endsWith("cdn.discordapp.com") ||
+      host.endsWith("avatars.githubusercontent.com") ||
+      host.endsWith("graph.facebook.com") ||
+      host.endsWith("platform-lookaside.fbsbx.com");
+    if (!allowed) return c.json({ error: "host not allowed" }, 400);
+
+    try {
+      const upstream = await fetch(url.toString(), {
+        headers: {
+          // IdP CDNs often 403 when Referer is our app origin.
+          "User-Agent": "docx-form-avatar-proxy/1.0",
+          Accept: "image/*,*/*;q=0.8",
+        },
+        redirect: "follow",
+      });
+      if (!upstream.ok) {
+        return c.json({ error: `upstream ${upstream.status}` }, 502);
+      }
+      const ctype = upstream.headers.get("content-type") || "image/jpeg";
+      if (!ctype.toLowerCase().startsWith("image/")) {
+        return c.json({ error: "not an image" }, 502);
+      }
+      const bytes = await upstream.arrayBuffer();
+      return new Response(bytes, {
+        status: 200,
+        headers: {
+          "Content-Type": ctype,
+          "Cache-Control": "public, max-age=3600, stale-while-revalidate=86400",
+          "Referrer-Policy": "no-referrer",
+        },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message }, 502);
+    }
+  });
+
   /** Current user profile + live plan/limits (for /account). */
   api.get("/me", async (c) => {
     try {

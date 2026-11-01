@@ -23,6 +23,23 @@ export function isDevAuthEnabled(): boolean {
   return process.env.NODE_ENV !== "production";
 }
 
+/**
+ * Preferred local/dev account for Run Local auto sign-in.
+ * Order: DEV_AUTH_DEFAULT_EMAIL → first SUPERADMIN_EMAILS → peerapat.srs@gmail.com
+ */
+export function getDefaultDevAuthEmail(): string {
+  const fromEnv = String(process.env.DEV_AUTH_DEFAULT_EMAIL || "")
+    .trim()
+    .toLowerCase();
+  if (fromEnv) return fromEnv;
+  const superadmin = String(process.env.SUPERADMIN_EMAILS || "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .find(Boolean);
+  if (superadmin) return superadmin;
+  return "peerapat.srs@gmail.com";
+}
+
 type DevUserRow = {
   id: string;
   name: string | null;

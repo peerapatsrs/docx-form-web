@@ -28,6 +28,10 @@ services:
       BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3000}
       NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
       SUPERADMIN_EMAILS: ${SUPERADMIN_EMAILS:-peerapat.srs@gmail.com}
+      # Docker image runs NODE_ENV=production — force the local dev user picker /
+      # auto sign-in (default: first SUPERADMIN / peerapat.srs@gmail.com).
+      DEV_AUTH: ${DEV_AUTH:-1}
+      DEV_AUTH_DEFAULT_EMAIL: ${DEV_AUTH_DEFAULT_EMAIL:-peerapat.srs@gmail.com}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
     depends_on:

@@ -44,11 +44,47 @@ export function AuthBar() {
 
   useEffect(() => {
     let cancelled = false;
-    void authClient.getSession().then(({ data }) => {
-      if (cancelled) return;
-      setUser(data?.user ?? null);
-      setLoading(false);
-    });
+    void (async () => {
+      try {
+        const { data } = await authClient.getSession();
+        if (cancelled) return;
+        if (data?.user) {
+          setUser(data.user);
+          setLoading(false);
+          return;
+        }
+
+        // Run Local (DEV_AUTH): sign in as the default DB user automatically.
+        const cfg = (await fetch("/api/auth-config")
+          .then((r) => r.json())
+          .catch(() => null)) as {
+          devAuth?: boolean;
+          devAuthDefaultEmail?: string | null;
+        } | null;
+        const email = String(cfg?.devAuthDefaultEmail || "")
+          .trim()
+          .toLowerCase();
+        if (!cfg?.devAuth || !email) {
+          setLoading(false);
+          return;
+        }
+
+        const res = await fetch("/api/auth/dev/login-as", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email }),
+        });
+        if (cancelled) return;
+        if (res.ok) {
+          const again = await authClient.getSession();
+          if (cancelled) return;
+          setUser(again.data?.user ?? null);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
     return () => {
       cancelled = true;
     };

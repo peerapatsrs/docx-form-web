@@ -105,7 +105,22 @@ export default function LoginPage() {
           void fetch("/api/auth/dev/users", { credentials: "include" })
             .then((r) => r.json())
             .then((body: { users?: DevUser[] }) => {
-              setDevUsers(Array.isArray(body.users) ? body.users : []);
+              const users = Array.isArray(body.users) ? body.users : [];
+              setDevUsers(users);
+              // Run Local: auto-pick the preferred default user when opened as guest.
+              const preferred = String(
+                (data as { devAuthDefaultEmail?: string | null })
+                  .devAuthDefaultEmail || "",
+              )
+                .trim()
+                .toLowerCase();
+              const target =
+                users.find(
+                  (u) => String(u.email || "").toLowerCase() === preferred,
+                ) || users[0];
+              if (target && !target.banned) {
+                void loginAsDev(target);
+              }
             })
             .catch(() => setDevUsers([]));
         }

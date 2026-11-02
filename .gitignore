@@ -37,6 +37,9 @@ yarn-error.log*
 # auth database (local / volume)
 /data/
 
+# local AI/config directory (cwd-scoped default from ai-config.ts)
+/.docx-form/
+
 # vercel
 .vercel
 

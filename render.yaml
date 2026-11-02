@@ -25,13 +25,16 @@ services:
       # Runtime heap under free-tier 512MB RAM (leave headroom for native buffers).
       - key: NODE_OPTIONS
         value: --max-old-space-size=384
-      # Public origin — set all three to the same https://<service>.onrender.com
-      # (no hardcoded host in image). Render also passes these as Docker build-args.
+      # Public origin — set APP_BASE_URL / BETTER_AUTH_URL / NEXT_PUBLIC_APP_URL
+      # to the same https://<service>.onrender.com (no hardcoded host in image).
+      # Render also passes these as Docker build-args. Do not set NEXT_PUBLIC_DEV_AUTH.
       - key: APP_BASE_URL
         sync: false
       - key: BETTER_AUTH_URL
         sync: false
       - key: NEXT_PUBLIC_APP_URL
+        sync: false
+      - key: APP_ALLOWED_HOSTS
         sync: false
       - key: BETTER_AUTH_SECRET
         sync: false

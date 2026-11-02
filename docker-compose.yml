@@ -17,7 +17,12 @@ services:
     restart: unless-stopped
 
   web:
-    build: .
+    build:
+      context: .
+      args:
+        # Include dev-auth client UI in the image (production deploys omit this).
+        NEXT_PUBLIC_DEV_AUTH: ${NEXT_PUBLIC_DEV_AUTH:-1}
+        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
     ports:
       - "${PORT:-3000}:3000"
     environment:
@@ -27,6 +32,7 @@ services:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-docker-dev-secret-change-me-32chars}
       BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3000}
       NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
       SUPERADMIN_EMAILS: ${SUPERADMIN_EMAILS:-peerapat.srs@gmail.com}
       # Docker image runs NODE_ENV=production — force the local dev user picker /
       # auto sign-in (default: first SUPERADMIN / peerapat.srs@gmail.com).

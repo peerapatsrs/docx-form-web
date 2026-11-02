@@ -1,7 +1,10 @@
 import { createAuthEndpoint, APIError } from "better-auth/api";
 import { setSessionCookie } from "better-auth/cookies";
 import * as z from "zod";
+import { isDevAuthEnabled } from "@/lib/dev-auth-flag";
 import { getAuthPool } from "./auth-db";
+
+export { isDevAuthEnabled } from "@/lib/dev-auth-flag";
 
 /**
  * Local/dev only: pick an existing DB user and get a real session cookie
@@ -10,18 +13,6 @@ import { getAuthPool } from "./auth-db";
  * Enabled when DEV_AUTH=1, or automatically in non-production.
  * Disable with DEV_AUTH=0.
  */
-export function isDevAuthEnabled(): boolean {
-  const explicit = String(process.env.DEV_AUTH ?? "")
-    .trim()
-    .toLowerCase();
-  if (explicit === "0" || explicit === "false" || explicit === "no") {
-    return false;
-  }
-  if (explicit === "1" || explicit === "true" || explicit === "yes") {
-    return true;
-  }
-  return process.env.NODE_ENV !== "production";
-}
 
 /**
  * Preferred local/dev account for Run Local auto sign-in.

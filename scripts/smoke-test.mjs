@@ -15,7 +15,30 @@ async function main() {
 
   const health = await fetch(`${BASE}/api/health`);
   const hj = await health.json().catch(() => ({}));
-  ok("GET /api/health", health.ok && hj.ok === true, JSON.stringify(hj));
+  ok(
+    "GET /api/health",
+    health.ok && hj.ok === true && hj.version === undefined,
+    JSON.stringify(hj),
+  );
+
+  const me = await fetch(`${BASE}/api/me`);
+  const mej = await me.json().catch(() => ({}));
+  ok(
+    "GET /api/me guest",
+    me.ok && me.status === 200 && mej.user === null,
+    JSON.stringify(mej),
+  );
+
+  const robots = await fetch(`${BASE}/robots.txt`);
+  const robotsText = await robots.text();
+  ok(
+    "GET /robots.txt",
+    robots.ok && /sitemap/i.test(robotsText),
+    `status=${robots.status}`,
+  );
+
+  const sitemap = await fetch(`${BASE}/sitemap.xml`);
+  ok("GET /sitemap.xml", sitemap.ok, `status=${sitemap.status}`);
 
   const home = await fetch(`${BASE}/`);
   const html = await home.text();
@@ -23,6 +46,19 @@ async function main() {
     "GET /",
     home.ok && (html.includes("docx-form") || html.includes("id=\"app\"")),
     `status=${home.status}`,
+  );
+  ok(
+    "security headers",
+    Boolean(
+      home.headers.get("content-security-policy") &&
+        home.headers.get("strict-transport-security") &&
+        home.headers.get("x-frame-options") &&
+        home.headers.get("x-content-type-options") &&
+        home.headers.get("referrer-policy") &&
+        home.headers.get("permissions-policy") &&
+        !home.headers.get("x-powered-by"),
+    ),
+    `csp=${home.headers.get("content-security-policy") ? "yes" : "no"} powered=${home.headers.get("x-powered-by")}`,
   );
 
   const style = await fetch(`${BASE}/style.css`);

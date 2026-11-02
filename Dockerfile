@@ -10,15 +10,18 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
-# Public origin build-args. Render maps service env vars → Docker build-args.
-# BETTER_AUTH_URL must come from env (or the same public base URL) — never a
-# hardcoded host. Nested ${...:-${...}} in ENV is unreliable in Docker builders,
-# so resolution happens in shell before `next build`.
+# Public origin + optional local-only dev-auth client flag (build-args).
+# Render maps service env → Docker build-args. Do not set NEXT_PUBLIC_DEV_AUTH
+# on Render. BETTER_AUTH_URL must come from env / the same public base URL —
+# never a hardcoded host. Nested ENV ${...:-${...}} is unreliable in Docker
+# builders, so resolution happens in shell before `next build`.
 ARG APP_BASE_URL=
 ARG NEXT_PUBLIC_APP_URL=
+ARG NEXT_PUBLIC_DEV_AUTH=
 ARG BETTER_AUTH_URL=
 ENV APP_BASE_URL=$APP_BASE_URL
 ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL
+ENV NEXT_PUBLIC_DEV_AUTH=$NEXT_PUBLIC_DEV_AUTH
 # Placeholder secret so `next build` can import auth modules (not a real secret).
 ENV BETTER_AUTH_SECRET=build-time-placeholder-secret-32chars
 ENV DATABASE_URL=postgres://build:build@127.0.0.1:5432/build

@@ -110,7 +110,12 @@ function assertNotAborted(signal: AbortSignal | null | undefined) {
   }
 }
 
-export function createApi(options: { startedAt: Date; version?: string }) {
+export function createApi(options: {
+  startedAt: Date;
+  version?: string;
+  authorName?: string;
+  authorEmail?: string;
+}) {
   const api = new Hono();
 
   async function requirePremium(
@@ -189,11 +194,13 @@ export function createApi(options: { startedAt: Date; version?: string }) {
 
   /** Current user profile + live plan/limits (for /account). */
   api.get("/me", async (c) => {
+    const guest = { user: null, premium: null, session: null };
     try {
       const { auth } = await import("./auth");
       const session = await auth.api.getSession({ headers: c.req.raw.headers });
+      // Guests get 200 + null user so browsers do not log a noisy 401 on boot.
       if (!session?.user) {
-        return c.json({ error: "unauthorized" }, 401);
+        return c.json(guest);
       }
       await ensureAdminSchema().catch(() => undefined);
       const ent = await resolveEntitlement(c.req.raw);
@@ -234,33 +241,25 @@ export function createApi(options: { startedAt: Date; version?: string }) {
           expiresAt: session.session.expiresAt,
         },
       });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: message }, 500);
+    } catch {
+      // Session store unavailable — treat as logged out for this probe so the
+      // guest shell does not surface a console error on every boot.
+      return c.json(guest);
     }
   });
 
-  api.get("/health", async (c) => {
+  /** Public liveness — status only (no version / author / AI inventory). */
+  api.get("/health", (c) => c.json({ ok: true, status: "ok" }));
+
+  /**
+   * Public plan/quota snapshot for the guest shell (no internal diagnostics).
+   * Admin limit changes are reflected here for the fill UI.
+   */
+  api.get("/entitlement", async (c) => {
     await ensureAdminSchema().catch(() => undefined);
     const ent = await canUseFeature(PremiumFeature.AiSourceMap, c.req.raw);
-    const aiCreds = getRequestAiCredentials(c.req.raw);
-    const aiAdmin = await getAiAdminSettings().catch(() => ({
-      defaultModel: "gemini-3.8-flash",
-    }));
     const limits = await getAppLimits().catch(() => null);
     return c.json({
-      ok: true,
-      name: "docx-form-web",
-      version: options.version || "0.0.0",
-      author: "Peerapat Surasing",
-      email: "peerapat.srs@gmail.com",
-      startedAt: options.startedAt.toISOString(),
-      ai: geminiStatus({
-        requestKey: aiCreds.apiKey,
-        requestModel: aiCreds.model,
-        requestProvider: aiCreds.provider,
-        adminDefaultModel: aiAdmin.defaultModel,
-      }),
       premium: {
         enforce: String(process.env.PREMIUM_ENFORCE || "") === "1",
         paid: ent.entitlement.paid,
@@ -269,6 +268,31 @@ export function createApi(options: { startedAt: Date; version?: string }) {
         freeMaxMulti: limits?.freeMaxMulti,
         paidMaxMulti: limits?.paidMaxMulti,
       },
+    });
+  });
+
+  /** Internal diagnostics — version, contact, uptime, AI provider details. */
+  api.get("/diagnostics", async (c) => {
+    const gate = await requireSuperAdmin(c.req.raw);
+    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    await ensureAdminSchema().catch(() => undefined);
+    const aiCreds = getRequestAiCredentials(c.req.raw);
+    const aiAdmin = await getAiAdminSettings().catch(() => ({
+      defaultModel: "gemini-3.8-flash",
+    }));
+    return c.json({
+      ok: true,
+      name: "docx-form-web",
+      version: options.version || "0.0.0",
+      author: options.authorName || "",
+      email: options.authorEmail || "",
+      startedAt: options.startedAt.toISOString(),
+      ai: geminiStatus({
+        requestKey: aiCreds.apiKey,
+        requestModel: aiCreds.model,
+        requestProvider: aiCreds.provider,
+        adminDefaultModel: aiAdmin.defaultModel,
+      }),
     });
   });
 

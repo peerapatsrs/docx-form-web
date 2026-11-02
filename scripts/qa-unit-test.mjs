@@ -189,10 +189,36 @@ console.log("✓ field-names");
   const both = { [nfc]: "new", [nfkc]: "old" };
   assert.equal(lookupCompatKey(both, nfc), nfc);
   assert.equal(lookupCompatValue(both, nfc).value, "new");
-  // Ambiguous: two distinct keys that both NFKC-equal the field, neither exact.
-  // fullwidth digits ４２ vs ASCII — use two NFKC-identical Thai bags via aliasing:
-  // If bag has only the NFKC key, unique fallback works.
+  // Unique NFKC fallback still works when only one non-exact key matches.
   assert.equal(lookupCompatKey({ [nfkc]: "a" }, nfc), nfkc);
+
+  // Ambiguous: two distinct non-exact keys that both NFKC-equal the field —
+  // fullwidth Latin A + NFKC(จำนวน) vs ASCII A + NFKC(จำนวน). Neither equals
+  // the NFC field name, so lookup must return null (do not guess).
+  const collideField = "Aจำนวน";
+  const collideKeyFullwidth = `\uFF21${nfc.normalize("NFKC")}`;
+  const collideKeyAscii = `A${nfc.normalize("NFKC")}`;
+  assert.notEqual(collideKeyFullwidth, collideField);
+  assert.notEqual(collideKeyAscii, collideField);
+  assert.notEqual(collideKeyFullwidth, collideKeyAscii);
+  assert.equal(
+    collideKeyFullwidth.normalize("NFKC"),
+    collideField.normalize("NFKC"),
+  );
+  assert.equal(
+    collideKeyAscii.normalize("NFKC"),
+    collideField.normalize("NFKC"),
+  );
+  const collideBag = {
+    [collideKeyFullwidth]: "fullwidth",
+    [collideKeyAscii]: "ascii",
+  };
+  assert.equal(lookupCompatKey(collideBag, collideField), null);
+  assert.deepEqual(lookupCompatValue(collideBag, collideField), {
+    hit: false,
+    key: null,
+    value: undefined,
+  });
 
   const black = "คดีหมายเลขดำที่";
   const blackNfkc = black.normalize("NFKC");
@@ -228,7 +254,14 @@ console.log("✓ field-names");
     ],
     "9",
   );
-  console.log("✓ NFKC compat lookup (จำนวน / คดีหมายเลขดำที่ / รายการจำเลย)");
+  // Same ambiguous collision must not guess on the JS helper either.
+  assert.equal(client.lookupCompatKey(collideBag, collideField), null);
+  assert.deepEqual(client.lookupCompatValue(collideBag, collideField), {
+    hit: false,
+    key: null,
+    value: undefined,
+  });
+  console.log("✓ NFKC compat lookup (จำนวน / คดีหมายเลขดำที่ / รายการจำเลย + collision)");
 }
 
 const tags = [

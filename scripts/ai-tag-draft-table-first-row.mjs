@@ -3,6 +3,8 @@
  * Smoke: AI tag draft accepts list-table / wrap-row / fill-empty-tc / cell fields
  * on the FIRST data (prototype) row only; later sample rows and header stay out.
  * Run: npx tsx scripts/ai-tag-draft-table-first-row.mjs
+ *
+ * Sample OOXML and form strings live under fixtures/ai-tag-draft/.
  */
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -30,6 +32,7 @@ const values = loadValues();
 const tableFirst = values.tableFirstRow;
 const xml = loadXml(tableFirst.xml);
 const plain = tableFirst.plain;
+const tf = tableFirst.expected;
 
 const outTh = validateAiTagSuggestions(
   plain,
@@ -39,7 +42,7 @@ const outTh = validateAiTagSuggestions(
 );
 
 assert.ok(
-  outTh.some((s) => s.plainText === "นอกตารางชื่อสมชาย" && s.kind === "text"),
+  outTh.some((s) => s.plainText === tf.outsideText && s.kind === "text"),
   "outside-table text should remain",
 );
 
@@ -53,13 +56,13 @@ assert.ok(
   "wrap-row should expose row plain span",
 );
 
-// First column "1" sits flush against Thai cell text in TAGGER_PLAIN ("1ใน…"),
-// so plain replace of "1" is rejected; enrich falls back to fill-empty-tc on cell 0
-// (same as manual list-table) while still emitting {{+ลำดับ}} as the value field.
+// First column digit may sit flush against Thai cell text in TAGGER_PLAIN,
+// so plain replace is rejected; enrich falls back to fill-empty-tc on cell 0
+// (same as manual list-table) while still emitting a {{+…}} value field.
 assert.ok(
   outTh.some(
     (s) =>
-      (s.plainText === "1" && (s.kind === "auto" || s.mode === "replace")) ||
+      (s.plainText === tf.firstDigit && (s.kind === "auto" || s.mode === "replace")) ||
       (s.mode === "fill-empty-tc" &&
         s.cellIndex === 0 &&
         (s.kind === "auto" || String(s.tag || "").includes("+"))),
@@ -68,21 +71,23 @@ assert.ok(
 );
 
 assert.ok(
-  outTh.some((s) => s.plainText === "ในตารางสมชาย" && s.kind === "text" && s.mode === "replace"),
+  outTh.some(
+    (s) => s.plainText === tf.prototypeCell && s.kind === "text" && s.mode === "replace",
+  ),
   "prototype non-empty cell should be tagged",
 );
 
 assert.ok(
-  outTh.some((s) => s.mode === "fill-empty-tc" && s.cellIndex === 2),
+  outTh.some((s) => s.mode === "fill-empty-tc" && s.cellIndex === tf.emptyCellIndex),
   "empty prototype cell under header must become fill-empty-tc",
 );
 
 assert.ok(
-  !outTh.some((s) => s.plainText === "แถวสองไม่ควรแท็ก"),
+  !outTh.some((s) => s.plainText === tf.rejectedRowText),
   "later sample-row text must be rejected",
 );
 assert.ok(
-  !outTh.some((s) => s.plainText === "2" && s.kind === "auto"),
+  !outTh.some((s) => s.plainText === tf.rejectedDigit && s.kind === "auto"),
   "later sample-row digit must be rejected",
 );
 assert.equal(
@@ -102,14 +107,17 @@ assert.ok(
   outEn.some((s) => s.kind === "list-table" && s.mode === "wrap-row"),
   "EN: wrap-row accepted",
 );
-// Enrichment should invent English-ish cell names from Thai headers.
-const enAuto = outEn.find((s) => s.kind === "auto" || (s.plainText === "1" && s.mode === "replace"));
+const enAuto = outEn.find(
+  (s) => s.kind === "auto" || (s.plainText === tf.firstDigit && s.mode === "replace"),
+);
 assert.ok(enAuto, "EN: first-cell field enriched");
 assert.ok(
   /^[a-z0-9_.-]+$/i.test(enAuto.name),
   `EN: first-cell name should be ASCII snake_case, got ${enAuto.name}`,
 );
-const enEmpty = outEn.find((s) => s.mode === "fill-empty-tc" && s.cellIndex === 2);
+const enEmpty = outEn.find(
+  (s) => s.mode === "fill-empty-tc" && s.cellIndex === tf.emptyCellIndex,
+);
 assert.ok(enEmpty, "EN: empty cell enriched");
 assert.ok(
   /^[a-z0-9_.-]+$/i.test(enEmpty.name),
@@ -120,13 +128,11 @@ console.log(
   `✓ ai-tag-draft first-row table smoke (th=${outTh.length}, en=${outEn.length})`,
 );
 
-// Multi-row headers (long merged titles, no w:tblHeader).
-// Row 0/1 are headers; row 2 with "1" is the prototype. Model may omit wrap-row.
 const multiHeader = values.multiHeader;
 const multiHeaderXml = loadXml(multiHeader.xml);
 const multiPlain = multiHeader.plain;
+const mh = multiHeader.expected;
 
-// No model wrap — seeds + enrichment must still propose list-table + first cell.
 const outSeed = validateAiTagSuggestions(
   multiPlain,
   multiHeader.suggestions,
@@ -138,13 +144,13 @@ const seedWrap = outSeed.find((s) => s.kind === "list-table" || s.mode === "wrap
 assert.ok(seedWrap, "multi-header: seeded list-table wrap must appear");
 assert.equal(seedWrap.mode, "wrap-row");
 assert.ok(
-  /จำเล|รายการ/.test(seedWrap.name),
-  `multi-header: list name should reflect จำเลย, got ${seedWrap.name}`,
+  new RegExp(mh.listNamePattern).test(seedWrap.name),
+  `multi-header: list name should reflect list semantics, got ${seedWrap.name}`,
 );
 assert.ok(
   outSeed.some(
     (s) =>
-      (s.plainText === "1" && (s.kind === "auto" || s.mode === "replace")) ||
+      (s.plainText === mh.firstDigit && (s.kind === "auto" || s.mode === "replace")) ||
       (s.mode === "fill-empty-tc" &&
         s.cellIndex === 0 &&
         (s.kind === "auto" || String(s.tag || "").includes("+"))),
@@ -152,7 +158,9 @@ assert.ok(
   "multi-header: first data cell must get a value field",
 );
 assert.ok(
-  !outSeed.some((s) => s.kind === "list-table" && /สืบตามเขต/.test(s.plainText || "")),
+  !outSeed.some(
+    (s) => s.kind === "list-table" && new RegExp(mh.headerRejectPattern).test(s.plainText || ""),
+  ),
   "multi-header: must not wrap the long header row",
 );
 assert.equal(
@@ -165,8 +173,8 @@ console.log(
   `✓ ai-tag-draft multi-header prototype smoke (seeded=${outSeed.length})`,
 );
 
-// Stray auto outside any list / list-table must become plain text {{name}}, not {{+name}}.
 const strayAuto = values.strayAuto;
+const sa = strayAuto.expected;
 const outStray = validateAiTagSuggestions(
   strayAuto.plain,
   strayAuto.suggestions,
@@ -178,20 +186,23 @@ assert.ok(
   "stray auto outside lists must demote to text (no {{+}})",
 );
 assert.ok(
-  outStray.some((s) => s.plainText === "จำเลยที่" && s.kind === "text" && s.tag === "{{จำเลยที่}}"),
-  "header-like label tagged auto must become {{จำเลยที่}}",
+  outStray.some(
+    (s) => s.plainText === sa.labelText && s.kind === "text" && s.tag === sa.labelTag,
+  ),
+  "header-like label tagged auto must become plain text tag",
 );
 assert.ok(
-  outStray.some((s) => s.plainText === "1" && s.kind === "text" && s.tag === "{{ลำดับ}}"),
-  "digit outside loop tagged auto must become plain text {{ลำดับ}}",
+  outStray.some(
+    (s) => s.plainText === sa.digitText && s.kind === "text" && s.tag === sa.digitTag,
+  ),
+  "digit outside loop tagged auto must become plain text tag",
 );
 console.log(`✓ ai-tag-draft stray-auto demote smoke (n=${outStray.length})`);
 
-// Paragraph list: consecutive units outside tables → wrap FIRST unit only;
-// later units hard-blocked; auto inside wrap kept; stray fields on unit 2 dropped.
 const paragraphList = values.paragraphList;
 const paraXml = loadXml(paragraphList.xml);
 const paraPlain = paragraphList.plain;
+const pl = paragraphList.expected;
 
 const outPara = validateAiTagSuggestions(
   paraPlain,
@@ -202,22 +213,18 @@ const outPara = validateAiTagSuggestions(
 
 const paraWrap = outPara.find((s) => s.kind === "list" && s.mode === "wrap");
 assert.ok(paraWrap, "paragraph list wrap must be seeded/accepted");
-assert.equal(
-  paraWrap.plainText,
-  "จำเลยที่ 1 ชื่อ นายหนึ่ง ที่อยู่ บ้านหนึ่ง",
-  "wrap must be FIRST defendant unit only",
-);
-assert.equal(paraWrap.tag, "{{#รายการจำเลย}}");
+assert.equal(paraWrap.plainText, pl.firstUnitPlain, "wrap must be FIRST unit only");
+assert.equal(paraWrap.tag, pl.wrapTag);
 assert.ok(
   outPara.some(
-    (s) => s.plainText === "นายหนึ่ง" && s.kind === "text" && s.wrapTag === paraWrap.tag,
+    (s) => s.plainText === pl.innerName && s.kind === "text" && s.wrapTag === paraWrap.tag,
   ),
   "inner text field inside first unit must nest under the list wrap",
 );
 assert.ok(
   outPara.some(
     (s) =>
-      s.plainText === "1" &&
+      s.plainText === pl.firstDigit &&
       s.kind === "auto" &&
       String(s.tag || "").includes("{{+") &&
       s.wrapTag === paraWrap.tag,
@@ -225,8 +232,8 @@ assert.ok(
   "digit inside paragraph list wrap must stay auto {{+}}",
 );
 assert.ok(
-  !outPara.some((s) => /นายสอง|นายสาม|จำเลย2|จำเลย3/.test(s.plainText || "")),
-  "later defendant units must not get their own field tags",
+  !outPara.some((s) => new RegExp(pl.laterUnitRejectPattern).test(s.plainText || "")),
+  "later units must not get their own field tags",
 );
 assert.equal(
   outPara.filter((s) => s.kind === "list").length,
@@ -235,11 +242,12 @@ assert.equal(
 );
 console.log(`✓ ai-tag-draft paragraph-list first-unit smoke (n=${outPara.length})`);
 
-// Real Word docs often put <w:tab/> between label and digit — plain must
-// keep \\t or seeded list wraps never match TAGGER_PLAIN.
+// Word docs often put <w:tab/> between label and digit — plain must keep \\t
+// or seeded list wraps never match TAGGER_PLAIN.
 const paragraphTab = values.paragraphTab;
 const paraTabXml = loadXml(paragraphTab.xml);
 const paraTabPlain = paragraphTab.plain;
+const pt = paragraphTab.expected;
 const outParaTab = validateAiTagSuggestions(
   paraTabPlain,
   paragraphTab.suggestions,
@@ -250,39 +258,40 @@ const paraTabWrap = outParaTab.find((s) => s.kind === "list" && s.mode === "wrap
 assert.ok(paraTabWrap, "tabbed paragraph list wrap must be seeded");
 assert.equal(
   paraTabWrap.plainText,
-  "จำเลยที่\t1\tชื่อ นายหนึ่ง",
+  pt.firstUnitPlain,
   "tabbed wrap plain must retain w:tab as \\\\t",
 );
 assert.ok(
-  !outParaTab.some((s) => s.plainText === "นายสอง"),
-  "later tabbed defendant unit must stay untagged",
+  !outParaTab.some((s) => s.plainText === pt.laterName),
+  "later tabbed unit must stay untagged",
 );
 console.log(`✓ ai-tag-draft paragraph-list tabbed-unit smoke (n=${outParaTab.length})`);
 
-// Label-anchored + flexible tabs: AI returns value + label; doc has Label\\t\\tValue.
 const labelAnchored = values.labelAnchored;
+const la = labelAnchored.expected;
 const outLabel = validateAiTagSuggestions(
   labelAnchored.plain,
   labelAnchored.suggestions,
   null,
   "th",
 );
-const loan = outLabel.find((s) => s.plainText === "กู้ยืม");
-assert.ok(loan, "label-anchored กู้ยืม must match despite \\\\t\\\\t in doc");
-assert.equal(loan.labelHint, "ประเภทหนี้");
+const loan = outLabel.find((s) => s.plainText === la.loanValue);
+assert.ok(loan, "label-anchored value must match despite \\\\t\\\\t in doc");
+assert.equal(loan.labelHint, la.loanLabel);
 assert.ok(
-  outLabel.some((s) => s.plainText === "10000001" && s.labelHint === "ทะเบียนลูกหนี้"),
-  "ทะเบียนลูกหนี้ value must label-anchor",
+  outLabel.some((s) => s.plainText === la.registryValue && s.labelHint === la.registryLabel),
+  "registry value must label-anchor",
 );
-// Second suggestion also collapses to the same value span — first wins; duplicate name skipped or second dropped.
 assert.ok(
-  !outLabel.some((s) => s.plainText.includes("ประเภทหนี้") && s.plainText.includes("กู้ยืม")),
+  !outLabel.some(
+    (s) => s.plainText.includes(la.loanLabel) && s.plainText.includes(la.loanValue),
+  ),
   "must tag value only, not label+value blob",
 );
 console.log(`✓ ai-tag-draft label-anchored tab smoke (n=${outLabel.length})`);
 
-// Space-separated prose (no \\t).
 const assignSpace = values.assignSpace;
+const as_ = assignSpace.expected;
 const outAssign = validateAiTagSuggestions(
   assignSpace.plain,
   assignSpace.suggestions,
@@ -290,18 +299,18 @@ const outAssign = validateAiTagSuggestions(
   "th",
 );
 const company = outAssign.find((s) =>
-  String(s.plainText || "").includes("เอบีซี"),
+  String(s.plainText || "").includes(as_.companyNeedle),
 );
-assert.ok(company, "space-separated มอบหมายให้ → บริษัท… must match");
-assert.equal(company.labelHint, "มอบหมายให้");
+assert.ok(company, "space-separated label → company value must match");
+assert.equal(company.labelHint, as_.labelHint);
 assert.ok(
-  !String(company.plainText).startsWith("มอบหมายให้"),
-  "must tag company value only, not the stem มอบหมายให้",
+  !String(company.plainText).startsWith(as_.labelHint),
+  "must tag company value only, not the stem label",
 );
 console.log(`✓ ai-tag-draft label-anchored space smoke (n=${outAssign.length})`);
 
-// Flush / glued (no space): phone labels and multi-value lists.
 const phoneFlush = values.phoneFlush;
+const pf = phoneFlush.expected;
 const outPhone = validateAiTagSuggestions(
   phoneFlush.plain,
   phoneFlush.suggestions,
@@ -309,24 +318,23 @@ const outPhone = validateAiTagSuggestions(
   "th",
 );
 const phone1 = outPhone.find(
-  (s) => s.plainText === "00-000-0000" && s.labelHint === "โทร",
+  (s) => s.plainText === pf.phone && s.labelHint === pf.labelHint,
 );
-assert.ok(phone1, "flush glued phone after โทร must label-anchor to digits");
+assert.ok(phone1, "flush glued phone after label must label-anchor to digits");
 assert.ok(
   outPhone.some(
-    (s) =>
-      s.plainText === "00-000-0000,00-000-0001" && s.labelHint === "โทร",
+    (s) => s.plainText === pf.phoneList && s.labelHint === pf.labelHint,
   ),
-  "flush multi-phone list after โทร must match",
+  "flush multi-phone list after label must match",
 );
 assert.ok(
-  outPhone.some((s) => s.plainText === "00-000-0000"),
-  "glued plainText โทร+digits without label must still find digits",
+  outPhone.some((s) => s.plainText === pf.phone),
+  "glued plainText label+digits without label field must still find digits",
 );
 console.log(`✓ ai-tag-draft label-anchored flush-phone smoke (n=${outPhone.length})`);
 
-// Flush text (not only digits).
 const flushText = values.flushText;
+const ft = flushText.expected;
 const outFlushText = validateAiTagSuggestions(
   flushText.plain,
   flushText.suggestions,
@@ -334,28 +342,28 @@ const outFlushText = validateAiTagSuggestions(
   "th",
 );
 const flushCo = outFlushText.find((s) =>
-  String(s.plainText || "").includes("เอบีซี"),
+  String(s.plainText || "").includes(ft.companyNeedle),
 );
-assert.ok(flushCo, "flush text after มอบหมายให้ must match company name");
-assert.equal(flushCo.labelHint, "มอบหมายให้");
+assert.ok(flushCo, "flush text after assign label must match company name");
+assert.equal(flushCo.labelHint, ft.labelHint);
 assert.ok(
   outFlushText.some(
-    (s) => s.plainText === "สำนักงานใหญ่" && s.labelHint === "โทร",
+    (s) => s.plainText === ft.officeText && s.labelHint === ft.officeLabel,
   ),
-  "flush text after โทร (not digits) must match",
+  "flush text after phone label (not digits) must match",
 );
 assert.ok(
-  outFlushText.some((s) => s.plainText === "สำนักงานใหญ่"),
-  "glued โทรสำนักงานใหญ่ without label must peel to text",
+  outFlushText.some((s) => s.plainText === ft.officeText),
+  "glued phone-label+office without label field must peel to text",
 );
 assert.ok(
-  !outFlushText.some((s) => String(s.plainText).startsWith("โทรสำนักงาน")),
-  "must not keep โทร glued into the tagged plainText",
+  !outFlushText.some((s) => String(s.plainText).startsWith(ft.gluedOfficePrefix)),
+  "must not keep phone label glued into the tagged plainText",
 );
 console.log(`✓ ai-tag-draft label-anchored flush-text smoke (n=${outFlushText.length})`);
 
-// One AI row → every safe occurrence (not only the first match).
 const multiOccurrence = values.multiOccurrence;
+const mo = multiOccurrence.expected;
 const outMultiOcc = validateAiTagSuggestions(
   multiOccurrence.plain,
   multiOccurrence.suggestions,
@@ -363,18 +371,22 @@ const outMultiOcc = validateAiTagSuggestions(
   "th",
 );
 const nameHits = outMultiOcc.filter(
-  (s) => s.plainText === "สมชายใจดี" && s.name === "ชื่อ",
+  (s) => s.plainText === mo.nameText && s.name === mo.fieldName,
 );
-assert.equal(nameHits.length, 3, "one AI suggestion must expand to all 3 name hits");
+assert.equal(
+  nameHits.length,
+  mo.hitCount,
+  "one AI suggestion must expand to every safe name hit",
+);
 assert.ok(
-  new Set(nameHits.map((s) => s.plainStart)).size === 3,
+  new Set(nameHits.map((s) => s.plainStart)).size === mo.hitCount,
   "expanded hits must be distinct plainStart offsets",
 );
 console.log(`✓ ai-tag-draft multi-occurrence expand smoke (n=${outMultiOcc.length})`);
 
-// Short digit must NOT shard a phone number.
 const phoneShard = values.phoneShard;
 const phoneShardPlain = phoneShard.plain;
+const ps = phoneShard.expected;
 const outPhoneShard = validateAiTagSuggestions(
   phoneShardPlain,
   phoneShard.suggestions,
@@ -385,28 +397,28 @@ assert.ok(
   !outPhoneShard.some((s) => {
     const at = Number(s.plainStart);
     return (
-      s.plainText === "3" &&
+      s.plainText === ps.digit &&
       Number.isFinite(at) &&
-      phoneShardPlain.slice(Math.max(0, at - 4), at + 5).includes("00-00")
+      phoneShardPlain.slice(Math.max(0, at - 4), at + 5).includes(ps.midPhoneFragment)
     );
   }),
-  "digit 3 must not tag inside a landline number",
+  "short digit must not tag inside a landline number",
 );
-const threes = outPhoneShard.filter((s) => s.plainText === "3");
-assert.ok(threes.length >= 1, "standalone จำเลยที่ 3 digits should still match");
+const threes = outPhoneShard.filter((s) => s.plainText === ps.digit);
+assert.ok(threes.length >= 1, "standalone labeled digits should still match");
 assert.ok(
   threes.every((s) => {
     const at = Number(s.plainStart);
     const prev = at > 0 ? phoneShardPlain[at - 1] : "";
     return !/[\d-]/.test(prev || "");
   }),
-  "matched 3s must be token-bounded, not mid-phone",
+  "matched short digits must be token-bounded, not mid-phone",
 );
 console.log(`✓ ai-tag-draft phone-shard digit smoke (n=${outPhoneShard.length})`);
 
-// Longer digit cells flush to Thai (Word tables omit separators) must still match.
 const digitFlush = values.digitFlush;
 const digitFlushPlain = digitFlush.plain;
+const df = digitFlush.expected;
 const outDigitFlush = validateAiTagSuggestions(
   digitFlushPlain,
   digitFlush.suggestions,
@@ -414,24 +426,28 @@ const outDigitFlush = validateAiTagSuggestions(
   "th",
 );
 assert.ok(
-  !outDigitFlush.some((s) => s.plainText === "1" && digitFlushPlain[s.plainStart + 1] === "โ"),
+  !outDigitFlush.some(
+    (s) =>
+      s.plainText === df.rejectedDigit &&
+      digitFlushPlain[s.plainStart + 1] === df.rejectedNextChar,
+  ),
   "single-digit row marker flush to Thai must not tag",
 );
 assert.ok(
-  outDigitFlush.some((s) => s.plainText === "9001"),
+  outDigitFlush.some((s) => s.plainText === df.pageSurvey),
   "4-digit page-survey flush to Thai must tag",
 );
 assert.ok(
-  outDigitFlush.some((s) => s.plainText === "1200"),
+  outDigitFlush.some((s) => s.plainText === df.price),
   "price digits flush to Thai words must tag",
 );
 console.log(`✓ ai-tag-draft digit-flush-thai smoke (n=${outDigitFlush.length})`);
 
-// Unique footer/total cells in a later table row must tag; duplicate sample values must not.
 {
   const footerUnique = values.footerUnique;
   const footerPlain = footerUnique.plain;
   const footerXml = loadXml(footerUnique.xml);
+  const fe = footerUnique.expected;
   const outFooter = validateAiTagSuggestions(
     footerPlain,
     footerUnique.suggestions,
@@ -439,26 +455,28 @@ console.log(`✓ ai-tag-draft digit-flush-thai smoke (n=${outDigitFlush.length})
     "th",
   );
   assert.ok(
-    outFooter.some((s) => s.plainText === "1,116"),
+    outFooter.some((s) => s.plainText === fe.totalDigits),
     "unique footer total must tag even outside prototype row",
   );
   assert.ok(
-    outFooter.some((s) => s.plainText === "หนึ่งพันหนึ่งร้อยสิบหกบาท"),
+    outFooter.some((s) => s.plainText === fe.totalWords),
     "unique footer total words must tag",
   );
-  // 1200 only exists on prototype — a second identical hit must not be invented from footer.
   assert.ok(
-    outFooter.filter((s) => s.plainText === "1200").every((s) => {
+    outFooter.filter((s) => s.plainText === fe.prototypePrice).every((s) => {
       const at = Number(s.plainStart);
-      return footerPlain.slice(at, at + 4) === "1200" && at < footerPlain.indexOf("1,116");
+      return (
+        footerPlain.slice(at, at + fe.prototypePrice.length) === fe.prototypePrice &&
+        at < footerPlain.indexOf(fe.totalDigits)
+      );
     }),
     "prototype price digits must not be re-tagged from nowhere",
   );
   console.log(`✓ ai-tag-draft footer-unique-total smoke (n=${outFooter.length})`);
 }
 
-// Contact enrich: phones/emails seeded when AI omits them.
 const contactEnrich = values.contactEnrich;
+const ce = contactEnrich.expected;
 const outContact = validateAiTagSuggestions(
   contactEnrich.plain,
   contactEnrich.suggestions,
@@ -466,18 +484,18 @@ const outContact = validateAiTagSuggestions(
   "th",
 );
 assert.ok(
-  outContact.some((s) => String(s.plainText).includes("00-000-0000")),
-  "must enrich phone after โทร",
+  outContact.some((s) => String(s.plainText).includes(ce.phoneNeedle)),
+  "must enrich phone after phone label",
 );
 assert.ok(
-  outContact.some((s) => String(s.plainText).includes("@")),
+  outContact.some((s) => String(s.plainText).includes(ce.emailMarker)),
   "must enrich email",
 );
 console.log(`✓ ai-tag-draft contact enrich smoke (n=${outContact.length})`);
 
-// Weak "-" must not shatter phone numbers when AI emits plainText "-".
 const hyphenPhone = values.hyphenPhone;
 const hyphenPlain = hyphenPhone.plain;
+const hp = hyphenPhone.expected;
 const outHyphen = validateAiTagSuggestions(
   hyphenPlain,
   hyphenPhone.suggestions,
@@ -485,24 +503,24 @@ const outHyphen = validateAiTagSuggestions(
   "th",
 );
 assert.equal(
-  outHyphen.filter((s) => s.plainText === "-").length,
+  outHyphen.filter((s) => s.plainText === hp.hyphen).length,
   1,
   "only the label-anchored hyphen may tag",
 );
 assert.ok(
-  outHyphen.some((s) => String(s.plainText).includes("00-000-0000")),
+  outHyphen.some((s) => String(s.plainText).includes(hp.phoneNeedle)),
   "phone must still enrich beside a hyphen field",
 );
 assert.ok(
-  !String(outHyphen.find((s) => s.plainText === "-")?.plainStart).includes("NaN"),
+  !String(outHyphen.find((s) => s.plainText === hp.hyphen)?.plainStart).includes("NaN"),
   "hyphen hit has plainStart",
 );
-const hyp = outHyphen.find((s) => s.plainText === "-");
+const hyp = outHyphen.find((s) => s.plainText === hp.hyphen);
 assert.ok(
   hyp &&
-    hyphenPlain.slice(Math.max(0, hyp.plainStart - 12), hyp.plainStart).includes(
-      "แดงที่",
-    ),
-  "hyphen must sit after คดีหมายเลขแดงที่, not inside the phone",
+    hyphenPlain
+      .slice(Math.max(0, hyp.plainStart - hp.labelAnchorLookbehind), hyp.plainStart)
+      .includes(hp.labelAnchorNeedle),
+  "hyphen must sit after its label stem, not inside the phone",
 );
 console.log(`✓ ai-tag-draft hyphen-not-shatter-phone smoke (n=${outHyphen.length})`);

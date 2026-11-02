@@ -60,7 +60,15 @@
         "kind": "list-table",
         "mode": "wrap-row"
       }
-    ]
+    ],
+    "expected": {
+      "outsideText": "นอกตารางชื่อสมชาย",
+      "prototypeCell": "ในตารางสมชาย",
+      "rejectedRowText": "แถวสองไม่ควรแท็ก",
+      "firstDigit": "1",
+      "rejectedDigit": "2",
+      "emptyCellIndex": 2
+    }
   },
   "multiHeader": {
     "xml": "multi-header.xml",
@@ -72,7 +80,12 @@
         "kind": "auto",
         "mode": "replace"
       }
-    ]
+    ],
+    "expected": {
+      "firstDigit": "1",
+      "listNamePattern": "จำเล|รายการ",
+      "headerRejectPattern": "สืบตามเขต"
+    }
   },
   "strayAuto": {
     "plain": "จำเลยที่ 1 เป็นคู่ความนอกตาราง",
@@ -89,7 +102,13 @@
         "kind": "auto",
         "mode": "replace"
       }
-    ]
+    ],
+    "expected": {
+      "labelText": "จำเลยที่",
+      "labelTag": "{{จำเลยที่}}",
+      "digitText": "1",
+      "digitTag": "{{ลำดับ}}"
+    }
   },
   "paragraphList": {
     "xml": "paragraph-list.xml",
@@ -131,7 +150,14 @@
         "kind": "list",
         "mode": "wrap"
       }
-    ]
+    ],
+    "expected": {
+      "firstUnitPlain": "จำเลยที่ 1 ชื่อ นายหนึ่ง ที่อยู่ บ้านหนึ่ง",
+      "wrapTag": "{{#รายการจำเลย}}",
+      "innerName": "นายหนึ่ง",
+      "firstDigit": "1",
+      "laterUnitRejectPattern": "นายสอง|นายสาม|จำเลย2|จำเลย3"
+    }
   },
   "paragraphTab": {
     "xml": "paragraph-tab.xml",
@@ -149,7 +175,11 @@
         "kind": "text",
         "mode": "replace"
       }
-    ]
+    ],
+    "expected": {
+      "firstUnitPlain": "จำเลยที่\t1\tชื่อ นายหนึ่ง",
+      "laterName": "นายสอง"
+    }
   },
   "labelAnchored": {
     "plain": "บริษัท ทดสอบ จำกัดประเภทหนี้\t\tกู้ยืม\t\tทะเบียนลูกหนี้\t10000001\tศาล\tตัวอย่างบุรี",
@@ -175,7 +205,13 @@
         "kind": "text",
         "mode": "replace"
       }
-    ]
+    ],
+    "expected": {
+      "loanValue": "กู้ยืม",
+      "loanLabel": "ประเภทหนี้",
+      "registryValue": "10000001",
+      "registryLabel": "ทะเบียนลูกหนี้"
+    }
   },
   "assignSpace": {
     "plain": "ตามหนังสือมอบอำนาจ มอบหมายให้ บริษัท ตัวอย่าง เอบีซี จำกัด (ตัวอย่าง) เป็นผู้รับมอบ",
@@ -201,7 +237,11 @@
         "kind": "text",
         "mode": "replace"
       }
-    ]
+    ],
+    "expected": {
+      "companyNeedle": "เอบีซี",
+      "labelHint": "มอบหมายให้"
+    }
   },
   "phoneFlush": {
     "plain": "ติดต่อสำนักงานใหญ่(โทร00-000-0000) สำนักงานสาขา(โทร00-000-0000,00-000-0001) ตัวอย่าง",
@@ -228,7 +268,12 @@
         "mode": "replace",
         "occurrence": 0
       }
-    ]
+    ],
+    "expected": {
+      "phone": "00-000-0000",
+      "phoneList": "00-000-0000,00-000-0001",
+      "labelHint": "โทร"
+    }
   },
   "flushText": {
     "plain": "มอบหมายให้บริษัท ตัวอย่าง เอบีซี จำกัดเป็นผู้รับมอบ (โทรสำนักงานใหญ่) ปิดท้าย",
@@ -253,7 +298,14 @@
         "kind": "text",
         "mode": "replace"
       }
-    ]
+    ],
+    "expected": {
+      "companyNeedle": "เอบีซี",
+      "labelHint": "มอบหมายให้",
+      "officeText": "สำนักงานใหญ่",
+      "officeLabel": "โทร",
+      "gluedOfficePrefix": "โทรสำนักงาน"
+    }
   },
   "multiOccurrence": {
     "plain": "ชื่อสมชายใจดี ที่อยู่กรุงเทพฯ ชื่อสมชายใจดี เบอร์00-000 และชื่อสมชายใจดีอีกครั้ง",
@@ -266,7 +318,12 @@
         "mode": "replace",
         "occurrence": 0
       }
-    ]
+    ],
+    "expected": {
+      "nameText": "สมชายใจดี",
+      "fieldName": "ชื่อ",
+      "hitCount": 3
+    }
   },
   "phoneShard": {
     "plain": "เบอร์โทรศัพท์ 00-003-0000,099-000-0001 ของจำเลยที่ 3 และจำเลยที่ 3 อีก",
@@ -279,7 +336,11 @@
         "mode": "replace",
         "occurrence": 0
       }
-    ]
+    ],
+    "expected": {
+      "digit": "3",
+      "midPhoneFragment": "00-00"
+    }
   },
   "digitFlush": {
     "plain": "1โฉนด/นส.3ก20000002        9001เมืองตัวอย่างตัวอย่าง ค่าจ้าง1200หนึ่งพันสองร้อยบาท",
@@ -305,7 +366,13 @@
         "kind": "text",
         "mode": "replace"
       }
-    ]
+    ],
+    "expected": {
+      "rejectedDigit": "1",
+      "rejectedNextChar": "โ",
+      "pageSurvey": "9001",
+      "price": "1200"
+    }
   },
   "footerUnique": {
     "xml": "footer-unique.xml",
@@ -339,7 +406,12 @@
         "kind": "text",
         "mode": "replace"
       }
-    ]
+    ],
+    "expected": {
+      "totalDigits": "1,116",
+      "totalWords": "หนึ่งพันหนึ่งร้อยสิบหกบาท",
+      "prototypePrice": "1200"
+    }
   },
   "contactEnrich": {
     "plain": "ที่อยู่ กรุงเทพฯ โทร 00-000-0000,099-000-0003 Email user@example.com ปิด",
@@ -351,7 +423,11 @@
         "kind": "text",
         "mode": "replace"
       }
-    ]
+    ],
+    "expected": {
+      "phoneNeedle": "00-000-0000",
+      "emailMarker": "@"
+    }
   },
   "hyphenPhone": {
     "plain": "โทร 00-000-0000,099-000-0003 คดีหมายเลขแดงที่ - จบ",
@@ -363,6 +439,12 @@
         "kind": "text",
         "mode": "replace"
       }
-    ]
+    ],
+    "expected": {
+      "hyphen": "-",
+      "phoneNeedle": "00-000-0000",
+      "labelAnchorNeedle": "แดงที่",
+      "labelAnchorLookbehind": 12
+    }
   }
 }

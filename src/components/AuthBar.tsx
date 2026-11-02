@@ -63,6 +63,7 @@ export function AuthBar() {
             "@/components/DevAuthControls"
           );
           const cfg = await fetchDevAuthConfig();
+          // Match login page: null/empty defaultEmail → skip auto login-as.
           const email = cfg.defaultEmail;
           if (!cfg.enabled || !email) {
             setLoading(false);

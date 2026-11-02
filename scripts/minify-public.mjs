@@ -11,6 +11,7 @@ import { transformSync } from "esbuild";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const targets = [
   { file: "public/field-names.js", loader: "js" },
+  { file: "public/ui-labels.js", loader: "js" },
   { file: "public/app.js", loader: "js" },
   { file: "public/style.css", loader: "css" },
 ];

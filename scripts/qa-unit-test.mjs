@@ -48,6 +48,7 @@ import {
   isFilledValue,
   toFillValues,
 } from "../src/server/source-map.ts";
+import { extractDocumentLayout } from "../src/server/docx-layout.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIX = join(__dirname, "..", "fixtures", "tag-parse");
@@ -727,6 +728,18 @@ console.log("✓ countFilledValues false/empty");
   assert.match(xml, /จำเลย ข/);
   assert.doesNotMatch(xml, /\{\{/);
   console.log("✓ API fill + toFillValues with legacy NFKC keys (scalar + loop)");
+}
+
+{
+  const sampleBuf = readFileSync(
+    new URL("../public/examples/sample-quote.docx", import.meta.url),
+  );
+  const layout = await extractDocumentLayout(sampleBuf);
+  const imageBlock = layout.blocks.find((b) => b.type === "image");
+  assert.ok(imageBlock, "sample quote should expose an image layout block");
+  assert.equal(imageBlock.fieldName, "logo");
+  assert.equal(imageBlock.label, "โลโก้");
+  console.log("✓ extractDocumentLayout image field + nearby label");
 }
 
 console.log("\nAll qa unit tests passed");

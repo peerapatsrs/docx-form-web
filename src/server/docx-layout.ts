@@ -40,7 +40,17 @@ export type LayoutTableBlock = {
   /** Present when this block comes from a header/footer part. */
   part?: "header" | "footer";
 };
-export type LayoutBlock = LayoutTextBlock | LayoutTableBlock;
+/** Inline image whose Word alt/descr carries a {{field}} tag. */
+export type LayoutImageBlock = {
+  type: "image";
+  /** Variable name from alt/descr (e.g. logo from {{logo}}). */
+  fieldName: string;
+  /** Nearby label from the preceding short paragraph when available. */
+  label?: string;
+  alt?: string;
+  part?: "header" | "footer";
+};
+export type LayoutBlock = LayoutTextBlock | LayoutTableBlock | LayoutImageBlock;
 
 export type DocumentLayout = {
   blocks: LayoutBlock[];
@@ -353,6 +363,45 @@ function reorderFloatingTableCaptions(blocks: LayoutBlock[]): LayoutBlock[] {
   return out;
 }
 
+/** Read {{field}} tags from Word drawing alt text (wp:docPr descr / title). */
+function imageFieldsFromParagraph(pXml: string): { fieldName: string; alt: string }[] {
+  const out: { fieldName: string; alt: string }[] = [];
+  const re = /<wp:docPr\b([^>]*)\/?>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(pXml))) {
+    const attrs = m[1] || "";
+    const descr =
+      /\bdescr="([^"]*)"/.exec(attrs)?.[1] ||
+      /\btitle="([^"]*)"/.exec(attrs)?.[1] ||
+      "";
+    const decoded = decodeXmlEntities(descr);
+    const tag = /\{\{\s*([^{}]+)\s*\}\}/.exec(decoded);
+    if (!tag) continue;
+    const fieldName = tag[1].trim();
+    if (!fieldName || fieldName.startsWith("#") || fieldName.startsWith("/")) continue;
+    out.push({ fieldName, alt: decoded });
+  }
+  return out;
+}
+
+/** Last short label line in the pending text buffer (e.g. "โลโก้:"). */
+function peekNearbyImageLabel(textBuf: string[]): string | undefined {
+  const joined = textBuf.join("");
+  const lines = joined
+    .split(/\n+/)
+    .map((l) => l.replace(/\u00a0/g, " ").trim())
+    .filter(Boolean);
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 3); i--) {
+    const line = lines[i];
+    if (/\{\{/.test(line)) continue;
+    const cleaned = line.replace(/[:：]\s*$/, "").trim();
+    if (!cleaned || cleaned.length > 40) continue;
+    if (cleaned.includes("\t")) continue;
+    return cleaned;
+  }
+  return undefined;
+}
+
 /** Walk a Word story part (body / hdr / ftr) into layout blocks. */
 function walkStoryXml(
   storyXml: string,
@@ -441,10 +490,27 @@ function walkStoryXml(
       const end = wrapped.indexOf("</w:p>", pAt);
       if (end < 0) break;
       const pXml = wrapped.slice(pAt, end + "</w:p>".length);
-      // Skip sectPr-only paragraphs that carry no visible text.
+      const imageFields = imageFieldsFromParagraph(pXml);
       const t = paragraphPlainText(pXml);
-      if (t) textBuf.push(t + "\n");
-      else textBuf.push("\n");
+      if (imageFields.length) {
+        const nearby = peekNearbyImageLabel(textBuf);
+        if (t) textBuf.push(t + "\n");
+        flushText();
+        for (const img of imageFields) {
+          const block: LayoutImageBlock = {
+            type: "image",
+            fieldName: img.fieldName,
+            alt: img.alt,
+            ...(nearby ? { label: nearby } : {}),
+          };
+          if (part) block.part = part;
+          blocks.push(block);
+        }
+      } else if (t) {
+        textBuf.push(t + "\n");
+      } else {
+        textBuf.push("\n");
+      }
       pos = end + "</w:p>".length;
       continue;
     }
@@ -505,6 +571,11 @@ export async function extractAllPlainText(buffer: Buffer): Promise<string> {
   for (const b of blocks) {
     if (b.type === "text") {
       parts.push(b.text);
+      continue;
+    }
+    if (b.type === "image") {
+      if (b.label) parts.push(`${b.label}:`);
+      if (b.fieldName) parts.push(`{{${b.fieldName}}}`);
       continue;
     }
     /** @type {LayoutCell[][]} */

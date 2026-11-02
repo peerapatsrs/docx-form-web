@@ -8,6 +8,14 @@ import {
 import { tagsToFieldsWithWarnings } from "../src/server/docx-engine.ts";
 import { formatTemplateError } from "../src/server/docx-errors.ts";
 import { maskGeminiKey } from "../src/server/ai-config.ts";
+import {
+  UNKNOWN_CLIENT_IP,
+  clientIpFromXForwardedFor,
+  getTrustedProxyCount,
+  rateLimitClientIp,
+  resolveClientIp,
+  withResolvedClientIpHeaders,
+} from "../src/server/client-ip.ts";
 
 console.log("qa-unit-test");
 
@@ -50,5 +58,102 @@ const masked = maskGeminiKey("ABCDEFGHIJKLMNOPQRSTUV");
 assert.ok(masked.startsWith("••••"));
 assert.ok(!masked.includes("ABCDEF"));
 console.log("✓ maskGeminiKey");
+
+// --- client IP / trusted proxy hops ---
+assert.equal(getTrustedProxyCount(""), 1);
+assert.equal(getTrustedProxyCount(undefined), 1);
+assert.equal(getTrustedProxyCount("2"), 2);
+assert.equal(getTrustedProxyCount("-1"), 1);
+assert.equal(getTrustedProxyCount("nope"), 1);
+
+// Single hop: rightmost (only) value is the client
+assert.equal(clientIpFromXForwardedFor("203.0.113.10", 1), "203.0.113.10");
+assert.equal(
+  resolveClientIp(new Headers({ "x-forwarded-for": "203.0.113.10" }), {
+    trustedProxyCount: 1,
+  }),
+  "203.0.113.10",
+);
+
+// Multiple hops: skip trusted count from the right
+assert.equal(
+  clientIpFromXForwardedFor("198.51.100.1, 203.0.113.50, 192.0.2.10", 2),
+  "203.0.113.50",
+);
+assert.equal(
+  resolveClientIp(
+    new Headers({
+      "x-forwarded-for": "198.51.100.1, 203.0.113.50, 192.0.2.10",
+    }),
+    { trustedProxyCount: 2 },
+  ),
+  "203.0.113.50",
+);
+
+// Spoofed leftmost XFF must not win when proxies append
+assert.equal(
+  clientIpFromXForwardedFor("8.8.8.8, 203.0.113.77", 1),
+  "203.0.113.77",
+);
+assert.notEqual(
+  resolveClientIp(
+    new Headers({ "x-forwarded-for": "8.8.8.8, 203.0.113.77" }),
+    { trustedProxyCount: 1 },
+  ),
+  "8.8.8.8",
+);
+
+// cf-connecting-ip preferred over XFF
+assert.equal(
+  resolveClientIp(
+    new Headers({
+      "cf-connecting-ip": "203.0.113.9",
+      "x-forwarded-for": "8.8.8.8, 198.51.100.2",
+    }),
+    { trustedProxyCount: 1 },
+  ),
+  "203.0.113.9",
+);
+
+// No headers → null; rate-limit key must not bypass
+assert.equal(resolveClientIp(new Headers()), null);
+assert.equal(rateLimitClientIp(null), UNKNOWN_CLIENT_IP);
+assert.equal(rateLimitClientIp(""), UNKNOWN_CLIENT_IP);
+assert.equal(rateLimitClientIp("not-an-ip"), UNKNOWN_CLIENT_IP);
+assert.equal(rateLimitClientIp("203.0.113.9"), "203.0.113.9");
+
+// Header rewrite: multi-hop → single trusted value for Better Auth
+{
+  const req = withResolvedClientIpHeaders(
+    new Request("http://localhost/api/auth/ok", {
+      headers: { "x-forwarded-for": "8.8.8.8, 203.0.113.40" },
+    }),
+    { trustedProxyCount: 1 },
+  );
+  assert.equal(req.headers.get("x-forwarded-for"), "203.0.113.40");
+  // Do not invent an edge header when IP came from XFF only
+  assert.equal(req.headers.get("cf-connecting-ip"), null);
+}
+{
+  const req = withResolvedClientIpHeaders(
+    new Request("http://localhost/api/auth/ok", {
+      headers: {
+        "cf-connecting-ip": "203.0.113.40",
+        "x-forwarded-for": "8.8.8.8, 198.51.100.1",
+      },
+    }),
+    { trustedProxyCount: 1 },
+  );
+  assert.equal(req.headers.get("cf-connecting-ip"), "203.0.113.40");
+  assert.equal(req.headers.get("x-forwarded-for"), "203.0.113.40");
+}
+{
+  const req = withResolvedClientIpHeaders(
+    new Request("http://localhost/api/auth/ok", { headers: {} }),
+  );
+  assert.equal(req.headers.get("x-forwarded-for"), null);
+  assert.equal(req.headers.get("cf-connecting-ip"), null);
+}
+console.log("✓ client-ip resolution");
 
 console.log("\nAll qa unit tests passed");

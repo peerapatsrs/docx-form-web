@@ -164,6 +164,14 @@ export const auth = betterAuth({
       // Dev is http://localhost — never force Secure here.
       secure: process.env.NODE_ENV === "production",
     },
+    /**
+     * Prefer edge connecting-IP, then X-Forwarded-For. The auth route normalizes
+     * multi-hop XFF to a single trusted value (see client-ip.ts) before Better Auth
+     * runs, so per-IP rate limits work behind reverse proxies.
+     */
+    ipAddress: {
+      ipAddressHeaders: ["cf-connecting-ip", "x-forwarded-for"],
+    },
     database: {
       // Generate IDs server-side
       generateId: undefined,

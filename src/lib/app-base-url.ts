@@ -30,6 +30,17 @@ export function getAppBaseUrl(): string {
   return "http://localhost:3000";
 }
 
+/**
+ * Origin used by Better Auth (OAuth callbacks, passkey rpID/origin).
+ * Prefer BETTER_AUTH_URL when set so IdP / WebAuthn origins stay aligned;
+ * otherwise fall back to the general app base URL.
+ */
+export function getBetterAuthBaseUrl(): string {
+  const explicit = firstEnv(["BETTER_AUTH_URL"]);
+  if (explicit) return explicit;
+  return getAppBaseUrl();
+}
+
 export function absoluteAppUrl(path = "/"): string {
   const base = getAppBaseUrl();
   if (!path || path === "/") return `${base}/`;

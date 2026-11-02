@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { getSessionCookie } from "better-auth/cookies";
-import { HTML_CACHE_CONTROL, securityHeaders } from "@/lib/security-headers";
+import {
+  documentCacheControl,
+  securityHeaders,
+} from "@/lib/security-headers";
 import { isDevAuthEnabled } from "@/lib/dev-auth-flag";
 import {
   buildSafeHttpsRedirectUrl,
@@ -98,14 +101,17 @@ export function proxy(request: NextRequest) {
       // Build from configured public origin — do not trust request.url host.
       const login = new URL(safeAppPathUrl("/login"));
       login.searchParams.set("next", pathname);
-      return applySecurityHeaders(NextResponse.redirect(login, 307));
+      const redirect = applySecurityHeaders(NextResponse.redirect(login, 307));
+      // Do not let shared caches store auth redirects for private surfaces.
+      redirect.headers.set("Cache-Control", documentCacheControl(pathname));
+      return redirect;
     }
   }
 
   const response = NextResponse.next();
   applySecurityHeaders(response);
   if (isDocumentNavigation(request)) {
-    response.headers.set("Cache-Control", HTML_CACHE_CONTROL);
+    response.headers.set("Cache-Control", documentCacheControl(pathname));
   }
   return response;
 }

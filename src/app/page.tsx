@@ -16,20 +16,44 @@ export default function Home() {
   // Guest trips through /login must hard-navigate (see AuthBar / login foot)
   // or the shell paints without topbar/status bindings.
   useEffect(() => {
-    const w = window as Window & { __docxFormBoot?: () => void };
+    const w = window as Window & {
+      __docxFormBoot?: () => void;
+      DocxFieldNames?: unknown;
+    };
     const runBoot = () => {
       w.__docxFormBoot?.();
     };
-    const existing = document.querySelector("script[data-docx-form-app]");
-    if (existing) {
-      // Wait a frame so the remounted #app / #status exist before rebind.
-      requestAnimationFrame(() => requestAnimationFrame(runBoot));
+    const loadAppAfterFieldNames = () => {
+      // Soft remount: scripts already in DOM — just rebind the shell.
+      if (document.querySelector("script[data-docx-form-app]")) {
+        requestAnimationFrame(() => requestAnimationFrame(runBoot));
+        return;
+      }
+      const s = document.createElement("script");
+      s.src = `/app.js?v=web66`;
+      s.dataset.docxFormApp = "1";
+      document.body.appendChild(s);
+    };
+
+    // Always resolve field-names.js before app.js (classic scripts, not bundled).
+    if (w.DocxFieldNames) {
+      loadAppAfterFieldNames();
       return;
     }
-    const s = document.createElement("script");
-    s.src = `/app.js?v=web64`;
-    s.dataset.docxFormApp = "1";
-    document.body.appendChild(s);
+    const existingNames = document.querySelector(
+      "script[data-docx-field-names]",
+    ) as HTMLScriptElement | null;
+    if (existingNames) {
+      const resume = () => loadAppAfterFieldNames();
+      if (w.DocxFieldNames) resume();
+      else existingNames.addEventListener("load", resume, { once: true });
+      return;
+    }
+    const names = document.createElement("script");
+    names.src = `/field-names.js?v=web3`;
+    names.dataset.docxFieldNames = "1";
+    names.onload = () => loadAppAfterFieldNames();
+    document.body.appendChild(names);
   }, []);
 
   return (

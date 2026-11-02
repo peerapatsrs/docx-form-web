@@ -145,7 +145,7 @@ export function validateTag(tag: string): string | null {
     if (err) return err;
     return null;
   }
-  const bool = /^([^?#/{}]+)\?([^,{}]*),(.*)$/.exec(inner);
+  const bool = /^([^?#{}]+)\?([^,{}]*),(.*)$/.exec(inner);
   if (bool) {
     const err = validateVarName(bool[1], "ชื่อตัวแปรติ๊ก");
     if (err) return err;

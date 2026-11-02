@@ -2,10 +2,12 @@ import { betterAuth } from "better-auth";
 import { passkey } from "@better-auth/passkey";
 import { admin } from "better-auth/plugins";
 import { getAuthPool } from "./auth-db";
+import { getIpAddressHeaders } from "./client-ip";
 import { ac, roles } from "@/lib/auth-permissions";
 import { isSuperAdminEmail } from "./auth-superadmin";
 import { isDevAuthEnabled } from "@/lib/dev-auth-flag";
 import { getBetterAuthBaseUrl } from "@/lib/app-base-url";
+import { devAuthPlugin } from "./dev-auth-plugin";
 
 function env(name: string): string | undefined {
   const v = String(process.env[name] || "").trim();
@@ -161,6 +163,14 @@ export const auth = betterAuth({
       // Dev is http://localhost — never force Secure here.
       secure: process.env.NODE_ENV === "production",
     },
+    /**
+     * Header order from client-ip.ts (cf-connecting-ip only when
+     * TRUST_CF_CONNECTING_IP is enabled). Auth route normalizes multi-hop XFF
+     * to a single value — or the fail-closed sentinel — before Better Auth runs.
+     */
+    ipAddress: {
+      ipAddressHeaders: getIpAddressHeaders(),
+    },
     database: {
       // Generate IDs server-side
       generateId: undefined,
@@ -199,14 +209,9 @@ export const auth = betterAuth({
         userVerification: "required",
       },
     }),
-    // Local only: /api/auth/dev/users + /api/auth/dev/login-as (not registered when disabled)
-    ...(() => {
-      if (!isDevAuthEnabled()) return [];
-      // Lazy load so production deployments with DEV_AUTH off never mount the routes.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports -- conditional load
-      const { devAuthPlugin } = require("./dev-auth-plugin") as typeof import("./dev-auth-plugin");
-      return [devAuthPlugin()];
-    })(),
+    // Local only: /api/auth/dev/users + /api/auth/dev/login-as (not registered when disabled).
+    // Static ESM import (not require): CJS interop breaks under next build when DEV_AUTH is on.
+    ...(isDevAuthEnabled() ? [devAuthPlugin()] : []),
   ],
 });
 

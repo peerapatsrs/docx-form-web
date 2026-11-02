@@ -30,8 +30,7 @@ function resolveConfigDir(): string {
     home &&
     home !== "/nonexistent" &&
     !home.startsWith("/nonexistent") &&
-    // Dynamic home path — do not let Turbopack trace the whole project.
-    existsSync(/* turbopackIgnore: true */ home)
+    existsSync(home)
   ) {
     try {
       accessSync(home, constants.W_OK);
@@ -45,14 +44,6 @@ function resolveConfigDir(): string {
 
 const CONFIG_DIR = resolveConfigDir();
 const CONFIG_PATH = join(CONFIG_DIR, "config.json");
-
-/** Same path as main; turbopackIgnore avoids whole-project FS tracing. */
-function ensureConfigDir(): void {
-  if (!existsSync(/* turbopackIgnore: true */ CONFIG_DIR)) {
-    mkdirSync(/* turbopackIgnore: true */ CONFIG_DIR, { recursive: true });
-  }
-}
-
 export const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
 
 export const GEMINI_MODEL_OPTIONS: { id: string; label: string }[] = [
@@ -78,10 +69,8 @@ export function getConfigPath(): string {
 export function readAiConfig(): AiConfig {
   if (isByokOnly()) return {};
   try {
-    if (!existsSync(/* turbopackIgnore: true */ CONFIG_PATH)) return {};
-    const raw = JSON.parse(
-      readFileSync(/* turbopackIgnore: true */ CONFIG_PATH, "utf-8"),
-    ) as AiConfig;
+    if (!existsSync(CONFIG_PATH)) return {};
+    const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as AiConfig;
     return raw && typeof raw === "object" ? raw : {};
   } catch {
     return {};
@@ -94,12 +83,12 @@ export function writeAiConfig(patch: Partial<AiConfig>): AiConfig {
     return { ...readAiConfig(), ...patch, geminiApiKey: undefined };
   }
   const next: AiConfig = { ...readAiConfig(), ...patch };
-  ensureConfigDir();
-  writeFileSync(
-    /* turbopackIgnore: true */ CONFIG_PATH,
-    JSON.stringify(next, null, 2),
-    "utf-8",
-  );
+  // turbopackIgnore: CONFIG_DIR is dynamic (env/home/tmp); without it Turbopack
+  // traces the whole project into the server bundle.
+  if (!existsSync(/* turbopackIgnore: true */ CONFIG_DIR)) {
+    mkdirSync(CONFIG_DIR, { recursive: true });
+  }
+  writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2), "utf-8");
   return next;
 }
 
@@ -107,12 +96,10 @@ export function clearGeminiKey(): AiConfig {
   if (isByokOnly()) return {};
   const cur = readAiConfig();
   delete cur.geminiApiKey;
-  ensureConfigDir();
-  writeFileSync(
-    /* turbopackIgnore: true */ CONFIG_PATH,
-    JSON.stringify(cur, null, 2),
-    "utf-8",
-  );
+  if (!existsSync(/* turbopackIgnore: true */ CONFIG_DIR)) {
+    mkdirSync(CONFIG_DIR, { recursive: true });
+  }
+  writeFileSync(CONFIG_PATH, JSON.stringify(cur, null, 2), "utf-8");
   return cur;
 }
 

@@ -1,11 +1,12 @@
 import { getMigrations } from "better-auth/db/migration";
 import { ensureAdminSchema } from "./admin-store";
 import { auth } from "./auth";
+import { seedQaUser } from "./auth-seed-qa";
 import { ensureSuperAdmins } from "./auth-superadmin";
 
 let ran = false;
 
-/** Apply Better Auth schema (idempotent) and bootstrap superadmins. */
+/** Apply Better Auth schema (idempotent), bootstrap superadmins, seed QA login-as user. */
 export async function migrateAuth(): Promise<void> {
   if (ran) return;
   await ensureAdminSchema();
@@ -22,6 +23,10 @@ export async function migrateAuth(): Promise<void> {
   const updated = await ensureSuperAdmins();
   if (updated > 0) {
     console.info(`[auth] promoted ${updated} user(s) to superadmin`);
+  }
+  const seeded = await seedQaUser();
+  if (seeded.status === "created") {
+    console.info("[auth] seeded QA login-as user");
   }
   ran = true;
 }

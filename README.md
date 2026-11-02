@@ -62,6 +62,7 @@ npm run dev
 - พาสคีย์: เข้าสู่ระบบแล้วไปที่ `/account` → **เพิ่มพาสคีย์**
 - เซสชันเก็บในคุกกี้ HttpOnly · PostgreSQL ผ่าน `DATABASE_URL` (ดู `docker compose` service `db`)
 - Superadmin: อีเมลใน `SUPERADMIN_EMAILS` (ค่าเริ่มต้น `peerapat.srs@gmail.com`) ได้ role `superadmin` อัตโนมัติ
+- Dev / SIT / UAT (`DEV_AUTH=1`): ระบบ seed ผู้ใช้จาก `DEV_AUTH_DEFAULT_EMAIL` (หรืออีเมลแรกใน `SUPERADMIN_EMAILS`) แบบ idempotent ตอน `auth:migrate` / บูตแอป เพื่อให้ `login-as` ใช้ได้โดยไม่ต้อง OAuth ก่อน — รันซ้ำด้วย `npm run auth:seed-qa`
 - บังคับล็อกอินทั้งแอป: ตั้ง `AUTH_REQUIRED=1`
 
 ### Google OAuth (จำเป็นสำหรับเริ่มใช้)

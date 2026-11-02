@@ -5,63 +5,35 @@
  * Run: npx tsx scripts/ai-tag-draft-table-first-row.mjs
  */
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { validateAiTagSuggestions } from "../src/server/ai-tag-draft.ts";
 
-const xml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:body>
-    <w:p><w:r><w:t>นอกตารางชื่อสมชาย</w:t></w:r></w:p>
-    <w:tbl>
-      <w:tr>
-        <w:tc><w:p><w:r><w:t>ลำดับ</w:t></w:r></w:p></w:tc>
-        <w:tc><w:p><w:r><w:t>ชื่อ</w:t></w:r></w:p></w:tc>
-        <w:tc><w:p><w:r><w:t>เขต / อำเภอ</w:t></w:r></w:p></w:tc>
-      </w:tr>
-      <w:tr>
-        <w:tc><w:p><w:r><w:t>1</w:t></w:r></w:p></w:tc>
-        <w:tc><w:p><w:r><w:t>ในตารางสมชาย</w:t></w:r></w:p></w:tc>
-        <w:tc><w:p><w:r><w:t></w:t></w:r></w:p></w:tc>
-      </w:tr>
-      <w:tr>
-        <w:tc><w:p><w:r><w:t>2</w:t></w:r></w:p></w:tc>
-        <w:tc><w:p><w:r><w:t>แถวสองไม่ควรแท็ก</w:t></w:r></w:p></w:tc>
-        <w:tc><w:p><w:r><w:t></w:t></w:r></w:p></w:tc>
-      </w:tr>
-    </w:tbl>
-  </w:body>
-</w:document>`;
+const fixturesDir = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "fixtures",
+  "ai-tag-draft",
+);
 
-const plain = "นอกตารางชื่อสมชายลำดับชื่อเขต / อำเภอ1ในตารางสมชาย2แถวสองไม่ควรแท็ก";
+function loadXml(name) {
+  return fs.readFileSync(path.join(fixturesDir, name), "utf8");
+}
+
+function loadValues() {
+  return JSON.parse(fs.readFileSync(path.join(fixturesDir, "values.json"), "utf8"));
+}
+
+const values = loadValues();
+
+const tableFirst = values.tableFirstRow;
+const xml = loadXml(tableFirst.xml);
+const plain = tableFirst.plain;
 
 const outTh = validateAiTagSuggestions(
   plain,
-  [
-    { plainText: "นอกตารางชื่อสมชาย", name: "ชื่อนอก", kind: "text", mode: "replace" },
-    {
-      plainText: "ในตารางสมชาย",
-      name: "รายการจำเลย",
-      kind: "list-table",
-      mode: "wrap-row",
-    },
-    { plainText: "1", name: "ลำดับ", kind: "auto", mode: "replace" },
-    { plainText: "ในตารางสมชาย", name: "ชื่อ", kind: "text", mode: "replace" },
-    {
-      plainText: "ในตารางสมชาย",
-      name: "เขต_อำเภอ",
-      kind: "text",
-      mode: "fill-empty-tc",
-      cellIndex: 2,
-    },
-    // Later sample row — must be rejected.
-    {
-      plainText: "แถวสองไม่ควรแท็ก",
-      name: "รายการแถวสอง",
-      kind: "list-table",
-      mode: "wrap-row",
-    },
-    { plainText: "2", name: "ลำดับ2", kind: "auto", mode: "replace" },
-    { plainText: "แถวสองไม่ควรแท็ก", name: "ชื่อ2", kind: "text", mode: "replace" },
-  ],
+  tableFirst.suggestionsTh,
   xml,
   "th",
 );
@@ -121,14 +93,7 @@ assert.equal(
 
 const outEn = validateAiTagSuggestions(
   plain,
-  [
-    {
-      plainText: "ในตารางสมชาย",
-      name: "defendant_rows",
-      kind: "list-table",
-      mode: "wrap-row",
-    },
-  ],
+  tableFirst.suggestionsEn,
   xml,
   "en",
 );
@@ -155,50 +120,16 @@ console.log(
   `✓ ai-tag-draft first-row table smoke (th=${outTh.length}, en=${outEn.length})`,
 );
 
-// Multi-row Thai headers (long merged titles, no w:tblHeader) — like จำเลยที่ forms.
+// Multi-row headers (long merged titles, no w:tblHeader).
 // Row 0/1 are headers; row 2 with "1" is the prototype. Model may omit wrap-row.
-const multiHeaderXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:body>
-    <w:tbl>
-      <w:tr>
-        <w:tc><w:p><w:r><w:t>จำลยที่</w:t></w:r></w:p></w:tc>
-        <w:tc><w:p><w:r><w:t>สืบตามเขตอำนาจศาล / ภูมิลำเนา ณวันฟ้องคดี</w:t></w:r></w:p></w:tc>
-        <w:tc><w:p><w:r><w:t>สืบตามภูมิลำเนาปัจจุบัน / อื่นๆ</w:t></w:r></w:p></w:tc>
-        <w:tc><w:p><w:r><w:t>ผลสืบ</w:t></w:r></w:p></w:tc>
-      </w:tr>
-      <w:tr>
-        <w:tc><w:p><w:r><w:t></w:t></w:r></w:p></w:tc>
-        <w:tc><w:p><w:r><w:t>เขต / อำเภอ</w:t></w:r></w:p></w:tc>
-        <w:tc><w:p><w:r><w:t>สำนักงานที่ดินจังหวัด</w:t></w:r></w:p></w:tc>
-        <w:tc><w:p><w:r><w:t>พบ</w:t></w:r></w:p></w:tc>
-      </w:tr>
-      <w:tr>
-        <w:tc><w:p><w:r><w:t>1</w:t></w:r></w:p></w:tc>
-        <w:tc><w:p><w:r><w:t>เมืองปทุมธานี</w:t></w:r></w:p></w:tc>
-        <w:tc><w:p><w:r><w:t>ปทุมธานี</w:t></w:r></w:p></w:tc>
-        <w:tc><w:p><w:r><w:t>√</w:t></w:r></w:p></w:tc>
-      </w:tr>
-      <w:tr>
-        <w:tc><w:p><w:r><w:t>2</w:t></w:r></w:p></w:tc>
-        <w:tc><w:p><w:r><w:t>เมืองปทุมธานี</w:t></w:r></w:p></w:tc>
-        <w:tc><w:p><w:r><w:t>ปทุมธานี</w:t></w:r></w:p></w:tc>
-        <w:tc><w:p><w:r><w:t>√</w:t></w:r></w:p></w:tc>
-      </w:tr>
-    </w:tbl>
-  </w:body>
-</w:document>`;
-
-const multiPlain =
-  "จำลยที่สืบตามเขตอำนาจศาล / ภูมิลำเนา ณวันฟ้องคดีสืบตามภูมิลำเนาปัจจุบัน / อื่นๆผลสืบเขต / อำเภอสำนักงานที่ดินจังหวัดพบ1เมืองปทุมธานีปทุมธานี√2เมืองปทุมธานีปทุมธานี√";
+const multiHeader = values.multiHeader;
+const multiHeaderXml = loadXml(multiHeader.xml);
+const multiPlain = multiHeader.plain;
 
 // No model wrap — seeds + enrichment must still propose list-table + first cell.
 const outSeed = validateAiTagSuggestions(
   multiPlain,
-  [
-    // Model only tags standalone digit; must not block seeded wrap / enrichment.
-    { plainText: "1", name: "ที่", kind: "auto", mode: "replace" },
-  ],
+  multiHeader.suggestions,
   multiHeaderXml,
   "th",
 );
@@ -235,13 +166,10 @@ console.log(
 );
 
 // Stray auto outside any list / list-table must become plain text {{name}}, not {{+name}}.
-const strayPlain = "จำเลยที่ 1 เป็นคู่ความนอกตาราง";
+const strayAuto = values.strayAuto;
 const outStray = validateAiTagSuggestions(
-  strayPlain,
-  [
-    { plainText: "จำเลยที่", name: "จำเลยที่", kind: "auto", mode: "replace" },
-    { plainText: "1", name: "ลำดับ", kind: "auto", mode: "replace" },
-  ],
+  strayAuto.plain,
+  strayAuto.suggestions,
   null,
   "th",
 );
@@ -259,55 +187,15 @@ assert.ok(
 );
 console.log(`✓ ai-tag-draft stray-auto demote smoke (n=${outStray.length})`);
 
-// Paragraph list: consecutive 「จำเลยที่ N」outside tables → wrap FIRST unit only;
+// Paragraph list: consecutive units outside tables → wrap FIRST unit only;
 // later units hard-blocked; auto inside wrap kept; stray fields on unit 2 dropped.
-const paraXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:body>
-    <w:p><w:r><w:t>หนังสือฟ้อง</w:t></w:r></w:p>
-    <w:p><w:r><w:t>จำเลยที่ 1 ชื่อ นายหนึ่ง ที่อยู่ บ้านหนึ่ง</w:t></w:r></w:p>
-    <w:p><w:r><w:t>จำเลยที่ 2 ชื่อ นายสอง ที่อยู่ บ้านสอง</w:t></w:r></w:p>
-    <w:p><w:r><w:t>จำเลยที่ 3 ชื่อ นายสาม ที่อยู่ บ้านสาม</w:t></w:r></w:p>
-    <w:p><w:r><w:t>จึงเรียนมาเพื่อโปรดพิจารณา</w:t></w:r></w:p>
-  </w:body>
-</w:document>`;
-const paraPlain =
-  "หนังสือฟ้องจำเลยที่ 1 ชื่อ นายหนึ่ง ที่อยู่ บ้านหนึ่งจำเลยที่ 2 ชื่อ นายสอง ที่อยู่ บ้านสองจำเลยที่ 3 ชื่อ นายสาม ที่อยู่ บ้านสามจึงเรียนมาเพื่อโปรดพิจารณา";
+const paragraphList = values.paragraphList;
+const paraXml = loadXml(paragraphList.xml);
+const paraPlain = paragraphList.plain;
 
 const outPara = validateAiTagSuggestions(
   paraPlain,
-  [
-    // Model wrongly tags each defendant as a separate scalar — must not beat the list.
-    {
-      plainText: "จำเลยที่ 1 ชื่อ นายหนึ่ง ที่อยู่ บ้านหนึ่ง",
-      name: "จำเลย1",
-      kind: "text",
-      mode: "replace",
-    },
-    {
-      plainText: "จำเลยที่ 2 ชื่อ นายสอง ที่อยู่ บ้านสอง",
-      name: "จำเลย2",
-      kind: "text",
-      mode: "replace",
-    },
-    {
-      plainText: "จำเลยที่ 3 ชื่อ นายสาม ที่อยู่ บ้านสาม",
-      name: "จำเลย3",
-      kind: "text",
-      mode: "replace",
-    },
-    // Inner field inside first unit + auto runno.
-    { plainText: "นายหนึ่ง", name: "ชื่อ", kind: "text", mode: "replace" },
-    { plainText: "1", name: "ลำดับ", kind: "auto", mode: "replace" },
-    // Over-wide wrap covering all three — must clamp to first unit.
-    {
-      plainText:
-        "จำเลยที่ 1 ชื่อ นายหนึ่ง ที่อยู่ บ้านหนึ่งจำเลยที่ 2 ชื่อ นายสอง ที่อยู่ บ้านสองจำเลยที่ 3 ชื่อ นายสาม ที่อยู่ บ้านสาม",
-      name: "รายการทั้งหมด",
-      kind: "list",
-      mode: "wrap",
-    },
-  ],
+  paragraphList.suggestions,
   paraXml,
   "th",
 );
@@ -347,24 +235,14 @@ assert.equal(
 );
 console.log(`✓ ai-tag-draft paragraph-list first-unit smoke (n=${outPara.length})`);
 
-// Real Word docs often put <w:tab/> between 「จำเลยที่」and the digit — plain must
+// Real Word docs often put <w:tab/> between label and digit — plain must
 // keep \\t or seeded list wraps never match TAGGER_PLAIN.
-const paraTabXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:body>
-    <w:p><w:r><w:t>จำเลยที่</w:t><w:tab/><w:t>1</w:t><w:tab/><w:t>ชื่อ นายหนึ่ง</w:t></w:r></w:p>
-    <w:p><w:r><w:t>จำเลยที่</w:t><w:tab/><w:t>2</w:t><w:tab/><w:t>ชื่อ นายสอง</w:t></w:r></w:p>
-    <w:p><w:r><w:t>จำเลยที่</w:t><w:tab/><w:t>3</w:t><w:tab/><w:t>ชื่อ นายสาม</w:t></w:r></w:p>
-  </w:body>
-</w:document>`;
-const paraTabPlain =
-  "จำเลยที่\t1\tชื่อ นายหนึ่งจำเลยที่\t2\tชื่อ นายสองจำเลยที่\t3\tชื่อ นายสาม";
+const paragraphTab = values.paragraphTab;
+const paraTabXml = loadXml(paragraphTab.xml);
+const paraTabPlain = paragraphTab.plain;
 const outParaTab = validateAiTagSuggestions(
   paraTabPlain,
-  [
-    { plainText: "1", name: "จำเลยที่", kind: "text", mode: "replace" },
-    { plainText: "นายสอง", name: "ชื่อ2", kind: "text", mode: "replace" },
-  ],
+  paragraphTab.suggestions,
   paraTabXml,
   "th",
 );
@@ -382,34 +260,10 @@ assert.ok(
 console.log(`✓ ai-tag-draft paragraph-list tabbed-unit smoke (n=${outParaTab.length})`);
 
 // Label-anchored + flexible tabs: AI returns value + label; doc has Label\\t\\tValue.
-const labelPlain =
-  "บริษัท ทดสอบ จำกัดประเภทหนี้\t\tกู้ยืม\t\tทะเบียนลูกหนี้\t62014610\tศาล\tธัญบุรี";
+const labelAnchored = values.labelAnchored;
 const outLabel = validateAiTagSuggestions(
-  labelPlain,
-  [
-    {
-      plainText: "กู้ยืม",
-      label: "ประเภทหนี้",
-      name: "ประเภทหนี้",
-      kind: "text",
-      mode: "replace",
-    },
-    {
-      // Wrong separator in plainText — must still resolve via label or flexible match.
-      plainText: "ประเภทหนี้ กู้ยืม",
-      label: "ประเภทหนี้",
-      name: "ประเภทหนี้ซ้ำ",
-      kind: "text",
-      mode: "replace",
-    },
-    {
-      plainText: "62014610",
-      label: "ทะเบียนลูกหนี้",
-      name: "ทะเบียนลูกหนี้",
-      kind: "text",
-      mode: "replace",
-    },
-  ],
+  labelAnchored.plain,
+  labelAnchored.suggestions,
   null,
   "th",
 );
@@ -427,36 +281,11 @@ assert.ok(
 );
 console.log(`✓ ai-tag-draft label-anchored tab smoke (n=${outLabel.length})`);
 
-// Space-separated prose (no \\t): มอบหมายให้ บริษัท… (ตัวอย่าง)
-const assignPlain =
-  "ตามหนังสือมอบอำนาจ มอบหมายให้ บริษัท กฎหมาย บีไอจี จำกัด (ตัวอย่าง) เป็นผู้รับมอบ";
+// Space-separated prose (no \\t).
+const assignSpace = values.assignSpace;
 const outAssign = validateAiTagSuggestions(
-  assignPlain,
-  [
-    {
-      plainText: "บริษัท กฎหมาย บีไอจี จำกัด",
-      label: "มอบหมายให้",
-      name: "ผู้รับมอบหมาย",
-      kind: "text",
-      mode: "replace",
-    },
-    {
-      // AI included sample marker — still resolve to the company name (or full if exact).
-      plainText: "บริษัท กฎหมาย บีไอจี จำกัด (ตัวอย่าง)",
-      label: "มอบหมายให้",
-      name: "ผู้รับมอบหมาย2",
-      kind: "text",
-      mode: "replace",
-    },
-    {
-      // AI glued label+value with a space — must shrink to value.
-      plainText: "มอบหมายให้ บริษัท กฎหมาย บีไอจี จำกัด",
-      label: "มอบหมายให้",
-      name: "ผู้รับมอบหมาย3",
-      kind: "text",
-      mode: "replace",
-    },
-  ],
+  assignSpace.plain,
+  assignSpace.suggestions,
   null,
   "th",
 );
@@ -471,36 +300,11 @@ assert.ok(
 );
 console.log(`✓ ai-tag-draft label-anchored space smoke (n=${outAssign.length})`);
 
-// Flush / glued (no space): (โทร02-023-2599) and multi (โทร02-…,02-…)
-const phonePlain =
-  "ติดต่อสำนักงานใหญ่(โทร02-023-2599) สำนักงานสาขา(โทร02-023-2599,02-023-2591) ตัวอย่าง";
+// Flush / glued (no space): phone labels and multi-value lists.
+const phoneFlush = values.phoneFlush;
 const outPhone = validateAiTagSuggestions(
-  phonePlain,
-  [
-    {
-      plainText: "02-023-2599",
-      label: "โทร",
-      name: "โทรศัพท์",
-      kind: "text",
-      mode: "replace",
-      occurrence: 0,
-    },
-    {
-      plainText: "02-023-2599,02-023-2591",
-      label: "โทร",
-      name: "โทรศัพท์สาขา",
-      kind: "text",
-      mode: "replace",
-    },
-    {
-      // AI forgot label and glued stem into plainText — still resolve to digits.
-      plainText: "โทร02-023-2599",
-      name: "โทรศัพท์3",
-      kind: "text",
-      mode: "replace",
-      occurrence: 0,
-    },
-  ],
+  phoneFlush.plain,
+  phoneFlush.suggestions,
   null,
   "th",
 );
@@ -521,34 +325,11 @@ assert.ok(
 );
 console.log(`✓ ai-tag-draft label-anchored flush-phone smoke (n=${outPhone.length})`);
 
-// Flush text (not only digits): มอบหมายให้บริษัท… and โทรสำนักงานใหญ่
-const flushTextPlain =
-  "มอบหมายให้บริษัท กฎหมาย บีไอจี จำกัดเป็นผู้รับมอบ (โทรสำนักงานใหญ่) ปิดท้าย";
+// Flush text (not only digits).
+const flushText = values.flushText;
 const outFlushText = validateAiTagSuggestions(
-  flushTextPlain,
-  [
-    {
-      plainText: "บริษัท กฎหมาย บีไอจี จำกัด",
-      label: "มอบหมายให้",
-      name: "ผู้รับมอบหมาย",
-      kind: "text",
-      mode: "replace",
-    },
-    {
-      plainText: "สำนักงานใหญ่",
-      label: "โทร",
-      name: "โทรถึง",
-      kind: "text",
-      mode: "replace",
-    },
-    {
-      // AI glued stem+text without label — still peel to text body.
-      plainText: "โทรสำนักงานใหญ่",
-      name: "โทรถึง2",
-      kind: "text",
-      mode: "replace",
-    },
-  ],
+  flushText.plain,
+  flushText.suggestions,
   null,
   "th",
 );
@@ -574,20 +355,10 @@ assert.ok(
 console.log(`✓ ai-tag-draft label-anchored flush-text smoke (n=${outFlushText.length})`);
 
 // One AI row → every safe occurrence (not only the first match).
-const multiOccPlain =
-  "ชื่อสมชายใจดี ที่อยู่กรุงเทพฯ ชื่อสมชายใจดี เบอร์02-111 และชื่อสมชายใจดีอีกครั้ง";
+const multiOccurrence = values.multiOccurrence;
 const outMultiOcc = validateAiTagSuggestions(
-  multiOccPlain,
-  [
-    {
-      plainText: "สมชายใจดี",
-      label: "ชื่อ",
-      name: "ชื่อ",
-      kind: "text",
-      mode: "replace",
-      occurrence: 0,
-    },
-  ],
+  multiOccurrence.plain,
+  multiOccurrence.suggestions,
   null,
   "th",
 );
@@ -601,21 +372,12 @@ assert.ok(
 );
 console.log(`✓ ai-tag-draft multi-occurrence expand smoke (n=${outMultiOcc.length})`);
 
-// Short digit must NOT shard a phone number (ของจำเลยที่ → plain "3" inside 02-023-2599).
-const phoneShardPlain =
-  "เบอร์โทรศัพท์ 02-023-2599,096-392-3961 ของจำเลยที่ 3 และจำเลยที่ 3 อีก";
+// Short digit must NOT shard a phone number.
+const phoneShard = values.phoneShard;
+const phoneShardPlain = phoneShard.plain;
 const outPhoneShard = validateAiTagSuggestions(
   phoneShardPlain,
-  [
-    {
-      plainText: "3",
-      label: "ของจำเลยที่",
-      name: "ของจำเลยที่",
-      kind: "text",
-      mode: "replace",
-      occurrence: 0,
-    },
-  ],
+  phoneShard.suggestions,
   null,
   "th",
 );
@@ -643,33 +405,11 @@ assert.ok(
 console.log(`✓ ai-tag-draft phone-shard digit smoke (n=${outPhoneShard.length})`);
 
 // Longer digit cells flush to Thai (Word tables omit separators) must still match.
-const digitFlushPlain =
-  "1โฉนด/นส.3ก58407464        4578ปทุมธานีเมืองปทุมธานี ค่าจ้าง1200หนึ่งพันสองร้อยบาท";
+const digitFlush = values.digitFlush;
+const digitFlushPlain = digitFlush.plain;
 const outDigitFlush = validateAiTagSuggestions(
   digitFlushPlain,
-  [
-    {
-      plainText: "1",
-      label: "ที่",
-      name: "ที่_แถว",
-      kind: "text",
-      mode: "replace",
-    },
-    {
-      plainText: "4578",
-      label: "หน้าสำรวจ",
-      name: "หน้าสำรวจ",
-      kind: "text",
-      mode: "replace",
-    },
-    {
-      plainText: "1200",
-      label: "ราคา/หน่วย",
-      name: "ราคาต่อหน่วย",
-      kind: "text",
-      mode: "replace",
-    },
-  ],
+  digitFlush.suggestions,
   null,
   "th",
 );
@@ -689,47 +429,12 @@ console.log(`✓ ai-tag-draft digit-flush-thai smoke (n=${outDigitFlush.length})
 
 // Unique footer/total cells in a later table row must tag; duplicate sample values must not.
 {
-  const footerPlain =
-    "หัวคอลัมน์\n1ค่าจ้าง1200บาท\nภาษี\nรวมทั้งสิ้น           1,116หนึ่งพันหนึ่งร้อยสิบหกบาท";
-  // Minimal fake XML: two body rows in one table; prototype = first data row with 1200.
-  const footerXml = `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl>
-<w:tr><w:tc><w:p><w:r><w:t>หัวคอลัมน์</w:t></w:r></w:p></w:tc></w:tr>
-<w:tr><w:tc><w:p><w:r><w:t>1ค่าจ้าง1200บาท</w:t></w:r></w:p></w:tc></w:tr>
-<w:tr><w:tc><w:p><w:r><w:t>ภาษี</w:t></w:r></w:p></w:tc></w:tr>
-<w:tr><w:tc><w:p><w:r><w:t>รวมทั้งสิ้น           1,116หนึ่งพันหนึ่งร้อยสิบหกบาท</w:t></w:r></w:p></w:tc></w:tr>
-</w:tbl></w:body></w:document>`;
+  const footerUnique = values.footerUnique;
+  const footerPlain = footerUnique.plain;
+  const footerXml = loadXml(footerUnique.xml);
   const outFooter = validateAiTagSuggestions(
     footerPlain,
-    [
-      {
-        plainText: "1ค่าจ้าง1200บาท",
-        name: "รายการค่าใช้จ่าย",
-        kind: "list-table",
-        mode: "wrap-row",
-      },
-      {
-        plainText: "1200",
-        label: "ราคา",
-        name: "ราคา_แถว2",
-        kind: "text",
-        mode: "replace",
-        occurrence: 0,
-      },
-      {
-        plainText: "1,116",
-        label: "รวมทั้งสิ้น",
-        name: "รวมทั้งสิ้น",
-        kind: "text",
-        mode: "replace",
-      },
-      {
-        plainText: "หนึ่งพันหนึ่งร้อยสิบหกบาท",
-        label: "รวมทั้งสิ้น",
-        name: "รวมทั้งสิ้น_ตัวอักษร",
-        kind: "text",
-        mode: "replace",
-      },
-    ],
+    footerUnique.suggestions,
     footerXml,
     "th",
   );
@@ -753,11 +458,10 @@ console.log(`✓ ai-tag-draft digit-flush-thai smoke (n=${outDigitFlush.length})
 }
 
 // Contact enrich: phones/emails seeded when AI omits them.
-const contactPlain =
-  "ที่อยู่ กรุงเทพฯ โทร 02-023-2599,096-392-3963 Email biglegal@biglegalbusiness.com ปิด";
+const contactEnrich = values.contactEnrich;
 const outContact = validateAiTagSuggestions(
-  contactPlain,
-  [{ plainText: "กรุงเทพฯ", label: "ที่อยู่", name: "ที่อยู่", kind: "text", mode: "replace" }],
+  contactEnrich.plain,
+  contactEnrich.suggestions,
   null,
   "th",
 );
@@ -772,19 +476,11 @@ assert.ok(
 console.log(`✓ ai-tag-draft contact enrich smoke (n=${outContact.length})`);
 
 // Weak "-" must not shatter phone numbers when AI emits plainText "-".
-const hyphenPlain =
-  "โทร 02-023-2599,096-392-3963 คดีหมายเลขแดงที่ - จบ";
+const hyphenPhone = values.hyphenPhone;
+const hyphenPlain = hyphenPhone.plain;
 const outHyphen = validateAiTagSuggestions(
   hyphenPlain,
-  [
-    {
-      plainText: "-",
-      label: "คดีหมายเลขแดงที่",
-      name: "คดีแดง",
-      kind: "text",
-      mode: "replace",
-    },
-  ],
+  hyphenPhone.suggestions,
   null,
   "th",
 );

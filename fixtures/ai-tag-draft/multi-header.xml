@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:tbl>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>จำลยที่</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>สืบตามเขตอำนาจศาล / ภูมิลำเนา ณวันฟ้องคดี</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>สืบตามภูมิลำเนาปัจจุบัน / อื่นๆ</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>ผลสืบ</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t></w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>เขต / อำเภอ</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>สำนักงานที่ดินจังหวัด</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>พบ</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>1</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>เมืองปทุมธานี</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>ปทุมธานี</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>√</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>2</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>เมืองปทุมธานี</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>ปทุมธานี</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>√</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+  </w:body>
+</w:document>

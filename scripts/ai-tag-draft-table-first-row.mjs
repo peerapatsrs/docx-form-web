@@ -271,7 +271,7 @@ const loan = outLabel.find((s) => s.plainText === "กู้ยืม");
 assert.ok(loan, "label-anchored กู้ยืม must match despite \\\\t\\\\t in doc");
 assert.equal(loan.labelHint, "ประเภทหนี้");
 assert.ok(
-  outLabel.some((s) => s.plainText === "62014610" && s.labelHint === "ทะเบียนลูกหนี้"),
+  outLabel.some((s) => s.plainText === "10000001" && s.labelHint === "ทะเบียนลูกหนี้"),
   "ทะเบียนลูกหนี้ value must label-anchor",
 );
 // Second suggestion also collapses to the same value span — first wins; duplicate name skipped or second dropped.
@@ -290,7 +290,7 @@ const outAssign = validateAiTagSuggestions(
   "th",
 );
 const company = outAssign.find((s) =>
-  String(s.plainText || "").includes("บีไอจี"),
+  String(s.plainText || "").includes("เอบีซี"),
 );
 assert.ok(company, "space-separated มอบหมายให้ → บริษัท… must match");
 assert.equal(company.labelHint, "มอบหมายให้");
@@ -309,19 +309,19 @@ const outPhone = validateAiTagSuggestions(
   "th",
 );
 const phone1 = outPhone.find(
-  (s) => s.plainText === "02-023-2599" && s.labelHint === "โทร",
+  (s) => s.plainText === "00-000-0000" && s.labelHint === "โทร",
 );
-assert.ok(phone1, "flush โทร02-023-2599 must label-anchor to digits");
+assert.ok(phone1, "flush glued phone after โทร must label-anchor to digits");
 assert.ok(
   outPhone.some(
     (s) =>
-      s.plainText === "02-023-2599,02-023-2591" && s.labelHint === "โทร",
+      s.plainText === "00-000-0000,00-000-0001" && s.labelHint === "โทร",
   ),
   "flush multi-phone list after โทร must match",
 );
 assert.ok(
-  outPhone.some((s) => s.plainText === "02-023-2599"),
-  "glued plainText โทร02-… without label must still find digits",
+  outPhone.some((s) => s.plainText === "00-000-0000"),
+  "glued plainText โทร+digits without label must still find digits",
 );
 console.log(`✓ ai-tag-draft label-anchored flush-phone smoke (n=${outPhone.length})`);
 
@@ -334,7 +334,7 @@ const outFlushText = validateAiTagSuggestions(
   "th",
 );
 const flushCo = outFlushText.find((s) =>
-  String(s.plainText || "").includes("บีไอจี"),
+  String(s.plainText || "").includes("เอบีซี"),
 );
 assert.ok(flushCo, "flush text after มอบหมายให้ must match company name");
 assert.equal(flushCo.labelHint, "มอบหมายให้");
@@ -387,10 +387,10 @@ assert.ok(
     return (
       s.plainText === "3" &&
       Number.isFinite(at) &&
-      phoneShardPlain.slice(Math.max(0, at - 4), at + 5).includes("02-02")
+      phoneShardPlain.slice(Math.max(0, at - 4), at + 5).includes("00-00")
     );
   }),
-  "digit 3 must not tag inside 02-023-2599",
+  "digit 3 must not tag inside a landline number",
 );
 const threes = outPhoneShard.filter((s) => s.plainText === "3");
 assert.ok(threes.length >= 1, "standalone จำเลยที่ 3 digits should still match");
@@ -418,7 +418,7 @@ assert.ok(
   "single-digit row marker flush to Thai must not tag",
 );
 assert.ok(
-  outDigitFlush.some((s) => s.plainText === "4578"),
+  outDigitFlush.some((s) => s.plainText === "9001"),
   "4-digit page-survey flush to Thai must tag",
 );
 assert.ok(
@@ -466,7 +466,7 @@ const outContact = validateAiTagSuggestions(
   "th",
 );
 assert.ok(
-  outContact.some((s) => String(s.plainText).includes("02-023-2599")),
+  outContact.some((s) => String(s.plainText).includes("00-000-0000")),
   "must enrich phone after โทร",
 );
 assert.ok(
@@ -490,7 +490,7 @@ assert.equal(
   "only the label-anchored hyphen may tag",
 );
 assert.ok(
-  outHyphen.some((s) => String(s.plainText).includes("02-023-2599")),
+  outHyphen.some((s) => String(s.plainText).includes("00-000-0000")),
   "phone must still enrich beside a hyphen field",
 );
 assert.ok(

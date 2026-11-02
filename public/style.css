@@ -258,13 +258,11 @@ body {
 }
 
 .banner {
-  /* Overlay so show/hide does not shift the main layout (CLS). */
-  position: fixed;
-  top: calc(64px + 0.55rem);
-  left: clamp(1rem, 3vw, 2rem);
-  right: clamp(1rem, 3vw, 2rem);
-  z-index: 12050;
-  margin: 0;
+  /* In-flow under the topbar so it never covers chips/toolbar (UX review).
+     Hidden state removes it from layout via [hidden]. */
+  position: relative;
+  z-index: 20;
+  margin: 0.55rem clamp(1rem, 3vw, 2rem) 0.75rem;
   padding: 0.75rem 0.65rem 0.75rem 1.1rem;
   border-radius: var(--radius-sm);
   background: #fff5f3;
@@ -4927,10 +4925,6 @@ button.danger:hover {
     height: auto;
     padding: 0.4rem 0.75rem;
     gap: 0.45rem;
-  }
-
-  .banner {
-    top: calc(48px + 0.4rem);
   }
 
   .brand-text {

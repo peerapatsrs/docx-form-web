@@ -1084,40 +1084,10 @@ let bannerOffsetObserver = null;
 let stickyBarPadObserver = null;
 
 function syncBannerContentOffset() {
+  // Banner is in normal flow (not fixed) — clear any legacy reserved padding.
   const main = document.getElementById("main-content");
-  if (!main) return;
-  const apply = () => {
-    const visible =
-      banner &&
-      !banner.hidden &&
-      banner.dataset.suppressedByTools !== "1";
-    if (!visible) {
-      main.style.paddingTop = "";
-      document.documentElement.style.setProperty("--banner-offset", "0px");
-      return;
-    }
-    // Pad so in-flow content clears the fixed banner's bottom edge.
-    // mainTop is the border-box top (unaffected by padding-top).
-    const bannerBottom = banner.getBoundingClientRect().bottom;
-    const mainTop = main.getBoundingClientRect().top;
-    let needed = Math.max(0, Math.ceil(bannerBottom - mainTop + 12));
-    main.style.paddingTop = needed ? `${needed}px` : "";
-    // Second pass: #app may sit below main's padding start (margins); close any gap.
-    const appEl = document.getElementById("app");
-    if (appEl) {
-      const gap = Math.ceil(bannerBottom - appEl.getBoundingClientRect().top + 12);
-      if (gap > 0) {
-        needed += gap;
-        main.style.paddingTop = `${needed}px`;
-      }
-    }
-    document.documentElement.style.setProperty(
-      "--banner-offset",
-      needed ? `${needed}px` : "0px",
-    );
-  };
-  apply();
-  requestAnimationFrame(apply);
+  if (main) main.style.paddingTop = "";
+  document.documentElement.style.setProperty("--banner-offset", "0px");
 }
 
 function ensureBannerOffsetObserver() {

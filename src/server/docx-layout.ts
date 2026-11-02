@@ -12,13 +12,11 @@ export type LayoutCell = {
   widthDxa?: number;
 };
 
-export type LayoutTextBlock = { type: "text"; text: string; role?: "header" | "footer" | "body" };
-export type LayoutImageBlock = {
-  type: "image";
-  /** Alt text / description when available. */
-  alt?: string;
-  /** Which document region the image came from. */
-  role?: "header" | "footer" | "body";
+export type LayoutTextBlock = {
+  type: "text";
+  text: string;
+  /** Present when this block comes from a header/footer part. */
+  part?: "header" | "footer";
 };
 export type LayoutTableBlock = {
   type: "table";
@@ -39,9 +37,10 @@ export type LayoutTableBlock = {
   colWidths?: number[];
   /** Word floating table (tblpPr) — visual order may differ from XML order. */
   floating?: boolean;
-  role?: "header" | "footer" | "body";
+  /** Present when this block comes from a header/footer part. */
+  part?: "header" | "footer";
 };
-export type LayoutBlock = LayoutTextBlock | LayoutTableBlock | LayoutImageBlock;
+export type LayoutBlock = LayoutTextBlock | LayoutTableBlock;
 
 export type DocumentLayout = {
   blocks: LayoutBlock[];
@@ -148,21 +147,71 @@ function parseTcProps(tcXml: string): { colspan: number; vMerge: RawCell["vMerge
   return { colspan, vMerge };
 }
 
+/**
+ * Find top-level matched open/close tags by local name (depth-aware).
+ * Avoids non-greedy regex breaking on nested tables / nested cells.
+ */
+function findTopLevelSpans(
+  xml: string,
+  localName: string,
+): { start: number; end: number; inner: string }[] {
+  const openRe = new RegExp(`<w:${localName}\\b[^>/]*(?:/>|>)`, "g");
+  const closeToken = `</w:${localName}>`;
+  const out: { start: number; end: number; inner: string }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = openRe.exec(xml))) {
+    const open = m[0];
+    const start = m.index;
+    if (open.endsWith("/>")) {
+      out.push({ start, end: start + open.length, inner: "" });
+      continue;
+    }
+    let depth = 1;
+    let pos = start + open.length;
+    while (pos < xml.length && depth > 0) {
+      const nextOpen = xml.indexOf(`<w:${localName}`, pos);
+      const nextClose = xml.indexOf(closeToken, pos);
+      if (nextClose < 0) break;
+      if (nextOpen >= 0 && nextOpen < nextClose) {
+        const slice = xml.slice(nextOpen, nextOpen + open.length + 8);
+        const self = /^<w:[\w]+[^>]*\/>/.test(slice);
+        const realOpen = new RegExp(`^<w:${localName}\\b`).test(slice);
+        if (realOpen) {
+          depth += self ? 0 : 1;
+          pos = nextOpen + 1;
+          continue;
+        }
+        pos = nextOpen + 1;
+        continue;
+      }
+      depth -= 1;
+      if (depth === 0) {
+        const end = nextClose + closeToken.length;
+        out.push({
+          start,
+          end,
+          inner: xml.slice(start + open.length, nextClose),
+        });
+        openRe.lastIndex = end;
+        break;
+      }
+      pos = nextClose + closeToken.length;
+    }
+  }
+  return out;
+}
+
 function parseTableRawRows(tblInner: string): RawCell[][] {
   const rows: RawCell[][] = [];
-  const trRe = /<w:tr\b[^>]*>([\s\S]*?)<\/w:tr>/g;
-  let tr: RegExpExecArray | null;
-  while ((tr = trRe.exec(tblInner))) {
+  for (const tr of findTopLevelSpans(tblInner, "tr")) {
     const cells: RawCell[] = [];
     let startCol = 0;
-    const tcRe = /<w:tc\b[^>]*>([\s\S]*?)<\/w:tc>/g;
-    let tc: RegExpExecArray | null;
-    while ((tc = tcRe.exec(tr[1]))) {
-      const { colspan, vMerge } = parseTcProps(tc[1]);
-      const align = parseCellAlign(tc[1]);
-      const widthDxa = parseTcWidth(tc[1]);
+    for (const tc of findTopLevelSpans(tr.inner, "tc")) {
+      const { colspan, vMerge } = parseTcProps(tc.inner);
+      const align = parseCellAlign(tc.inner);
+      const widthDxa = parseTcWidth(tc.inner);
       cells.push({
-        text: cellPlainText(tc[1]),
+        text: cellPlainText(tc.inner),
         colspan,
         vMerge,
         startCol,
@@ -183,21 +232,34 @@ function cellCovering(row: RawCell[], col: number): RawCell | null {
   return null;
 }
 
-/** Convert raw Word cells into HTML-ready cells (skip vMerge continue, set rowspan). */
+/**
+ * Convert raw Word cells into HTML-ready cells (skip vMerge continue, set rowspan).
+ * If a vertical-merge restart cell is empty but a continue cell carries text/tags,
+ * fold that text into the restart so merged-cell variables stay fillable in preview.
+ */
 function resolveMerges(rows: RawCell[][]): LayoutCell[][] {
   return rows.map((row, ri) => {
     const out: LayoutCell[] = [];
     for (const cell of row) {
       if (cell.vMerge === "continue") continue;
       let rowspan = 1;
+      let text = cell.text;
       if (cell.vMerge === "restart") {
         for (let j = ri + 1; j < rows.length; j++) {
           const below = cellCovering(rows[j], cell.startCol);
-          if (below && below.vMerge === "continue") rowspan += 1;
-          else break;
+          if (below && below.vMerge === "continue") {
+            rowspan += 1;
+            if (!text.trim() && below.text.trim()) text = below.text;
+            else if (below.text.trim() && !text.includes(below.text)) {
+              // Keep tags that only appear in continuation cells.
+              if (/\{\{[^}]+\}\}/.test(below.text) && !/\{\{[^}]+\}\}/.test(text)) {
+                text = text ? `${text}\n${below.text}` : below.text;
+              }
+            }
+          } else break;
         }
       }
-      const layout: LayoutCell = { text: cell.text };
+      const layout: LayoutCell = { text };
       if (cell.colspan > 1) layout.colspan = cell.colspan;
       if (rowspan > 1) layout.rowspan = rowspan;
       if (cell.align) layout.align = cell.align;
@@ -210,143 +272,6 @@ function resolveMerges(rows: RawCell[][]): LayoutCell[][] {
 
 function paragraphPlainText(pXml: string): string {
   return cellPlainText(pXml);
-}
-
-function paragraphHasDrawing(pXml: string): boolean {
-  return /<w:drawing\b|<w:pict\b|<w:object\b/i.test(pXml);
-}
-
-function paragraphImageAlt(pXml: string): string {
-  const descr =
-    /descr="([^"]*)"/.exec(pXml)?.[1] ||
-    /name="([^"]*)"/.exec(pXml)?.[1] ||
-    "";
-  return decodeXmlEntities(descr).trim();
-}
-
-/** Resolve header/footer part paths from document.xml.rels (and fall back to word/header*.xml). */
-async function resolveHeaderFooterParts(
-  zip: JSZip,
-  documentXml: string,
-): Promise<{ headers: string[]; footers: string[] }> {
-  const headers: string[] = [];
-  const footers: string[] = [];
-  const seen = new Set<string>();
-  const push = (kind: "header" | "footer", path: string) => {
-    const norm = path.replace(/^\//, "");
-    if (!norm || seen.has(norm)) return;
-    seen.add(norm);
-    if (kind === "header") headers.push(norm);
-    else footers.push(norm);
-  };
-
-  const relsFile =
-    zip.file("word/_rels/document.xml.rels") ||
-    zip.file("word/_rels/document.xml.rels".toLowerCase());
-  const relsXml = relsFile ? await relsFile.async("string") : "";
-  const idToTarget = new Map<string, string>();
-  if (relsXml) {
-    const relRe =
-      /<Relationship\b[^>]*\bId="([^"]+)"[^>]*\bTarget="([^"]+)"[^>]*\/?>/gi;
-    let rm: RegExpExecArray | null;
-    while ((rm = relRe.exec(relsXml))) {
-      idToTarget.set(rm[1], rm[2].replace(/^\//, ""));
-    }
-  }
-
-  const refRe = /<w:(headerReference|footerReference)\b([^>]*)\/?>/gi;
-  let m: RegExpExecArray | null;
-  while ((m = refRe.exec(documentXml))) {
-    const kind = m[1] === "headerReference" ? "header" : "footer";
-    const id = /\br:id="([^"]+)"/.exec(m[2] || "")?.[1];
-    if (!id) continue;
-    const target = idToTarget.get(id);
-    if (!target) continue;
-    const path = target.startsWith("word/") ? target : `word/${target}`;
-    push(kind, path);
-  }
-
-  // Fallback: include any header/footer parts present in the package.
-  if (!headers.length || !footers.length) {
-    for (const name of Object.keys(zip.files)) {
-      if (/^word\/header\d*\.xml$/i.test(name)) push("header", name);
-      if (/^word\/footer\d*\.xml$/i.test(name)) push("footer", name);
-    }
-  }
-  return { headers, footers };
-}
-
-/**
- * Parse a header/footer/body XML fragment into layout blocks (text, tables, image markers).
- */
-function parseXmlRegion(
-  xml: string,
-  role: "header" | "footer" | "body",
-): LayoutBlock[] {
-  const rootMatch =
-    /<(?:w:hdr|w:ftr|w:body)\b[^>]*>([\s\S]*)<\/(?:w:hdr|w:ftr|w:body)>/i.exec(
-      xml,
-    );
-  const region = rootMatch ? rootMatch[1] : xml;
-  const blocks: LayoutBlock[] = [];
-  let textBuf: string[] = [];
-  const flushText = () => {
-    const text = textBuf.join("").replace(/\n{3,}/g, "\n\n").trim();
-    if (text) blocks.push({ type: "text", text, role });
-    textBuf = [];
-  };
-
-  let pos = 0;
-  while (pos < region.length) {
-    const tblAt = region.indexOf("<w:tbl", pos);
-    const pAt = region.indexOf("<w:p", pos);
-    if (tblAt < 0 && pAt < 0) break;
-
-    if (tblAt >= 0 && (pAt < 0 || tblAt <= pAt)) {
-      const end = region.indexOf("</w:tbl>", tblAt);
-      if (end < 0) break;
-      const tblXml = region.slice(tblAt, end + "</w:tbl>".length);
-      const inner = tblXml.replace(/^<w:tbl\b[^>]*>/, "").replace(/<\/w:tbl>$/, "");
-      flushText();
-      const floating = /<w:tblpPr\b/.test(tblXml);
-      const rows = parseTableRawRows(inner);
-      const colWidths = parseTblGridWidths(inner);
-      if (rows.length) {
-        const block = tableToBlock(rows, floating, colWidths);
-        block.role = role;
-        blocks.push(block);
-      }
-      pos = end + "</w:tbl>".length;
-      continue;
-    }
-
-    if (pAt >= 0) {
-      const slice = region.slice(pAt, pAt + 6);
-      if (!(slice.startsWith("<w:p>") || slice.startsWith("<w:p "))) {
-        pos = pAt + 4;
-        continue;
-      }
-      const end = region.indexOf("</w:p>", pAt);
-      if (end < 0) break;
-      const pXml = region.slice(pAt, end + "</w:p>".length);
-      if (paragraphHasDrawing(pXml)) {
-        flushText();
-        blocks.push({
-          type: "image",
-          alt: paragraphImageAlt(pXml) || undefined,
-          role,
-        });
-      }
-      const t = paragraphPlainText(pXml);
-      if (t) textBuf.push(t + "\n");
-      else if (!paragraphHasDrawing(pXml)) textBuf.push("\n");
-      pos = end + "</w:p>".length;
-      continue;
-    }
-    break;
-  }
-  flushText();
-  return blocks;
 }
 
 function stripLoopWrappers(cell: string): string {
@@ -428,50 +353,178 @@ function reorderFloatingTableCaptions(blocks: LayoutBlock[]): LayoutBlock[] {
   return out;
 }
 
+/** Walk a Word story part (body / hdr / ftr) into layout blocks. */
+function walkStoryXml(
+  storyXml: string,
+  part?: "header" | "footer",
+): LayoutBlock[] {
+  const blocks: LayoutBlock[] = [];
+  let textBuf: string[] = [];
+  const flushText = () => {
+    const text = textBuf.join("").replace(/\n{3,}/g, "\n\n").trim();
+    if (text) {
+      const block: LayoutTextBlock = { type: "text", text };
+      if (part) block.part = part;
+      blocks.push(block);
+    }
+    textBuf = [];
+  };
+
+  // Prefer explicit body/hdr/ftr wrappers when present.
+  const wrapped =
+    /<w:body\b[^>]*>([\s\S]*)<\/w:body>/i.exec(storyXml)?.[1] ||
+    /<w:hdr\b[^>]*>([\s\S]*)<\/w:hdr>/i.exec(storyXml)?.[1] ||
+    /<w:ftr\b[^>]*>([\s\S]*)<\/w:ftr>/i.exec(storyXml)?.[1] ||
+    storyXml;
+
+  const nextTableOpen = (from: number): number => {
+    const re = /<w:tbl(?:\s|>)/g;
+    re.lastIndex = from;
+    const m = re.exec(wrapped);
+    return m ? m.index : -1;
+  };
+
+  let pos = 0;
+  while (pos < wrapped.length) {
+    const tblAt = nextTableOpen(pos);
+    const pAt = wrapped.indexOf("<w:p", pos);
+    if (tblAt < 0 && pAt < 0) break;
+
+    if (tblAt >= 0 && (pAt < 0 || tblAt <= pAt)) {
+      // Depth-aware table end (nested tables exist in complex docs).
+      const openMatch = /^<w:tbl\b[^>]*>/.exec(wrapped.slice(tblAt));
+      if (!openMatch) {
+        pos = tblAt + 6;
+        continue;
+      }
+      let depth = 1;
+      let scan = tblAt + openMatch[0].length;
+      let end = -1;
+      while (scan < wrapped.length && depth > 0) {
+        const nextOpen = nextTableOpen(scan);
+        const nextClose = wrapped.indexOf("</w:tbl>", scan);
+        if (nextClose < 0) break;
+        if (nextOpen >= 0 && nextOpen < nextClose) {
+          depth += 1;
+          scan = nextOpen + 6;
+          continue;
+        }
+        depth -= 1;
+        if (depth === 0) {
+          end = nextClose;
+          break;
+        }
+        scan = nextClose + "</w:tbl>".length;
+      }
+      if (end < 0) break;
+      const tblXml = wrapped.slice(tblAt, end + "</w:tbl>".length);
+      const inner = tblXml.replace(/^<w:tbl\b[^>]*>/, "").replace(/<\/w:tbl>$/, "");
+      flushText();
+      const floating = /<w:tblpPr\b/.test(tblXml);
+      const rows = parseTableRawRows(inner);
+      const colWidths = parseTblGridWidths(inner);
+      if (rows.length) {
+        const block = tableToBlock(rows, floating, colWidths);
+        if (part) block.part = part;
+        blocks.push(block);
+      }
+      pos = end + "</w:tbl>".length;
+      continue;
+    }
+
+    if (pAt >= 0) {
+      const slice = wrapped.slice(pAt, pAt + 6);
+      if (!(slice.startsWith("<w:p>") || slice.startsWith("<w:p "))) {
+        pos = pAt + 4;
+        continue;
+      }
+      const end = wrapped.indexOf("</w:p>", pAt);
+      if (end < 0) break;
+      const pXml = wrapped.slice(pAt, end + "</w:p>".length);
+      // Skip sectPr-only paragraphs that carry no visible text.
+      const t = paragraphPlainText(pXml);
+      if (t) textBuf.push(t + "\n");
+      else textBuf.push("\n");
+      pos = end + "</w:p>".length;
+      continue;
+    }
+    break;
+  }
+  flushText();
+  return blocks;
+}
+
+function markPart(
+  blocks: LayoutBlock[],
+  part: "header" | "footer",
+): LayoutBlock[] {
+  return blocks.map((b) => ({ ...b, part }));
+}
+
 /**
- * Walk document headers, body, and footers: paragraphs → text, drawings → image
- * markers, tables → real table structure (for fill form + tagger preview).
+ * Walk document body + headers + footers in order so variables in those
+ * parts appear in the fill preview the same way body variables do.
  */
 export async function extractDocumentLayout(buffer: Buffer): Promise<DocumentLayout> {
   const zip = await JSZip.loadAsync(buffer);
-  const file = zip.file("word/document.xml");
-  if (!file) return { blocks: [] };
-  const xml = await file.async("string");
-  const { headers, footers } = await resolveHeaderFooterParts(zip, xml);
-
   const blocks: LayoutBlock[] = [];
 
-  for (const path of headers) {
-    const part = zip.file(path);
-    if (!part) continue;
-    const partXml = await part.async("string");
-    const regionBlocks = parseXmlRegion(partXml, "header");
-    if (regionBlocks.length) {
-      blocks.push({
-        type: "text",
-        text: "— ส่วนหัวเอกสาร —",
-        role: "header",
-      });
-      blocks.push(...regionBlocks);
-    }
+  const headerNames = Object.keys(zip.files)
+    .filter((n) => /^word\/header\d+\.xml$/i.test(n))
+    .sort();
+  for (const name of headerNames) {
+    const file = zip.file(name);
+    if (!file) continue;
+    const xml = await file.async("string");
+    blocks.push(...markPart(walkStoryXml(xml, "header"), "header"));
   }
 
-  blocks.push(...parseXmlRegion(xml, "body"));
-
-  for (const path of footers) {
-    const part = zip.file(path);
-    if (!part) continue;
-    const partXml = await part.async("string");
-    const regionBlocks = parseXmlRegion(partXml, "footer");
-    if (regionBlocks.length) {
-      blocks.push({
-        type: "text",
-        text: "— ส่วนท้ายเอกสาร —",
-        role: "footer",
-      });
-      blocks.push(...regionBlocks);
-    }
+  const main = zip.file("word/document.xml");
+  if (main) {
+    const xml = await main.async("string");
+    blocks.push(...reorderFloatingTableCaptions(walkStoryXml(xml)));
   }
 
-  return { blocks: reorderFloatingTableCaptions(blocks) };
+  const footerNames = Object.keys(zip.files)
+    .filter((n) => /^word\/footer\d+\.xml$/i.test(n))
+    .sort();
+  for (const name of footerNames) {
+    const file = zip.file(name);
+    if (!file) continue;
+    const xml = await file.async("string");
+    blocks.push(...markPart(walkStoryXml(xml, "footer"), "footer"));
+  }
+
+  return { blocks };
+}
+
+/** Concatenated plain text from body + headers + footers (for content panel). */
+export async function extractAllPlainText(buffer: Buffer): Promise<string> {
+  const { blocks } = await extractDocumentLayout(buffer);
+  const parts: string[] = [];
+  for (const b of blocks) {
+    if (b.type === "text") {
+      parts.push(b.text);
+      continue;
+    }
+    /** @type {LayoutCell[][]} */
+    const rows: LayoutCell[][] = [
+      ...(b.headerRows || []),
+      ...(b.templateCells?.length ? [b.templateCells] : []),
+      ...(b.trailingRows || []),
+      ...(b.staticRows || []),
+    ];
+    for (const row of rows) {
+      parts.push(
+        row
+          .map((c) => (typeof c === "string" ? c : c?.text || ""))
+          .join("\t"),
+      );
+    }
+  }
+  return parts
+    .join("\n")
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }

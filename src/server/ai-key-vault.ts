@@ -153,3 +153,14 @@ export async function deleteUserAiKey(
   );
   return (res.rowCount || 0) > 0;
 }
+
+/** Resolve one vault entry (with decrypted key) for server-side proxy use. */
+export async function getUserAiKey(
+  userId: string,
+  id: string,
+): Promise<UserAiKeyRow | null> {
+  const want = String(id || "").trim();
+  if (!want) return null;
+  const entries = await listUserAiKeys(userId);
+  return entries.find((e) => e.id === want) || null;
+}

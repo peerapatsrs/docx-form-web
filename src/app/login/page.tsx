@@ -8,6 +8,7 @@ import {
   PasskeyMark,
 } from "@/components/AuthIcons";
 import { BrandLogo, BRAND_NAME } from "@/components/BrandLogo";
+import { resolveDevAutoLoginUser } from "@/lib/dev-auth-auto-login";
 type ProviderInfo = { id: string; label: string };
 
 type DevUser = {
@@ -124,14 +125,13 @@ export default function LoginPage() {
         setDevAuth(true);
         const users = await mod.listDevUsers();
         setDevUsers(users);
-        const preferred = String(data.devAuthDefaultEmail || "")
-          .trim()
-          .toLowerCase();
-        const target =
-          users.find(
-            (u) => String(u.email || "").toLowerCase() === preferred,
-          ) || users[0];
-        if (target && !target.banned) {
+        // When auth-config returns null/empty default email (no env), show
+        // the picker only — never fall back to users[0] auto login-as.
+        const target = resolveDevAutoLoginUser(
+          users,
+          data.devAuthDefaultEmail,
+        );
+        if (target) {
           void loginAsDev(target, mod.loginAsDevUser);
         }
       } else {

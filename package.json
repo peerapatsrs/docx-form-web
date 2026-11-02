@@ -11,7 +11,7 @@
     "lint": "eslint",
     "test:smoke": "node scripts/smoke-test.mjs",
     "auth:migrate": "tsx --env-file=.env.local scripts/auth-migrate.ts",
-    "test:unit": "tsx scripts/public-origin-unit-test.mjs && tsx scripts/qa-unit-test.mjs && tsx scripts/dev-auth-unit-test.mjs && tsx scripts/cache-and-auth-url-unit-test.mjs",
+    "test:unit": "tsx scripts/public-origin-unit-test.mjs && tsx scripts/qa-unit-test.mjs && tsx scripts/ui-labels-unit-test.mjs && tsx scripts/dev-auth-auto-login-unit-test.mjs && tsx scripts/dev-auth-unit-test.mjs && tsx scripts/cache-and-auth-url-unit-test.mjs",
     "test:docker": "docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from test",
     "docker:up": "docker compose up --build -d",
     "docker:down": "docker compose down"

@@ -896,13 +896,26 @@ async function refreshEmptyDraftPanel() {
     drafts = await namedDraftList();
   } catch (err) {
     console.warn("named draft list failed", err);
-    body.innerHTML = `<p class="draft-list-empty">อ่านรายการดราฟไม่สำเร็จ</p>`;
+    panel.hidden = false;
+    panel.classList.add("is-compact-empty");
+    body.innerHTML = `<p class="draft-list-empty draft-list-empty-compact">อ่านรายการดราฟไม่สำเร็จ</p>`;
+    panel.dataset.count = "0";
     return;
   }
-  body.innerHTML = renderNamedDraftListHtml(drafts, {
-    emptyHint: "ยังไม่มีดราฟ — อัปโหลดเทมเพลต กรอกแล้วกด «บันทึกดราฟ» เพื่อกลับมาทำต่อที่นี่",
-  });
   panel.dataset.count = String(drafts.length);
+  if (!drafts.length) {
+    // Hide the tall empty card on home when there is nothing to load.
+    panel.hidden = true;
+    panel.classList.remove("is-compact-empty");
+    body.innerHTML = "";
+    return;
+  }
+  panel.hidden = false;
+  panel.classList.remove("is-compact-empty");
+  body.innerHTML = `<details class="home-drafts-details" open>
+      <summary>${escapeHtml(UI_LABELS.loadDraft)} (${drafts.length})</summary>
+      <div class="draft-entry-body-inner">${renderNamedDraftListHtml(drafts)}</div>
+    </details>`;
   wireNamedDraftListActions(body);
 }
 
@@ -1058,15 +1071,123 @@ function hideBanner() {
   if (!banner) return;
   banner.hidden = true;
   banner.textContent = "";
-  banner.classList.remove("success", "progress");
+  banner.classList.remove("success", "progress", "is-validation");
   banner.removeAttribute("aria-busy");
+  delete banner.dataset.suppressedByTools;
   validationBannerActive = false;
+  syncBannerContentOffset();
+}
+
+/** @type {ResizeObserver | null} */
+let bannerOffsetObserver = null;
+/** @type {ResizeObserver | null} */
+let stickyBarPadObserver = null;
+
+function syncBannerContentOffset() {
+  const main = document.getElementById("main-content");
+  if (!main) return;
+  const apply = () => {
+    const visible =
+      banner &&
+      !banner.hidden &&
+      banner.dataset.suppressedByTools !== "1";
+    if (!visible) {
+      main.style.paddingTop = "";
+      document.documentElement.style.setProperty("--banner-offset", "0px");
+      return;
+    }
+    // Pad so in-flow content clears the fixed banner's bottom edge.
+    // mainTop is the border-box top (unaffected by padding-top).
+    const bannerBottom = banner.getBoundingClientRect().bottom;
+    const mainTop = main.getBoundingClientRect().top;
+    let needed = Math.max(0, Math.ceil(bannerBottom - mainTop + 12));
+    main.style.paddingTop = needed ? `${needed}px` : "";
+    // Second pass: #app may sit below main's padding start (margins); close any gap.
+    const appEl = document.getElementById("app");
+    if (appEl) {
+      const gap = Math.ceil(bannerBottom - appEl.getBoundingClientRect().top + 12);
+      if (gap > 0) {
+        needed += gap;
+        main.style.paddingTop = `${needed}px`;
+      }
+    }
+    document.documentElement.style.setProperty(
+      "--banner-offset",
+      needed ? `${needed}px` : "0px",
+    );
+  };
+  apply();
+  requestAnimationFrame(apply);
+}
+
+function ensureBannerOffsetObserver() {
+  if (!banner || typeof ResizeObserver === "undefined") {
+    syncBannerContentOffset();
+    return;
+  }
+  if (!bannerOffsetObserver) {
+    bannerOffsetObserver = new ResizeObserver(() => syncBannerContentOffset());
+  }
+  bannerOffsetObserver.disconnect();
+  bannerOffsetObserver.observe(banner);
+  syncBannerContentOffset();
+}
+
+function syncStickyBarPad() {
+  const form = document.getElementById("fillForm");
+  const bar = form?.querySelector(".sticky-bar");
+  if (!form || !bar) {
+    if (form) form.style.paddingBottom = "";
+    document.body.classList.remove("has-sticky-cta");
+    document.documentElement.style.setProperty("--sticky-bar-offset", "0px");
+    return;
+  }
+  const h = Math.ceil(bar.getBoundingClientRect().height);
+  const pad = h + 16;
+  form.style.paddingBottom = `${pad}px`;
+  document.documentElement.style.setProperty("--sticky-bar-offset", `${pad}px`);
+  document.body.classList.add("has-sticky-cta");
+}
+
+function ensureStickyBarPadObserver() {
+  const form = document.getElementById("fillForm");
+  const bar = form?.querySelector(".sticky-bar");
+  if (!bar || typeof ResizeObserver === "undefined") {
+    syncStickyBarPad();
+    return;
+  }
+  if (!stickyBarPadObserver) {
+    stickyBarPadObserver = new ResizeObserver(() => syncStickyBarPad());
+  }
+  stickyBarPadObserver.disconnect();
+  stickyBarPadObserver.observe(bar);
+  syncStickyBarPad();
+}
+
+function wireMobileToolsMenuBanner() {
+  const details = document.querySelector(".file-chip-tools-mobile");
+  if (!details || details.dataset.bannerWired === "1") return;
+  details.dataset.bannerWired = "1";
+  details.addEventListener("toggle", () => {
+    if (!banner) return;
+    if (details.open) {
+      if (!banner.hidden) {
+        banner.dataset.suppressedByTools = "1";
+        banner.hidden = true;
+        syncBannerContentOffset();
+      }
+    } else if (banner.dataset.suppressedByTools === "1") {
+      delete banner.dataset.suppressedByTools;
+      banner.hidden = false;
+      ensureBannerOffsetObserver();
+    }
+  });
 }
 
 /**
  * @param {string} message
  * @param {'error'|'success'|'progress'|'warn'} [kind]
- * @param {{ action?: { label: string, onClick: () => void }, note?: string, validation?: boolean }} [opts]
+ * @param {{ action?: { label: string, onClick: () => void }, note?: string, validation?: boolean, items?: string[] }} [opts]
  */
 function showBanner(message, kind = "error", opts = {}) {
   if (!banner) return;
@@ -1129,6 +1250,7 @@ function showBanner(message, kind = "error", opts = {}) {
   if (kind === "error") {
     banner.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
+  ensureBannerOffsetObserver();
 }
 
 /**
@@ -3120,6 +3242,9 @@ function portalTaggerDialogsToBody() {
 
 function renderEmpty() {
   removeTaggerDialogPortals();
+  document.body.classList.remove("has-sticky-cta");
+  document.documentElement.style.setProperty("--sticky-bar-offset", "0px");
+  syncBannerContentOffset();
   // Home matches prototype mockup 01: about details + primary upload dropzone.
   // Tagger stays reachable from the form toolbar after upload (and a secondary link).
   app.innerHTML = `
@@ -10087,6 +10212,9 @@ function renderForm() {
     () => dismissSkipFirstUseTip(),
     { once: true },
   );
+  ensureStickyBarPadObserver();
+  wireMobileToolsMenuBanner();
+  window.addEventListener("resize", syncStickyBarPad, { passive: true });
   wireSourceMapPanelEvents();
 
   document.querySelectorAll("[data-multi-id]").forEach((btn) => {
@@ -12845,6 +12973,11 @@ async function boot() {
     console.warn("boot skipped: #app missing");
     return;
   }
+  ensureBannerOffsetObserver();
+  window.addEventListener("resize", () => {
+    syncBannerContentOffset();
+    syncStickyBarPad();
+  }, { passive: true });
   // Paint the empty home UI immediately so Safari never sits on a blank sheet
   // while IndexedDB restore hangs.
   try {

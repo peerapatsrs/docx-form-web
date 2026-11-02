@@ -94,7 +94,7 @@ export default function RootLayout({
           rel="stylesheet"
         />
         {/* eslint-disable-next-line @next/next/no-css-tags */}
-        <link rel="stylesheet" href="/style.css?v=web27" />
+        <link rel="stylesheet" href="/style.css?v=web28" />
       </head>
       <body>
         <SiteJsonLd />

@@ -5154,12 +5154,36 @@ button.danger:hover {
 
 .doc-blank-image-wrap {
   display: inline-flex;
-  align-items: flex-start;
-  gap: 0.65rem;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.65rem;
   max-width: 100%;
   padding: 0;
   border: 0;
   background: transparent;
+}
+
+.doc-blank-image-wrap > .doc-image-inline-label {
+  order: 0;
+}
+
+.doc-blank-image-wrap > .image-box,
+.doc-blank-image-wrap > .doc-image-inline {
+  order: 1;
+}
+
+.doc-blank-image-wrap > .doc-skip {
+  order: 2;
+  align-self: center;
+  flex: 0 0 auto;
+}
+
+/* Keep error under the row; skip stays beside the dropzone. */
+.doc-blank-image-wrap > .field-error {
+  order: 3;
+  flex: 1 0 100%;
+  margin: 0;
 }
 
 .doc-image-inline-label {
@@ -5396,6 +5420,31 @@ button.danger:hover {
   font-weight: 600;
 }
 
+.home-drafts-details {
+  margin-top: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--row);
+  padding: 0.55rem 0.75rem;
+}
+
+.home-drafts-details summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--ink);
+  font-size: 0.9rem;
+}
+
+.draft-list-empty-compact {
+  margin: 0.35rem 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.draft-entry-panel[hidden] {
+  display: none !important;
+}
+
 @media (max-width: 560px) {
   .file-chip-actions-desktop {
     display: none;
@@ -5403,10 +5452,43 @@ button.danger:hover {
 
   .file-chip-tools-mobile {
     display: block;
+    position: relative;
+    z-index: 1;
+  }
+
+  /* While open, lift above in-sheet stacking so the panel stays usable;
+     banner is also suppressed in JS while the menu is open. */
+  .file-chip-tools-mobile[open] {
+    z-index: 60;
   }
 
   .doc-blank-image-wrap {
-    flex-direction: column;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+  }
+
+  .doc-image-inline,
+  .image-box.doc-image-inline,
+  .image-drop {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .sticky-bar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 55;
+    margin: 0;
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+    border-bottom: 0;
+    padding: 0.75rem 0.85rem;
+    padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
+    background: rgba(255, 255, 255, 0.96);
   }
 
   .sticky-bar .sticky-primary.btn-primary {
@@ -5415,5 +5497,9 @@ button.danger:hover {
 
   .sticky-hint {
     flex-basis: 100%;
+  }
+
+  body.has-sticky-cta {
+    padding-bottom: var(--sticky-bar-offset, 0px);
   }
 }

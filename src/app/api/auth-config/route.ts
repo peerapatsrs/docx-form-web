@@ -3,7 +3,7 @@ import { enabledOAuthProviders } from "@/server/auth";
 import {
   getDefaultDevAuthEmail,
   isDevAuthEnabled,
-} from "@/server/dev-auth-plugin";
+} from "@/lib/dev-auth-flag";
 
 export const dynamic = "force-dynamic";
 

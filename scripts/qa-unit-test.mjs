@@ -1,11 +1,22 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import JSZip from "jszip";
 import { TagDisposition, TagPlacement } from "easy-template-x";
 import {
   fieldIdentityKey,
   normalizeVarName,
+  validateUploadedTagName,
   validateVarName,
 } from "../src/server/field-names.ts";
-import { tagsToFieldsWithWarnings } from "../src/server/docx-engine.ts";
+import {
+  fillTemplate,
+  parseBoolTagName,
+  parseTemplate,
+  tagsToFieldsWithWarnings,
+} from "../src/server/docx-engine.ts";
+import { mergeSplitTemplateTagsInXml } from "../src/server/docx-merge-tags.ts";
 import { formatTemplateError } from "../src/server/docx-errors.ts";
 import { maskGeminiKey } from "../src/server/ai-config.ts";
 import {
@@ -22,7 +33,30 @@ import {
 import {
   countFilledValues,
   isFilledValue,
+  toFillValues,
 } from "../src/server/source-map.ts";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const FIX = join(__dirname, "..", "fixtures", "tag-parse");
+
+async function docxFromFixture(documentXmlName) {
+  const zip = new JSZip();
+  zip.file("[Content_Types].xml", readFileSync(join(FIX, "content-types.xml")));
+  zip.folder("_rels").file(".rels", readFileSync(join(FIX, "rels.xml")));
+  zip
+    .folder("word")
+    .file("document.xml", readFileSync(join(FIX, documentXmlName)));
+  zip
+    .folder("word")
+    .folder("_rels")
+    .file("document.xml.rels", readFileSync(join(FIX, "document.xml.rels")));
+  return Buffer.from(await zip.generateAsync({ type: "nodebuffer" }));
+}
+
+async function readDocXml(buf) {
+  const zip = await JSZip.loadAsync(buf);
+  return zip.file("word/document.xml").async("string");
+}
 
 console.log("qa-unit-test");
 
@@ -30,6 +64,18 @@ assert.equal(fieldIdentityKey(" Name "), fieldIdentityKey("name"));
 assert.equal(normalizeVarName("  a   b  "), "a b");
 assert.equal(validateVarName("ok_name"), null);
 assert.ok(validateVarName("bad name!"));
+// NFC keeps Thai sara am (U+0E33); NFKC would split it to ํ+า.
+const jumnoon = "จำนวน";
+assert.equal(normalizeVarName(jumnoon), jumnoon);
+assert.deepEqual(
+  [...normalizeVarName(jumnoon)].map((c) => c.codePointAt(0)),
+  [0x0e08, 0x0e33, 0x0e19, 0x0e27, 0x0e19],
+);
+assert.notEqual(jumnoon.normalize("NFKC"), jumnoon);
+assert.equal(validateVarName("ที่อยู่/เบอร์"), null);
+assert.equal(validateUploadedTagName("เขต/อำเภอ"), null);
+assert.equal(validateUploadedTagName("พบ?√,"), null);
+assert.equal(validateUploadedTagName("รายการ"), null);
 console.log("✓ field-names");
 
 const tags = [
@@ -328,5 +374,127 @@ const mixedFill = countFilledValues({
 assert.equal(mixedFill.filled, 2);
 assert.equal(mixedFill.skipped, 1);
 console.log("✓ countFilledValues false/empty");
+
+// --- tag-parse QA: split runs, slash names, NFC Thai, bool checkbox, bare {{/}} ---
+{
+  const splitXml = readFileSync(join(FIX, "split-runs.xml"), "utf8");
+  const mergedXml = mergeSplitTemplateTagsInXml(splitXml);
+  assert.match(mergedXml, /<w:b\/>/);
+  assert.match(mergedXml, /<w:color w:val="FF0000"\/>/);
+  assert.match(mergedXml, /<w:t[^>]*>\{\{name\}\}<\/w:t>/);
+  assert.doesNotMatch(mergedXml, /<w:t>\{\{<\/w:t>/);
+
+  const splitDoc = await docxFromFixture("split-runs.xml");
+  const parsedSplit = await parseTemplate(splitDoc);
+  assert.equal(parsedSplit.fields.length, 1);
+  assert.equal(parsedSplit.fields[0].name, "name");
+  const filledSplit = await fillTemplate({
+    template: splitDoc,
+    values: { name: "VALUE" },
+    images: [],
+  });
+  const filledSplitXml = await readDocXml(filledSplit);
+  assert.match(filledSplitXml, /VALUE/);
+  assert.match(filledSplitXml, /<w:b\/>/);
+  assert.match(filledSplitXml, /<w:color w:val="FF0000"\/>/);
+  console.log("✓ split runs merge + fill keeps first-run formatting");
+}
+
+{
+  const slashDoc = await docxFromFixture("slash-and-loop.xml");
+  const parsed = await parseTemplate(slashDoc);
+  assert.ok(!parsed.warnings?.length, String(parsed.warnings));
+  const top = parsed.fields.find((f) => f.name === "ที่อยู่/เบอร์");
+  assert.ok(top && top.type === "text");
+  const list = parsed.fields.find((f) => f.name === "รายการ");
+  assert.ok(list && list.type === "list");
+  assert.ok(list.itemFields.some((f) => f.name === "เขต/อำเภอ"));
+
+  const out = await fillTemplate({
+    template: slashDoc,
+    values: {
+      "ที่อยู่/เบอร์": "99/1",
+      รายการ: [{ "เขต/อำเภอ": "A/1" }, { "เขต/อำเภอ": "B/2" }],
+    },
+    images: [],
+  });
+  const xml = await readDocXml(out);
+  assert.match(xml, /99\/1/);
+  assert.match(xml, /A\/1/);
+  assert.match(xml, /B\/2/);
+  assert.doesNotMatch(xml, /\{\{/);
+  console.log("✓ slash in tag names + bare {{/}} loop close");
+}
+
+{
+  const thaiDoc = await docxFromFixture("thai-nfc.xml");
+  const parsed = await parseTemplate(thaiDoc);
+  assert.equal(parsed.fields.length, 1);
+  assert.equal(parsed.fields[0].name, "จำนวน");
+  assert.deepEqual(
+    [...parsed.fields[0].name].map((c) => c.codePointAt(0)),
+    [0x0e08, 0x0e33, 0x0e19, 0x0e27, 0x0e19],
+  );
+  const out = await fillTemplate({
+    template: thaiDoc,
+    values: { จำนวน: "42" },
+    images: [],
+  });
+  const xml = await readDocXml(out);
+  assert.match(xml, />42</);
+  assert.doesNotMatch(xml, /จำนวน|จํานวน/);
+  console.log("✓ Thai จำนวน NFC round-trip (parse + fill)");
+}
+
+{
+  const bool = parseBoolTagName("พบ?√,");
+  assert.ok(bool);
+  assert.equal(bool.type, "bool");
+  assert.equal(bool.label, "พบ");
+  assert.equal(bool.trueText, "√");
+  assert.equal(bool.falseText, "");
+  assert.equal(bool.name, "พบ?√,");
+
+  const boolDoc = await docxFromFixture("bool-checkbox.xml");
+  const parsed = await parseTemplate(boolDoc);
+  assert.ok(!parsed.warnings?.length, String(parsed.warnings));
+  const found = parsed.fields.find((f) => f.name === "พบ?√,");
+  const notFound = parsed.fields.find((f) => f.name === "ไม่พบ?√,");
+  assert.ok(found && found.type === "bool");
+  assert.equal(found.trueText, "√");
+  assert.equal(found.falseText, "");
+  assert.ok(notFound && notFound.type === "bool");
+
+  const fillVals = toFillValues(
+    parsed.fields,
+    { "พบ?√,": true, "ไม่พบ?√,": false },
+    {},
+    {},
+  );
+  assert.equal(fillVals["พบ?√,"], "√");
+  assert.equal(fillVals["ไม่พบ?√,"], "");
+
+  const outTrue = await fillTemplate({
+    template: boolDoc,
+    values: fillVals,
+    images: [],
+  });
+  const xmlTrue = await readDocXml(outTrue);
+  assert.match(xmlTrue, /√/);
+
+  const outFalse = await fillTemplate({
+    template: boolDoc,
+    values: toFillValues(
+      parsed.fields,
+      { "พบ?√,": false, "ไม่พบ?√,": true },
+      {},
+      {},
+    ),
+    images: [],
+  });
+  const xmlFalse = await readDocXml(outFalse);
+  assert.match(xmlFalse, /√/);
+  console.log("✓ bool checkbox {{พบ?√,}} parse + fill");
+}
 
 console.log("\nAll qa unit tests passed");

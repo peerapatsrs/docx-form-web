@@ -3,13 +3,20 @@
  * parse / tagger / AI draft so create and upload agree.
  */
 
-/** Letters (incl. Thai), digits, underscore, dot, hyphen — same as tagger create. */
-export const VAR_NAME_RE = /^[\w\u0E00-\u0E7F.-]+$/u;
+/**
+ * Letters (incl. Thai), digits, underscore, dot, hyphen, slash.
+ * Slash is allowed inside names (e.g. ที่อยู่/เบอร์). Loop close remains
+ * `{{/}}` / `{{/name}}` because those start with `/` after `{{`.
+ */
+export const VAR_NAME_RE = /^[\w\u0E00-\u0E7F./-]+$/u;
 
-/** Trim, NFKC, strip zero-width, collapse internal whitespace. */
+/**
+ * Trim, NFC (not NFKC — Thai ำ must stay U+0E33), strip zero-width,
+ * collapse internal whitespace.
+ */
 export function normalizeVarName(raw: string): string {
   return String(raw || "")
-    .normalize("NFKC")
+    .normalize("NFC")
     .replace(/[\u200B-\u200D\uFEFF]/g, "")
     .trim()
     .replace(/\s+/g, " ");
@@ -44,7 +51,7 @@ export function validateVarName(
   const n = normalizeVarName(name);
   if (!n) return `${kind}ว่างไม่ได้`;
   if (!VAR_NAME_RE.test(n)) {
-    return `${kind}ใช้ได้เฉพาะตัวอักษร ตัวเลข _ . -`;
+    return `${kind}ใช้ได้เฉพาะตัวอักษร ตัวเลข _ . - /`;
   }
   return null;
 }
@@ -54,7 +61,8 @@ export function validateUploadedTagName(raw: string): string | null {
   const n = normalizeVarName(raw);
   if (!n) return "ชื่อตัวแปรว่างไม่ได้";
   if (n.startsWith("+")) return validateVarName(n.slice(1), "ชื่อรันเลข");
-  const bool = /^([^?#/{}]+)\?([^,{}]*),(.*)$/.exec(n);
+  // Bool label may include `/`; `?` still starts the true/false arm.
+  const bool = /^([^?#{}]+)\?([^,{}]*),(.*)$/.exec(n);
   if (bool) return validateVarName(bool[1], "ชื่อตัวแปรติ๊ก");
   if (n.startsWith("#") || n.startsWith("/")) {
     return validateVarName(n.slice(1) || n, "ชื่อลิสต์");

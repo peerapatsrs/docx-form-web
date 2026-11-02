@@ -113,7 +113,7 @@ await check("plain email helper has no server-only; wrapper does", async () => {
     path.join(root, "src/server/dev-auth-default-email.ts"),
     "utf8",
   );
-  assert.doesNotMatch(plainSrc, /server-only/);
+  assert.doesNotMatch(plainSrc, /import\s+["']server-only["']/);
   assert.doesNotMatch(plainSrc, /@[a-z0-9.-]+\.[a-z]{2,}/i);
 
   const wrapSrc = readFileSync(

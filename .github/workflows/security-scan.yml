@@ -1,0 +1,74 @@
+name: Security scan
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}" -o /tmp/gitleaks.tgz
+          sudo tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: Run gitleaks (redacted)
+        run: |
+          set -euo pipefail
+          # Redact secret values; surface file:line (+ rule) only.
+          gitleaks detect \
+            --source . \
+            --redact \
+            --no-banner \
+            --report-format json \
+            --report-path /tmp/gitleaks-report.json \
+            --exit-code 0
+          node <<'NODE'
+          const fs = require("node:fs");
+          const raw = fs.readFileSync("/tmp/gitleaks-report.json", "utf8").trim();
+          const findings = raw ? JSON.parse(raw) : [];
+          if (!Array.isArray(findings) || findings.length === 0) {
+            console.log("gitleaks: clean");
+            process.exit(0);
+          }
+          for (const f of findings) {
+            const file = f.File || f.file || "?";
+            const line = f.StartLine ?? f.startLine ?? 0;
+            const rule = f.RuleID || f.RuleId || f.Description || "secret";
+            console.log(`${file}:${line}  ${rule}`);
+          }
+          console.error(`gitleaks: ${findings.length} finding(s)`);
+          process.exit(1);
+          NODE
+
+  embedded-data:
+    name: embedded-data
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Scan for embedded data
+        run: npm run scan:embedded-data

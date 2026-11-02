@@ -27,7 +27,7 @@ export default function Home() {
       return;
     }
     const names = document.createElement("script");
-    names.src = `/field-names.js?v=web1`;
+    names.src = `/field-names.js?v=web2`;
     names.dataset.docxFieldNames = "1";
     names.onload = () => {
       const s = document.createElement("script");

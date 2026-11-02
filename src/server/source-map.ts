@@ -1,4 +1,5 @@
 import type { FormField, ListItemField } from "./docx-engine";
+import { lookupCompatValue } from "./field-names";
 import { detectKind, type ExtractedSource } from "./source-extract";
 
 export type MapCandidate = {
@@ -380,10 +381,45 @@ function writeAliased(
   for (const a of field.aliases || []) out[a] = value;
 }
 
+function compatBagValue(
+  bag: Record<string, unknown> | null | undefined,
+  name: string,
+): unknown {
+  return lookupCompatValue(bag, name).value;
+}
+
+function compatSkipFlag(
+  skip: Record<string, boolean> | null | undefined,
+  name: string,
+): boolean {
+  const hit = lookupCompatValue(
+    skip as Record<string, unknown> | null | undefined,
+    name,
+  );
+  return hit.hit ? !!hit.value : false;
+}
+
+function compatRowSkipFlag(
+  rowSkip: Record<string, Record<string, boolean>[]> | null | undefined,
+  listName: string,
+  idx: number,
+  itemName: string,
+): boolean {
+  const listHit = lookupCompatValue(
+    rowSkip as Record<string, unknown> | null | undefined,
+    listName,
+  );
+  const rows = Array.isArray(listHit.value) ? listHit.value : null;
+  const row = rows?.[idx];
+  if (!row || typeof row !== "object") return false;
+  return compatSkipFlag(row as Record<string, boolean>, itemName);
+}
+
 /**
  * Convert draft values/skip into the payload shape expected by fillTemplate
  * (bool → trueText/falseText, auto row numbers, skipped → "" / [], nested lists).
- * Mirrors the browser buildValuesPayload().
+ * Mirrors the browser buildValuesPayload(). Legacy NFKC value/skip keys resolve
+ * onto current NFC field names via lookupCompatValue.
  */
 export function toFillValues(
   fields: FormField[],
@@ -400,20 +436,26 @@ export function toFillValues(
     listName: string,
   ): Record<string, unknown> => {
     const rowOut: Record<string, unknown> = {};
+    const rowBag = row && typeof row === "object" ? row : undefined;
     for (const item of itemFields) {
       if (item.type === "auto") {
         writeAliased(rowOut, item, String(idx + 1));
       } else if (item.type === "bool") {
         const on =
-          !rowSkip[listName]?.[idx]?.[item.name] && !!row?.[item.name];
+          !compatRowSkipFlag(rowSkip, listName, idx, item.name) &&
+          !!compatBagValue(rowBag, item.name);
         writeAliased(rowOut, item, on ? item.trueText : item.falseText);
       } else if (item.type === "list") {
-        if (skip[item.name] || rowSkip[listName]?.[idx]?.[item.name]) {
+        if (
+          compatSkipFlag(skip, item.name) ||
+          compatRowSkipFlag(rowSkip, listName, idx, item.name)
+        ) {
           writeAliased(rowOut, item, []);
           continue;
         }
-        const nestedRows = Array.isArray(row?.[item.name])
-          ? (row?.[item.name] as Record<string, unknown>[])
+        const nestedRaw = compatBagValue(rowBag, item.name);
+        const nestedRows = Array.isArray(nestedRaw)
+          ? (nestedRaw as Record<string, unknown>[])
           : [];
         writeAliased(
           rowOut,
@@ -426,9 +468,9 @@ export function toFillValues(
         writeAliased(
           rowOut,
           item,
-          rowSkip[listName]?.[idx]?.[item.name]
+          compatRowSkipFlag(rowSkip, listName, idx, item.name)
             ? ""
-            : String(row?.[item.name] ?? ""),
+            : String(compatBagValue(rowBag, item.name) ?? ""),
         );
       }
     }
@@ -437,11 +479,18 @@ export function toFillValues(
 
   for (const f of fields) {
     if (f.type === "text") {
-      writeAliased(out, f, skip[f.name] ? "" : String(values[f.name] ?? ""));
+      writeAliased(
+        out,
+        f,
+        compatSkipFlag(skip, f.name)
+          ? ""
+          : String(compatBagValue(values, f.name) ?? ""),
+      );
       continue;
     }
     if (f.type === "bool") {
-      const on = !skip[f.name] && !!values[f.name];
+      const on =
+        !compatSkipFlag(skip, f.name) && !!compatBagValue(values, f.name);
       writeAliased(out, f, on ? f.trueText : f.falseText);
       continue;
     }
@@ -454,12 +503,13 @@ export function toFillValues(
       continue;
     }
     if (f.type === "list") {
-      if (skip[f.name]) {
+      if (compatSkipFlag(skip, f.name)) {
         writeAliased(out, f, []);
         continue;
       }
-      const rows = Array.isArray(values[f.name])
-        ? (values[f.name] as Record<string, unknown>[])
+      const rawRows = compatBagValue(values, f.name);
+      const rows = Array.isArray(rawRows)
+        ? (rawRows as Record<string, unknown>[])
         : [];
       writeAliased(
         out,

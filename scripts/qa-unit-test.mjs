@@ -10,12 +10,16 @@ import {
   VAR_NAME_RE_SOURCE,
   fieldIdentityKey,
   isValidVarName,
+  lookupCompatKey,
+  lookupCompatValue,
   normalizeVarName,
+  projectValuesOntoFields,
   validateUploadedTagName,
   validateVarName,
 } from "../src/server/field-names.ts";
 import {
   assertTagsBalanced,
+  expandAliasValues,
   fillTemplate,
   parseBoolTagName,
   parseTemplate,
@@ -135,7 +139,66 @@ console.log("✓ field-names");
   const nfcName = "จำนวน";
   assert.equal(client.normalizeFieldName(nfcName), nfcName);
   assert.equal(client.isValidFieldName(nfcName), true);
+  assert.equal(typeof client.lookupCompatValue, "function");
+  assert.equal(typeof client.projectValuesOntoFields, "function");
   console.log("✓ client/server field-name rules in sync");
+}
+
+// Legacy NFKC keys (ํ+า) must resolve onto current NFC field names.
+{
+  const nfc = "จำนวน";
+  const nfkc = nfc.normalize("NFKC");
+  assert.notEqual(nfc, nfkc);
+  assert.ok([...nfkc].includes("\u0E4D"));
+
+  const bag = { [nfkc]: "42" };
+  assert.equal(lookupCompatKey(bag, nfc), nfkc);
+  assert.equal(lookupCompatValue(bag, nfc).value, "42");
+  assert.equal(lookupCompatValue(bag, nfc).hit, true);
+  // Exact wins over NFKC twin.
+  const both = { [nfc]: "new", [nfkc]: "old" };
+  assert.equal(lookupCompatKey(both, nfc), nfc);
+  assert.equal(lookupCompatValue(both, nfc).value, "new");
+  // Ambiguous: two distinct keys that both NFKC-equal the field, neither exact.
+  // fullwidth digits ４２ vs ASCII — use two NFKC-identical Thai bags via aliasing:
+  // If bag has only the NFKC key, unique fallback works.
+  assert.equal(lookupCompatKey({ [nfkc]: "a" }, nfc), nfkc);
+
+  const black = "คดีหมายเลขดำที่";
+  const blackNfkc = black.normalize("NFKC");
+  assert.notEqual(black, blackNfkc);
+  const loop = "รายการจำเลย";
+  const loopNfkc = loop.normalize("NFKC");
+  assert.notEqual(loop, loopNfkc);
+
+  const projected = projectValuesOntoFields(
+    [
+      { name: black, type: "text" },
+      {
+        name: loop,
+        type: "list",
+        itemFields: [{ name: "ชื่อ", type: "text" }],
+      },
+    ],
+    {
+      [blackNfkc]: "ด.123/2567",
+      [loopNfkc]: [{ ชื่อ: "สมชาย" }, { ชื่อ: "สมหญิง" }],
+    },
+  );
+  assert.equal(projected[black], "ด.123/2567");
+  assert.ok(Array.isArray(projected[loop]));
+  assert.equal(projected[loop][0].ชื่อ, "สมชาย");
+  assert.equal(projected[loop][1].ชื่อ, "สมหญิง");
+
+  const client = /** @type {any} */ (globalThis).DocxFieldNames;
+  assert.equal(client.lookupCompatValue({ [nfkc]: "9" }, nfc).value, "9");
+  assert.equal(
+    client.projectValuesOntoFields([{ name: nfc, type: "text" }], { [nfkc]: "9" })[
+      nfc
+    ],
+    "9",
+  );
+  console.log("✓ NFKC compat lookup (จำนวน / คดีหมายเลขดำที่ / รายการจำเลย)");
 }
 
 const tags = [
@@ -555,6 +618,52 @@ console.log("✓ countFilledValues false/empty");
   const xmlFalse = await readDocXml(outFalse);
   assert.match(xmlFalse, /√/);
   console.log("✓ bool checkbox {{พบ?√,}} parse + fill");
+}
+
+{
+  const compatDoc = await docxFromFixture("nfc-compat-fill.xml");
+  const parsed = await parseTemplate(compatDoc);
+  const nfcAmount = "จำนวน";
+  const nfcBlack = "คดีหมายเลขดำที่";
+  const nfcLoop = "รายการจำเลย";
+  assert.ok(parsed.fields.some((f) => f.name === nfcAmount));
+  assert.ok(parsed.fields.some((f) => f.name === nfcBlack));
+  assert.ok(parsed.fields.some((f) => f.name === nfcLoop && f.type === "list"));
+
+  const legacyValues = {
+    [nfcAmount.normalize("NFKC")]: "100",
+    [nfcBlack.normalize("NFKC")]: "ด.999/2568",
+    [nfcLoop.normalize("NFKC")]: [{ ชื่อ: "จำเลย ก" }, { ชื่อ: "จำเลย ข" }],
+  };
+
+  const remapped = expandAliasValues(parsed.fields, legacyValues);
+  assert.equal(remapped[nfcAmount], "100");
+  assert.equal(remapped[nfcBlack], "ด.999/2568");
+  assert.equal(remapped[nfcLoop][0].ชื่อ, "จำเลย ก");
+
+  const filledFromLegacy = toFillValues(
+    parsed.fields,
+    legacyValues,
+    { [nfcAmount.normalize("NFKC")]: false },
+    {},
+  );
+  assert.equal(filledFromLegacy[nfcAmount], "100");
+  assert.equal(filledFromLegacy[nfcBlack], "ด.999/2568");
+  assert.ok(Array.isArray(filledFromLegacy[nfcLoop]));
+  assert.equal(filledFromLegacy[nfcLoop].length, 2);
+
+  const out = await fillTemplate({
+    template: compatDoc,
+    values: legacyValues,
+    images: [],
+  });
+  const xml = await readDocXml(out);
+  assert.match(xml, />100</);
+  assert.match(xml, /ด\.999\/2568/);
+  assert.match(xml, /จำเลย ก/);
+  assert.match(xml, /จำเลย ข/);
+  assert.doesNotMatch(xml, /\{\{/);
+  console.log("✓ API fill + toFillValues with legacy NFKC keys (scalar + loop)");
 }
 
 console.log("\nAll qa unit tests passed");

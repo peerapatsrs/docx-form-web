@@ -16,6 +16,7 @@ import {
   fieldIdentityKey,
   fieldIdentityKeyFromTag,
   normalizeVarName,
+  projectValuesOntoFields,
   validateUploadedTagName,
 } from "./field-names";
 
@@ -399,35 +400,37 @@ export function expandAliasValues(
   fields: FormField[],
   values: Record<string, unknown>,
 ): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...values };
-  const walk = (list: FormField[] | ListItemField[]) => {
-    for (const f of list) {
-      if (Object.prototype.hasOwnProperty.call(values, f.name)) {
-        const v = values[f.name];
-        out[f.name] = v;
-        for (const a of f.aliases || []) out[a] = v;
-      }
-      if (f.type === "list") walk(f.itemFields);
-    }
-  };
-  walk(fields);
-  return out;
+  // Compat-project first so legacy NFKC keys land on current NFC field names.
+  return projectValuesOntoFields(fields, values);
 }
 
 export async function fillTemplate(input: FillInput): Promise<Buffer> {
-  const data = { ...input.values } as TemplateData;
+  const prepared = await prepareTemplateBuffer(input.template);
+  const tags = await handler.parseTags(prepared);
+  const { fields } = tagsToFieldsWithWarnings(tags);
+  const remapped = expandAliasValues(fields, input.values as Record<string, unknown>);
+  const data = { ...remapped } as TemplateData;
 
   for (const img of input.images) {
+    const names = [img.name];
+    const field = fields.find(
+      (f) =>
+        f.type === "image" &&
+        (f.name === img.name || (f.aliases || []).includes(img.name)),
+    );
+    if (field) {
+      names.length = 0;
+      names.push(field.name, ...(field.aliases || []));
+    }
     const content: ImageContent = {
       _type: "image",
       source: img.buffer,
       format: mimeFromFilenameOrType(img.filename, img.mimeType),
       altText: img.name,
     };
-    data[img.name] = content;
+    for (const n of names) data[n] = content;
   }
 
-  const prepared = await prepareTemplateBuffer(input.template);
   const out = await handler.process(prepared, data);
   return Buffer.from(out);
 }

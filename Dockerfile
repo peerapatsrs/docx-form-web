@@ -27,6 +27,7 @@ ENV BETTER_AUTH_SECRET=build-time-placeholder-secret-32chars
 ENV DATABASE_URL=postgres://build:build@127.0.0.1:5432/build
 # Render Docker builds use the Starter pipeline (~8GB). Cap heap for smaller builders.
 ENV NODE_OPTIONS=--max-old-space-size=4096
+# Resolve BETTER_AUTH_URL from build-args, then minify /public and build standalone.
 RUN ba="${BETTER_AUTH_URL:-}"; \
     if [ -z "$ba" ]; then ba="${NEXT_PUBLIC_APP_URL:-}"; fi; \
     if [ -z "$ba" ]; then ba="${APP_BASE_URL:-}"; fi; \
@@ -34,7 +35,7 @@ RUN ba="${BETTER_AUTH_URL:-}"; \
     if [ -z "${NEXT_PUBLIC_APP_URL:-}" ] && [ -n "$ba" ]; then \
       export NEXT_PUBLIC_APP_URL="$ba"; \
     fi; \
-    npm run build
+    npm run build:prod
 
 FROM node:22-bookworm-slim AS runner
 WORKDIR /app

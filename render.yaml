@@ -36,6 +36,11 @@ services:
         sync: false
       - key: APP_ALLOWED_HOSTS
         sync: false
+      # Client IP behind Render (PR #4). Non-secret defaults; override in Dashboard if needed.
+      - key: TRUSTED_PROXY_COUNT
+        value: "1"
+      - key: TRUST_CF_CONNECTING_IP
+        value: "0"
       - key: BETTER_AUTH_SECRET
         sync: false
       - key: AI_VAULT_SECRET

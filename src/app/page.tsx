@@ -27,13 +27,16 @@ export default function Home() {
       return;
     }
     const s = document.createElement("script");
-    s.src = `/app.js?v=web63`;
+    s.src = `/app.js?v=web64`;
     s.dataset.docxFormApp = "1";
     document.body.appendChild(s);
   }, []);
 
   return (
     <>
+      <a className="skip-link" href="#main-content">
+        ข้ามไปยังเนื้อหาหลัก
+      </a>
       <div className="ambient" aria-hidden="true">
         <span className="orb orb-a" />
         <span className="orb orb-b" />
@@ -52,12 +55,21 @@ export default function Home() {
         </div>
       </header>
 
-      <div id="banner" className="banner" hidden role="status" aria-live="polite" />
+      <div
+        id="banner"
+        className="banner"
+        hidden
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      />
 
-      <main className="shell">
+      <main className="shell" id="main-content" tabIndex={-1}>
         {/* Crawlable product summary — UI itself mounts into #app via app.js */}
         <section className="sr-only" aria-label={`เกี่ยวกับ ${SITE_NAME}`}>
-          <h1>{SITE_NAME} — กรอกแบบฟอร์มเอกสาร Word จากเทมเพลต .docx</h1>
+          <p>
+            {SITE_NAME} — กรอกแบบฟอร์มเอกสาร Word จากเทมเพลต .docx
+          </p>
           <p>{SITE_ABOUT}</p>
           <ul>
             {SITE_FEATURE_BULLETS.map((item) => (

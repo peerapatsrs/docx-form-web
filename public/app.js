@@ -1,9 +1,9 @@
-/** @typedef {{ name: string, type: 'text' }} TextField */
-/** @typedef {{ name: string, type: 'image' }} ImageField */
-/** @typedef {{ name: string, type: 'bool', trueText: string, falseText: string, label: string }} BoolField */
-/** @typedef {{ name: string, type: 'auto', label: string }} AutoField */
-/** @typedef {TextField | BoolField | AutoField} ListItemField */
-/** @typedef {{ name: string, type: 'list', itemFields: ListItemField[] }} ListField */
+/** @typedef {{ name: string, type: 'text', aliases?: string[] }} TextField */
+/** @typedef {{ name: string, type: 'image', aliases?: string[] }} ImageField */
+/** @typedef {{ name: string, type: 'bool', trueText: string, falseText: string, label: string, aliases?: string[] }} BoolField */
+/** @typedef {{ name: string, type: 'auto', label: string, aliases?: string[] }} AutoField */
+/** @typedef {{ name: string, type: 'list', itemFields: Array<TextField | BoolField | AutoField | ListField>, aliases?: string[] }} ListField */
+/** @typedef {TextField | BoolField | AutoField | ListField} ListItemField */
 /** @typedef {TextField | ImageField | ListField | BoolField | AutoField} FormField */
 
 /** Shell nodes from React home — refreshed on soft navigate remount. */
@@ -601,43 +601,77 @@ async function restoreDraft() {
 }
 
 function defaultNamedDraftTitle() {
-  const base = state.filename ? String(state.filename).replace(/\.docx$/i, "") : "ดราฟ";
-  return `${base} · ${formatDraftDate(new Date().toISOString())}`;
+  const base = state.filename
+    ? String(state.filename).replace(/\.docx$/i, "")
+    : "ดราฟ";
+  return base;
 }
 
+/** Display draft name separately from template filename with one shared timestamp. */
+function formatNamedDraftListTitle(d) {
+  const filename = String(d?.filename || "").trim();
+  const base = filename.replace(/\.docx$/i, "");
+  let title = String(d?.title || "").trim();
+  if (title) {
+    title = title
+      .replace(/\s*[·•|]\s*\d{1,2}\s*[\/.\-]\s*\d{1,2}\s*[\/.\-]\s*\d{2,4}.*$/u, "")
+      .replace(/\s*[·•|]\s*\d{1,2}:\d{2}.*$/u, "")
+      .trim();
+  }
+  if (!title) return filename || "ไม่มีชื่อ";
+  if (!filename) return title;
+  if (title === filename || title === base) return `${title} — ${filename}`;
+  if (title.includes(filename) || (base && title.includes(base))) return title;
+  return `${title} — ${filename}`;
+}
+
+let namedDraftSaveBusy = false;
+
 async function promptSaveNamedDraft() {
+  if (namedDraftSaveBusy) return;
+  if (document.getElementById("appDialog")) return;
   if (!state.file || !state.fields.length) {
     showBanner("ยังไม่มีเทมเพลตให้บันทึกดราฟ");
     return;
   }
-  const result = await askDialog({
-    title: "บันทึกดราฟ",
-    body: "ตั้งชื่อดราฟเพื่อโหลดกลับภายหลัง (ข้ามวัน / สลับงานได้) — เก็บในเบราว์เซอร์นี้ผ่าน IndexedDB",
-    input: {
-      label: "ชื่อดราฟ (ไม่บังคับ)",
-      placeholder: defaultNamedDraftTitle(),
-      value: defaultNamedDraftTitle(),
-      type: "text",
-    },
-    actions: [
-      { id: "save", label: "บันทึก", kind: "primary" },
-      { id: "abort", label: "ยกเลิก", kind: "ghost" },
-    ],
-  });
-  if (!result || result === "abort" || typeof result !== "object") return;
-  const title = String(result.value || "").trim() || defaultNamedDraftTitle();
+  namedDraftSaveBusy = true;
+  const saveBtn = /** @type {HTMLButtonElement | null} */ (
+    document.getElementById("saveNamedDraftBtn")
+  );
+  if (saveBtn) saveBtn.disabled = true;
   try {
-    const payload = await buildDraftPayload();
-    await namedDraftPut({
-      ...payload,
-      id: crypto.randomUUID(),
-      title,
+    const result = await askDialog({
+      title: "บันทึกดราฟ",
+      body: "ตั้งชื่อดราฟเพื่อโหลดกลับภายหลัง (ข้ามวัน / สลับงานได้) — เก็บในเบราว์เซอร์นี้ผ่าน IndexedDB",
+      input: {
+        label: "ชื่อดราฟ (ไม่บังคับ)",
+        placeholder: defaultNamedDraftTitle(),
+        value: defaultNamedDraftTitle(),
+        type: "text",
+      },
+      actions: [
+        { id: "save", label: "บันทึก", kind: "primary" },
+        { id: "abort", label: "ยกเลิก", kind: "ghost" },
+      ],
     });
-    showBanner(`บันทึกดราฟแล้ว: ${title}`, "success");
-    setTimeout(() => showBanner(""), 2800);
-  } catch (err) {
-    console.warn("named draft save failed", err);
-    showBanner("บันทึกดราฟไม่สำเร็จ");
+    if (!result || result === "abort" || typeof result !== "object") return;
+    const title = String(result.value || "").trim() || defaultNamedDraftTitle();
+    try {
+      const payload = await buildDraftPayload();
+      await namedDraftPut({
+        ...payload,
+        id: crypto.randomUUID(),
+        title,
+      });
+      showBanner(`บันทึกดราฟแล้ว: ${title}`, "success");
+      setTimeout(() => showBanner(""), 2800);
+    } catch (err) {
+      console.warn("named draft save failed", err);
+      showBanner("บันทึกดราฟไม่สำเร็จ");
+    }
+  } finally {
+    namedDraftSaveBusy = false;
+    if (saveBtn) saveBtn.disabled = false;
   }
 }
 
@@ -714,8 +748,8 @@ function renderNamedDraftListHtml(drafts, opts = {}) {
       .map(
         (d) => `<li class="draft-list-item" data-draft-id="${escapeAttr(d.id)}">
           <div class="draft-list-main">
-            <strong class="draft-list-title">${escapeHtml(d.title || d.filename || "ไม่มีชื่อ")}</strong>
-            <span class="draft-list-meta">${escapeHtml(d.filename || "—")} · ${escapeHtml(formatDraftDate(d.savedAt))}</span>
+            <strong class="draft-list-title">${escapeHtml(formatNamedDraftListTitle(d))}</strong>
+            <span class="draft-list-meta">${escapeHtml(formatDraftDate(d.savedAt))}</span>
           </div>
           <div class="draft-list-actions">
             <button type="button" class="btn-secondary btn-compact" data-draft-load="${escapeAttr(d.id)}">โหลด</button>
@@ -809,11 +843,13 @@ async function openNamedDraftPicker() {
   overlay.className = "dialog-overlay";
   overlay.setAttribute("role", "dialog");
   overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-labelledby", "namedDraftDialogTitle");
+  overlay.setAttribute("aria-describedby", "namedDraftDialogBody");
 
   overlay.innerHTML = `
     <div class="dialog-card dialog-card-wide">
-      <h2 class="dialog-title">โหลดดราฟ</h2>
-      <p class="dialog-body">เลือกดราฟที่บันทึกไว้ในเบราว์เซอร์นี้ (คงอยู่ข้ามวัน)</p>
+      <h2 class="dialog-title" id="namedDraftDialogTitle">โหลดดราฟ</h2>
+      <p class="dialog-body" id="namedDraftDialogBody">เลือกดราฟที่บันทึกไว้ในเบราว์เซอร์นี้ (คงอยู่ข้ามวัน)</p>
       <div id="namedDraftDialogList">${renderNamedDraftListHtml(drafts)}</div>
       <div class="dialog-actions dialog-actions-stack">
         <button type="button" class="btn-ghost" data-draft-close>ปิด</button>
@@ -821,13 +857,15 @@ async function openNamedDraftPicker() {
     </div>
   `;
 
+  let releaseFocus = () => {};
   const close = () => {
+    releaseFocus();
     overlay.remove();
     document.removeEventListener("keydown", onKey);
   };
   const onKey = (e) => {
     if (e.key !== "Escape") return;
-    if (document.getElementById("appDialog")) return;
+    if (document.getElementById("appDialog") || document.getElementById("appConfirmDialog")) return;
     close();
   };
 
@@ -848,6 +886,30 @@ async function openNamedDraftPicker() {
 
   document.addEventListener("keydown", onKey);
   document.body.appendChild(overlay);
+  releaseFocus = trapFocusInOverlay(overlay);
+  /** @type {HTMLButtonElement | null} */ (
+    overlay.querySelector("[data-draft-close]")
+  )?.focus();
+}
+
+/** Map raw library / JS exceptions to a short Thai file error. */
+function friendlyUploadError(err) {
+  const raw = err instanceof Error ? err.message : String(err || "");
+  const msg = String(raw || "").trim();
+  if (!msg) return "ไฟล์ใช้ไม่ได้ หรืออ่านไม่สำเร็จ";
+  if (/ไฟล์ใหญ่เกินไป|FILE_TOO_LARGE/i.test(msg)) return "ไฟล์ใหญ่เกินไป (สูงสุด 25 MB)";
+  if (/รหัสผ่าน|encrypted|password/i.test(msg)) {
+    return "ไฟล์ถูกป้องกันด้วยรหัสผ่าน — ปลดล็อกใน Word แล้ว Save เป็น .docx ปกติ";
+  }
+  if (/NO_VARIABLES|ไม่พบตัวแปร/i.test(msg)) return msg;
+  if (/cannot read properties|undefined.*trim|is not a function|Unexpected token/i.test(msg)) {
+    return "ไฟล์ใช้ไม่ได้ หรือไม่ใช่เอกสาร .docx ที่รองรับ";
+  }
+  if (/https?:\/\//i.test(msg)) {
+    return msg.replace(/https?:\/\/\S+/gi, "").replace(/\s{2,}/g, " ").trim() ||
+      "อ่านเทมเพลตไม่สำเร็จ";
+  }
+  return msg;
 }
 
 /**
@@ -891,10 +953,25 @@ function explainSkippedTemplates(opts) {
       `เทมเพลตต้องมี {{ชื่อ}} หรือแท็กรูป หรือ {{#รายการ}}` +
       (ok > 0
         ? `\nสลับแท็บด้านบนได้ หรือกด 「+ เพิ่ม」 เพื่อเลือกไฟล์ใหม่`
-        : `\nใส่ตัวแปรใน Word แล้วเลือกใหม่อีกครั้ง`),
-    actions: [{ id: "ok", label: "เข้าใจแล้ว", kind: "primary" }],
+        : `\nเปิดโหมดสร้างเทมเพลตจากเอกสาร หรือใส่ตัวแปรใน Word แล้วเลือกใหม่`),
+    actions: [
+      ...(ok === 0 && failures.length === 1
+        ? [{ id: "tagger", label: "สร้างเทมเพลตจากเอกสาร", kind: "primary" }]
+        : []),
+      { id: "ok", label: ok === 0 && failures.length === 1 ? "ปิด" : "เข้าใจแล้ว", kind: ok === 0 && failures.length === 1 ? "ghost" : "primary" },
+    ],
+  }).then((choice) => {
+    if (choice === "tagger") {
+      const name = failures[0]?.name;
+      // Caller may re-open the same picker; tagger needs the File object — handled by parse catch path.
+      void name;
+    }
+    return choice;
   });
 }
+
+/** True while the visible banner is a field-validation summary. */
+let validationBannerActive = false;
 
 function hideBanner() {
   if (!banner) return;
@@ -902,17 +979,19 @@ function hideBanner() {
   banner.textContent = "";
   banner.classList.remove("success", "progress");
   banner.removeAttribute("aria-busy");
+  validationBannerActive = false;
 }
 
 /**
  * @param {string} message
  * @param {'error'|'success'|'progress'|'warn'} [kind]
- * @param {{ action?: { label: string, onClick: () => void }, note?: string }} [opts]
+ * @param {{ action?: { label: string, onClick: () => void }, note?: string, validation?: boolean }} [opts]
  */
 function showBanner(message, kind = "error", opts = {}) {
   if (!banner) return;
   banner.hidden = !message;
   banner.classList.remove("success", "progress");
+  validationBannerActive = !!(message && opts.validation);
   if (!message) {
     hideBanner();
     return;
@@ -935,6 +1014,9 @@ function showBanner(message, kind = "error", opts = {}) {
     banner.classList.add("success");
     banner.removeAttribute("aria-busy");
     banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${actionBtn}${closeBtn}`;
+  } else if (kind === "warn") {
+    banner.removeAttribute("aria-busy");
+    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${noteHtml}${actionBtn}${closeBtn}`;
   } else {
     banner.removeAttribute("aria-busy");
     banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${actionBtn}${closeBtn}`;
@@ -951,6 +1033,97 @@ function showBanner(message, kind = "error", opts = {}) {
   if (kind === "error") {
     banner.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
+}
+
+/**
+ * Keep Tab/Shift+Tab focus inside a dialog overlay until it is dismissed.
+ * @param {HTMLElement} overlay
+ * @returns {() => void} teardown
+ */
+function trapFocusInOverlay(overlay) {
+  const previouslyFocused =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const focusableSelector =
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  const getFocusable = () =>
+    [...overlay.querySelectorAll(focusableSelector)].filter(
+      (el) => el instanceof HTMLElement && !el.hasAttribute("disabled") && el.offsetParent !== null,
+    );
+  const onKeyDown = (e) => {
+    if (e.key !== "Tab") return;
+    const nodes = getFocusable();
+    if (!nodes.length) {
+      e.preventDefault();
+      overlay.focus();
+      return;
+    }
+    const first = nodes[0];
+    const last = nodes[nodes.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey) {
+      if (active === first || !overlay.contains(active)) {
+        e.preventDefault();
+        last.focus();
+      }
+    } else if (active === last || !overlay.contains(active)) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
+  overlay.setAttribute("tabindex", "-1");
+  document.addEventListener("keydown", onKeyDown, true);
+  return () => {
+    document.removeEventListener("keydown", onKeyDown, true);
+    if (previouslyFocused && document.contains(previouslyFocused)) {
+      previouslyFocused.focus();
+    }
+  };
+}
+
+/**
+ * Confirm dialog that stacks above an existing appDialog (does not replace it).
+ * @param {{ title: string, body: string, confirmLabel?: string, abortLabel?: string }} opts
+ * @returns {Promise<boolean>}
+ */
+function askStackedConfirm(opts) {
+  return new Promise((resolve) => {
+    const existing = document.getElementById("appConfirmDialog");
+    if (existing) existing.remove();
+    const overlay = document.createElement("div");
+    overlay.id = "appConfirmDialog";
+    overlay.className = "dialog-overlay dialog-overlay-confirm";
+    overlay.setAttribute("role", "alertdialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-labelledby", "appConfirmTitle");
+    overlay.setAttribute("aria-describedby", "appConfirmBody");
+    overlay.innerHTML = `
+      <div class="dialog-card">
+        <h2 class="dialog-title" id="appConfirmTitle">${escapeHtml(opts.title)}</h2>
+        <p class="dialog-body" id="appConfirmBody">${escapeHtml(opts.body)}</p>
+        <div class="dialog-actions dialog-actions-stack">
+          <button type="button" class="btn-primary" data-confirm="ok">${escapeHtml(opts.confirmLabel || "ยืนยัน")}</button>
+          <button type="button" class="btn-ghost" data-confirm="abort">${escapeHtml(opts.abortLabel || "ยกเลิก")}</button>
+        </div>
+      </div>`;
+    const releaseFocus = trapFocusInOverlay(overlay);
+    const finish = (ok) => {
+      releaseFocus();
+      overlay.remove();
+      document.removeEventListener("keydown", onKey);
+      resolve(ok);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") finish(false);
+    };
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) finish(false);
+    });
+    overlay.querySelector('[data-confirm="ok"]')?.addEventListener("click", () => finish(true));
+    overlay.querySelector('[data-confirm="abort"]')?.addEventListener("click", () => finish(false));
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(overlay);
+    /** @type {HTMLButtonElement | null} */ (overlay.querySelector('[data-confirm="ok"]'))?.focus();
+  });
 }
 
 /**
@@ -1040,12 +1213,14 @@ function askDialog(opts) {
     overlay.className = "dialog-overlay";
     overlay.setAttribute("role", "dialog");
     overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-labelledby", "appDialogTitle");
+    overlay.setAttribute("aria-describedby", "appDialogBody");
     // When link tracks the select, put it under the dropdown so it updates with the choice.
     const linkAfterSelect = !!linkForSelect;
     overlay.innerHTML = `
       <div class="dialog-card">
-        <h2 class="dialog-title">${escapeHtml(opts.title)}</h2>
-        <p class="dialog-body">${escapeHtml(opts.body)}</p>
+        <h2 class="dialog-title" id="appDialogTitle">${escapeHtml(opts.title)}</h2>
+        <p class="dialog-body" id="appDialogBody">${escapeHtml(opts.body)}</p>
         ${linkAfterSelect ? "" : linkHtml}
         ${inputHtml}
         ${selectHtml}
@@ -1069,7 +1244,9 @@ function askDialog(opts) {
       };
     };
 
+    let releaseFocus = () => {};
     const finish = (value) => {
+      releaseFocus();
       overlay.remove();
       document.removeEventListener("keydown", onKey);
       resolve(value);
@@ -1129,6 +1306,7 @@ function askDialog(opts) {
     }
     document.addEventListener("keydown", onKey);
     document.body.appendChild(overlay);
+    releaseFocus = trapFocusInOverlay(overlay);
     const inputEl = /** @type {HTMLInputElement | null} */ (overlay.querySelector("#dialogInput"));
     if (inputEl) {
       inputEl.focus();
@@ -1209,6 +1387,35 @@ function clearFieldErrors() {
   });
 }
 
+/** Clear the validation summary banner once every highlighted field is fixed. */
+function maybeClearValidationBanner() {
+  if (!validationBannerActive || !app) return;
+  if (app.querySelector("[aria-invalid='true'], .has-error")) return;
+  hideBanner();
+}
+
+/** Field names that should be treated as email-typed values. */
+function isEmailTypedField(name, field) {
+  if (field && (field.type === "email" || field.valueType === "email")) return true;
+  const n = String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "");
+  return (
+    n === "email" ||
+    n === "e-mail" ||
+    n === "อีเมล" ||
+    n === "อีเมล์" ||
+    /(^|[_.-])(e-?mail|อีเมล์?|อีเมล)($|[_.-])/i.test(String(name || "").trim())
+  );
+}
+
+function isValidEmailValue(value) {
+  const v = String(value || "").trim();
+  if (!v) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v);
+}
+
 /**
  * @param {string} [inputSelector]
  * @param {string} [name]
@@ -1254,7 +1461,42 @@ function scrollToFirstFieldError() {
   target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
 }
 
-/** Highlight empty required fields and return their display names. */
+/**
+ * Mark a field invalid with a custom message (used for type checks).
+ * @param {string} inputSelector
+ * @param {string} name
+ * @param {string} message
+ * @param {{ list: string, row: number, item: string } | null} [listRef]
+ */
+function markFieldErrorMessage(inputSelector, name, message, listRef = null) {
+  markFieldError(inputSelector, name, listRef);
+  /** @type {Element | null} */
+  let input = inputSelector ? app.querySelector(inputSelector) : null;
+  if (!input && name) {
+    input = app.querySelector(`[data-doc-field="${cssAttrSelector(name)}"]`);
+  }
+  if (!input && listRef) {
+    input = app.querySelector(
+      `[data-list="${cssAttrSelector(listRef.list)}"][data-row="${listRef.row}"][data-item="${cssAttrSelector(listRef.item)}"]`,
+    );
+  }
+  if (!input) return;
+  const field =
+    input.closest(".field") ||
+    input.closest(".doc-blank-wrap") ||
+    input.closest(".doc-list") ||
+    input.parentElement;
+  const existing = field?.querySelector(".field-error");
+  if (existing) existing.textContent = message;
+  else if (field && !input.closest(".doc-table-cell-wrap, td")) {
+    input.insertAdjacentHTML(
+      "afterend",
+      `<p class="field-error">${escapeHtml(message)}</p>`,
+    );
+  }
+}
+
+/** Highlight empty / mistyped required fields and return their display names. */
 function validateBeforeSubmit() {
   clearFieldErrors();
   /** @type {string[]} */
@@ -1263,10 +1505,18 @@ function validateBeforeSubmit() {
   for (const f of state.fields) {
     if (state.skip[f.name]) continue;
 
-    if (f.type === "text") {
-      if (!String(state.values[f.name] ?? "").trim()) {
+    if (f.type === "text" || f.type === "email") {
+      const raw = String(state.values[f.name] ?? "").trim();
+      if (!raw) {
         missing.push(f.name);
         markFieldError(`#f-${cssId(f.name)}`, f.name);
+      } else if (isEmailTypedField(f.name, f) && !isValidEmailValue(raw)) {
+        missing.push(`${f.name} (รูปแบบอีเมลไม่ถูกต้อง)`);
+        markFieldErrorMessage(
+          `#f-${cssId(f.name)}`,
+          f.name,
+          "รูปแบบอีเมลไม่ถูกต้อง — ตรวจอีกครั้ง หรือติ๊ก “ข้าม”",
+        );
       }
     } else if (f.type === "bool") {
       // always true/false — no required check
@@ -1304,12 +1554,22 @@ function validateBeforeSubmit() {
         for (const item of f.itemFields) {
           if (item.type === "bool" || item.type === "auto") continue;
           if (state.rowSkip[f.name]?.[idx]?.[item.name]) continue;
-          if (!String(row[item.name] ?? "").trim()) {
+          const raw = String(row[item.name] ?? "").trim();
+          if (!raw) {
             const label = `${f.name} แถว ${idx + 1}.${item.name}`;
             missing.push(label);
             markFieldError(
               `#l-${cssId(f.name)}-${idx}-${cssId(item.name)}`,
               item.name,
+              { list: f.name, row: idx, item: item.name },
+            );
+          } else if (isEmailTypedField(item.name, item) && !isValidEmailValue(raw)) {
+            const label = `${f.name} แถว ${idx + 1}.${item.name} (รูปแบบอีเมลไม่ถูกต้อง)`;
+            missing.push(label);
+            markFieldErrorMessage(
+              `#l-${cssId(f.name)}-${idx}-${cssId(item.name)}`,
+              item.name,
+              "รูปแบบอีเมลไม่ถูกต้อง — ตรวจอีกครั้ง หรือติ๊ก “ข้าม”",
               { list: f.name, row: idx, item: item.name },
             );
           }
@@ -1562,7 +1822,7 @@ function isAiStaffAdmin() {
 }
 
 /**
- * @typedef {{ id: string, provider: string, label: string, apiKey: string, model: string, storeOnServer?: boolean }} AiVaultEntry
+ * @typedef {{ id: string, provider: string, label: string, apiKey: string, model: string, storeOnServer?: boolean, maskedKey?: string }} AiVaultEntry
  * @typedef {{ entries: AiVaultEntry[], activeId: string | null }} AiVault
  */
 
@@ -1648,6 +1908,14 @@ function getActiveAiEntry() {
 
 function getClientAiKey() {
   return String(getActiveAiEntry()?.apiKey || "").trim();
+}
+
+/** True when we can call AI (local plaintext key and/or server vault id). */
+function hasClientAiCredentials() {
+  const e = getActiveAiEntry();
+  if (!e) return false;
+  if (String(e.apiKey || "").trim()) return true;
+  return !!(e.storeOnServer && e.id && aiUserLoggedIn);
 }
 
 function getClientAiModel() {
@@ -1773,14 +2041,19 @@ async function pullServerAiKeys() {
     const vault = readAiVault();
     const byId = new Map(vault.entries.map((e) => [e.id, e]));
     for (const r of remote) {
-      if (!r?.id || !r.apiKey) continue;
+      if (!r?.id) continue;
+      const existing = byId.get(String(r.id));
+      // Server no longer returns plaintext — keep local secret if we already have it.
       const next = {
         id: String(r.id),
-        provider: String(r.provider || "google"),
-        label: String(r.label || providerLabel(r.provider)),
-        apiKey: String(r.apiKey),
-        model: String(r.model || ""),
+        provider: String(r.provider || existing?.provider || "google"),
+        label: String(r.label || existing?.label || providerLabel(r.provider)),
+        apiKey: existing?.apiKey || "",
+        model: String(r.model || existing?.model || ""),
         storeOnServer: true,
+        // hasKey: server has ciphertext; never expect plaintext in GET.
+        maskedKey: String(r.maskedKey || existing?.maskedKey || "") ||
+          (r.hasKey ? "••••" : ""),
       };
       byId.set(next.id, next);
     }
@@ -1832,9 +2105,17 @@ async function deleteServerAiKey(id) {
 }
 
 function maskClientKey(key) {
-  const k = String(key || "");
-  if (k.length < 10) return "••••";
-  return `${k.slice(0, 6)}…${k.slice(-4)}`;
+  const k = String(key || "").trim();
+  if (!k) return "••••";
+  if (k.length <= 4) return "••••";
+  return `••••…${k.slice(-4)}`;
+}
+
+/** Display mask for vault rows — prefer server maskedKey when plaintext is absent. */
+function maskAiEntry(entry) {
+  if (!entry) return "••••";
+  if (entry.maskedKey) return String(entry.maskedKey);
+  return maskClientKey(entry.apiKey);
 }
 
 /** Headers so the server uses THIS user's key for the request only (not stored server-side). */
@@ -1846,6 +2127,10 @@ function aiAuthHeaders(extra = {}) {
   const key = String(entry.apiKey || "").trim();
   const model = String(entry.model || "").trim();
   const provider = String(entry.provider || "google").trim();
+  // Prefer vault id so the server can use the encrypted copy (no plaintext round-trip).
+  if (entry.storeOnServer && entry.id && aiUserLoggedIn) {
+    h["X-Ai-Key-Id"] = String(entry.id);
+  }
   if (key) {
     h["X-Ai-Api-Key"] = key;
     h["X-Gemini-Api-Key"] = key; // legacy
@@ -1861,14 +2146,15 @@ function aiAuthHeaders(extra = {}) {
 function applyAiStatus(data) {
   const entry = getActiveAiEntry();
   const clientKey = entry?.apiKey || "";
+  const hasVaultRef = !!(entry?.storeOnServer && entry?.id);
   const clientModel = entry?.model || "";
   const provider = entry?.provider || data.provider || "google";
   if (Array.isArray(data.providers) && data.providers.length) {
     aiProvidersCatalog = data.providers;
   }
   aiStatus = {
-    connected: !!clientKey || !!data.connected,
-    maskedKey: clientKey ? maskClientKey(clientKey) : data.maskedKey || null,
+    connected: !!clientKey || hasVaultRef || !!data.connected,
+    maskedKey: entry ? maskAiEntry(entry) : data.maskedKey || null,
     model:
       clientModel ||
       data.model ||
@@ -2164,12 +2450,18 @@ async function promptAddAiKey() {
         entry.storeOnServer = false;
         writeAiVault(vault);
         showBanner("บันทึกในเบราว์เซอร์แล้ว แต่ซิงก์ขึ้นเซิร์ฟเวอร์ไม่สำเร็จ");
-      } else if (!formOk) {
-        showBanner(
-          `บันทึกแล้ว · ${label} — แต่ยังใช้ดราฟ/กรอกไม่ได้ (ใช้ Gemini / OpenAI / Claude)`,
-        );
       } else {
-        showBanner(`พร้อมใช้ · ${label} · ${model} · ซิงก์เซิร์ฟเวอร์แล้ว`, "success");
+        // Drop plaintext from localStorage once the server vault holds it.
+        entry.maskedKey = maskClientKey(apiKey);
+        entry.apiKey = "";
+        writeAiVault(vault);
+        if (!formOk) {
+          showBanner(
+            `บันทึกแล้ว · ${label} — แต่ยังใช้ดราฟ/กรอกไม่ได้ (ใช้ Gemini / OpenAI / Claude)`,
+          );
+        } else {
+          showBanner(`พร้อมใช้ · ${label} · ${model} · ซิงก์เซิร์ฟเวอร์แล้ว`, "success");
+        }
       }
     } else if (!formOk) {
       showBanner(
@@ -2209,7 +2501,7 @@ async function openAiKeysManager() {
           <input type="radio" name="aiActiveKey" value="${escapeAttr(e.id)}" ${active ? "checked" : ""} />
           <span class="ai-key-meta">
             <strong>${escapeHtml(e.label || providerLabel(e.provider))} <span class="ai-key-badge">${escapeHtml(where)}</span></strong>
-            <small>${escapeHtml(providerLabel(e.provider))} · ${escapeHtml(e.model)} · ${escapeHtml(maskClientKey(e.apiKey))}</small>
+            <small>${escapeHtml(providerLabel(e.provider))} · ${escapeHtml(e.model)} · ${escapeHtml(maskAiEntry(e))}</small>
           </span>
           ${syncBtn}
           <button type="button" class="btn-ghost btn-compact ai-key-del" data-del="${escapeAttr(e.id)}" title="ลบคีย์นี้">ลบ</button>
@@ -2227,6 +2519,9 @@ async function openAiKeysManager() {
     overlay.className = "dialog-overlay";
     overlay.setAttribute("role", "dialog");
     overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-labelledby", "aiKeysDialogTitle");
+    overlay.setAttribute("aria-describedby", "aiKeysDialogBody");
+    let releaseFocus = () => {};
 
     const paint = () => {
       const vault = readAiVault();
@@ -2240,8 +2535,8 @@ async function openAiKeysManager() {
         : "ยังไม่ล็อกอิน · คีย์อยู่แค่เครื่องนี้";
       overlay.innerHTML = `
         <div class="dialog-card dialog-card-wide">
-          <h2 class="dialog-title">คีย์ AI ของคุณ</h2>
-          <p class="dialog-body">${escapeHtml(quotaHint)} · ${escapeHtml(syncHint)}</p>
+          <h2 class="dialog-title" id="aiKeysDialogTitle">คีย์ AI ของคุณ</h2>
+          <p class="dialog-body" id="aiKeysDialogBody">${escapeHtml(quotaHint)} · ${escapeHtml(syncHint)}</p>
           ${renderList()}
           <div class="dialog-actions dialog-actions-stack">
             <button type="button" class="btn-primary" data-ai-act="add" title="${allowAdd ? "เพิ่มคีย์ผู้ให้บริการ" : "แผนฟรีมีได้ 1 คีย์ — จ่ายแล้วถึงจะเพิ่มได้อีก"}">${allowAdd ? "เพิ่มคีย์" : "เพิ่มคีย์ (จ่ายแล้ว)"}</button>
@@ -2252,6 +2547,7 @@ async function openAiKeysManager() {
         </div>`;
 
       overlay.querySelector('[data-ai-act="close"]')?.addEventListener("click", () => {
+        releaseFocus();
         overlay.remove();
         document.removeEventListener("keydown", onKey);
         resolve("close");
@@ -2263,6 +2559,7 @@ async function openAiKeysManager() {
             paint();
             return;
           }
+          releaseFocus();
           overlay.remove();
           document.removeEventListener("keydown", onKey);
           const ok = await promptAddAiKey();
@@ -2283,7 +2580,7 @@ async function openAiKeysManager() {
           writeAiVault(vaultNow);
         }
         applyAiStatus({
-          connected: !!getClientAiKey(),
+          connected: !!hasClientAiCredentials(),
           byok: true,
           provider: getClientAiProvider(),
           models: providerModels(getClientAiProvider()),
@@ -2297,6 +2594,7 @@ async function openAiKeysManager() {
           e ? "success" : undefined,
         );
         setTimeout(() => showBanner(""), 2800);
+        releaseFocus();
         overlay.remove();
         document.removeEventListener("keydown", onKey);
         resolve("use");
@@ -2311,6 +2609,7 @@ async function openAiKeysManager() {
             vaultNow.entries.find((e) => e.id === checked?.value) ||
             getActiveAiEntry();
           if (!entry) return;
+          releaseFocus();
           overlay.remove();
           document.removeEventListener("keydown", onKey);
           showBanner("กำลังดึงรายการโมเดลจาก API…", "progress");
@@ -2330,8 +2629,8 @@ async function openAiKeysManager() {
             title: `โมเดล · ${entry.label}`,
             body:
               live.source === "live"
-                ? `${providerLabel(entry.provider)} · ${maskClientKey(entry.apiKey)} · รายการจาก API`
-                : `${providerLabel(entry.provider)} · ${maskClientKey(entry.apiKey)} · ดึงจาก API ไม่ได้ — ใช้รายการสำรองหรือพิมพ์เอง`,
+                ? `${providerLabel(entry.provider)} · ${maskAiEntry(entry)} · รายการจาก API`
+                : `${providerLabel(entry.provider)} · ${maskAiEntry(entry)} · ดึงจาก API ไม่ได้ — ใช้รายการสำรองหรือพิมพ์เอง`,
             select: {
               label: "โมเดล",
               value: coerceClientAiModel(
@@ -2385,14 +2684,27 @@ async function openAiKeysManager() {
               await deleteServerAiKey(entry.id);
               entry.storeOnServer = false;
               writeAiVault(vaultNow);
-              showBanner(`เลิกซิงก์「${entry.label}」แล้ว — เหลือแค่เครื่องนี้`, "success");
+              if (!String(entry.apiKey || "").trim()) {
+                showBanner(
+                  `เลิกซิงก์「${entry.label}」แล้ว — คีย์ไม่อยู่ในเครื่องแล้ว กรุณาใส่คีย์ใหม่ถ้าจะใช้ต่อ`,
+                  "warn",
+                );
+              } else {
+                showBanner(`เลิกซิงก์「${entry.label}」แล้ว — เหลือแค่เครื่องนี้`, "success");
+              }
             } else {
+              if (!String(entry.apiKey || "").trim()) {
+                showBanner("ไม่มีคีย์ในเครื่องให้ซิงก์ — ใส่คีย์ใหม่ก่อน");
+                return;
+              }
               const ok = await pushServerAiKey(entry);
               if (!ok) {
                 showBanner("ซิงก์ขึ้นเซิร์ฟเวอร์ไม่สำเร็จ");
                 return;
               }
               entry.storeOnServer = true;
+              entry.maskedKey = maskClientKey(entry.apiKey);
+              entry.apiKey = "";
               writeAiVault(vaultNow);
               showBanner(`ซิงก์「${entry.label}」ขึ้นเซิร์ฟเวอร์แล้ว`, "success");
             }
@@ -2409,14 +2721,28 @@ async function openAiKeysManager() {
             const id = btn.getAttribute("data-del");
             const vaultNow = readAiVault();
             const doomed = vaultNow.entries.find((e) => e.id === id);
-            if (doomed?.storeOnServer) await deleteServerAiKey(id);
-            vaultNow.entries = vaultNow.entries.filter((e) => e.id !== id);
-            if (vaultNow.activeId === id) {
-              vaultNow.activeId = vaultNow.entries[0]?.id || null;
+            if (!doomed) return;
+            const confirmed = await askStackedConfirm({
+              title: "ลบคีย์นี้?",
+              body: `ลบ「${doomed.label || providerLabel(doomed.provider)}」แล้วกู้คืนไม่ได้ — คีย์อื่นยังอยู่ครบ`,
+              confirmLabel: "ลบคีย์",
+              abortLabel: "ยกเลิก",
+            });
+            if (!confirmed) return;
+            const latest = readAiVault();
+            const still = latest.entries.find((e) => e.id === id);
+            if (!still) {
+              paint();
+              return;
             }
-            writeAiVault(vaultNow);
+            if (still.storeOnServer) await deleteServerAiKey(id);
+            latest.entries = latest.entries.filter((e) => e.id !== id);
+            if (latest.activeId === id) {
+              latest.activeId = latest.entries[0]?.id || null;
+            }
+            writeAiVault(latest);
             applyAiStatus({
-              connected: !!getClientAiKey(),
+              connected: !!hasClientAiCredentials(),
               byok: true,
               provider: getClientAiProvider(),
               models: providerModels(getClientAiProvider()),
@@ -2427,34 +2753,36 @@ async function openAiKeysManager() {
       });
     };
 
+    const finishManager = (value) => {
+      releaseFocus();
+      overlay.remove();
+      document.removeEventListener("keydown", onKey);
+      resolve(value);
+    };
     const onKey = (e) => {
       if (e.key === "Escape") {
-        overlay.remove();
-        document.removeEventListener("keydown", onKey);
-        resolve("abort");
+        if (document.getElementById("appConfirmDialog")) return;
+        finishManager("abort");
       }
     };
     overlay.addEventListener("click", (e) => {
-      if (e.target === overlay) {
-        overlay.remove();
-        document.removeEventListener("keydown", onKey);
-        resolve("abort");
-      }
+      if (e.target === overlay) finishManager("abort");
     });
     document.addEventListener("keydown", onKey);
     document.body.appendChild(overlay);
     paint();
+    releaseFocus = trapFocusInOverlay(overlay);
   });
 }
 
 /** @deprecated name kept for call sites — opens multi-provider key manager */
 async function connectGoogleAi() {
-  if (!getClientAiKey()) {
+  if (!hasClientAiCredentials()) {
     const added = await promptAddAiKey();
     if (state.file) renderForm();
     if (taggerSession) renderTaggerWorkspace();
-    if (added) return;
-    // Still allow opening manager (empty) via second path
+    // Cancel / abort on the add-key dialog must not open the manager.
+    if (!added) return;
   }
   await openAiKeysManager();
   if (state.file) renderForm();
@@ -2569,7 +2897,20 @@ function ensureListRows(name, itemFields) {
       if (row[f.name] === undefined) {
         if (f.type === "bool") row[f.name] = false;
         else if (f.type === "auto") row[f.name] = ""; // filled on submit by row index
+        else if (f.type === "list") row[f.name] = [{}];
         else row[f.name] = "";
+      }
+      if (f.type === "list" && Array.isArray(row[f.name])) {
+        for (const nested of row[f.name]) {
+          for (const nf of f.itemFields || []) {
+            if (nested[nf.name] === undefined) {
+              if (nf.type === "bool") nested[nf.name] = false;
+              else if (nf.type === "auto") nested[nf.name] = "";
+              else if (nf.type === "list") nested[nf.name] = [{}];
+              else nested[nf.name] = "";
+            }
+          }
+        }
       }
     }
   }
@@ -2698,7 +3039,7 @@ function renderEmpty() {
         </div>
       </section>
     </div>
-    <input class="sr-only" type="file" id="fileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple />
+    <input class="sr-only" type="file" id="fileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="อัปโหลดไฟล์เทมเพลต Word" />
     <div class="upload-layout upload-layout-secondary">
       <aside class="upload-side">
         <label class="upload-opt" for="showFullContent">
@@ -2838,7 +3179,7 @@ function renderTaggerUpload() {
       <div class="dropzone-title">ลากไฟล์ .docx ตัวอย่างมาวาง</div>
       <div class="dropzone-sub">หรือ <span class="linkish">เลือกไฟล์</span> แล้วไฮไลต์ข้อความเพื่อสร้างตัวแปร</div>
     </button>
-    <input class="sr-only" type="file" id="taggerFileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+    <input class="sr-only" type="file" id="taggerFileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" aria-label="อัปโหลดเอกสารตัวอย่างสำหรับสร้างเทมเพลต" />
     <p class="hint-error" id="taggerUploadError" hidden></p>
   `;
 
@@ -3131,10 +3472,10 @@ async function runTaggerAiDraft() {
   if (!taggerSession?.originalFile) return;
   if (taggerSession.busy || taggerSession.aiDrafting) return;
 
-  if (!aiStatus.connected && !getClientAiKey()) {
+  if (!aiStatus.connected && !hasClientAiCredentials()) {
     showBanner("ต้องใส่ AI API key ของคุณก่อน");
     await connectGoogleAi();
-    if (!aiStatus.connected && !getClientAiKey()) return;
+    if (!aiStatus.connected && !hasClientAiCredentials()) return;
   }
 
   const activeProvider = getClientAiProvider();
@@ -3742,7 +4083,7 @@ function renderTaggerWorkspace() {
     endTaggerChipRepResolve();
   }
 
-  const taggerAiOn = !!(aiStatus.connected || getClientAiKey());
+  const taggerAiOn = !!(aiStatus.connected || hasClientAiCredentials());
   const taggerAiKeyTitle = taggerAiOn
     ? `คีย์「${getClientAiLabel() || aiStatus.entryLabel || "AI"}」· ${aiStatus.providerLabel || providerLabel(getClientAiProvider())} · ${aiStatus.model || getClientAiModel() || ""} — เลือก provider / โมเดล / คีย์`
     : "ใส่ AI API key ของคุณ (หลายเจ้าได้ · เก็บในเบราว์เซอร์)";
@@ -3886,10 +4227,20 @@ function renderTaggerWorkspace() {
   // Escape .sheet backdrop-filter containing block so fixed = viewport.
   portalTaggerDialogsToBody();
 
-  document.getElementById("taggerCancel")?.addEventListener("click", () => {
+  document.getElementById("taggerCancel")?.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
     clearTaggerCancelAllUndo();
+    // Close only the tagger — never open the AI key dialog as a side effect.
+    document.getElementById("appDialog")?.remove();
+    document.getElementById("appConfirmDialog")?.remove();
+    if (taggerSession) {
+      taggerSession.busy = false;
+      taggerSession.aiDrafting = false;
+    }
     taggerSession = null;
     taggerPendingSelection = null;
+    hideBanner();
     renderEmpty();
   });
   document.getElementById("taggerCancelAll")?.addEventListener("click", () => {
@@ -3983,12 +4334,38 @@ function renderTaggerWorkspace() {
  * @param {any[]} layout
  * @param {string} content
  */
+function renderLayoutImageBlock(block) {
+  const alt = String(block?.alt || "").trim();
+  const part = block?.part === "header" || block?.part === "footer" ? block.part : "body";
+  const partLabel =
+    part === "header" ? "ในส่วนหัว" : part === "footer" ? "ในส่วนท้าย" : "";
+  const caption = alt
+    ? `รูปภาพ${partLabel ? ` ${partLabel}` : ""}: ${alt}`
+    : `รูปภาพในเอกสาร${partLabel ? ` ${partLabel}` : ""}`;
+  return `<div class="doc-layout-image" data-layout-part="${escapeAttr(part)}" contenteditable="false">
+    <span class="doc-layout-image-mark" aria-hidden="true"></span>
+    <span class="doc-layout-image-label">${escapeHtml(caption)}</span>
+  </div>`;
+}
+
 function renderTaggerPreview(layout, content) {
   if (layout?.length) {
+    let lastPart = "";
     return layout
       .map((b) => {
-        if (b.type === "text") return renderTaggerPlainBlock(b.text || "");
-        if (b.type === "table") return renderTaggerTableBlock(b);
+        const part = b.part === "header" || b.part === "footer" ? b.part : "";
+        const partLabel =
+          part && part !== lastPart
+            ? `<div class="doc-sheet-label">${part === "header" ? "ส่วนหัวเอกสาร" : "ส่วนท้ายเอกสาร"}</div>`
+            : "";
+        if (part) lastPart = part;
+        else lastPart = "";
+        if (b.type === "text") {
+          const roleClass = part ? ` tagger-para-${part}` : "";
+          return `${partLabel}<div class="tagger-para${roleClass}">${renderTaggerRichText(b.text || "")}</div>`;
+        }
+        if (b.type === "table") return partLabel + renderTaggerTableBlock(b);
+        if (b.type === "image") return partLabel + renderLayoutImageBlock(b);
         return "";
       })
       .join("");
@@ -4920,15 +5297,30 @@ function syncTaggerFloatButton(root, floatBtnHint) {
     hideCreateUi();
     return;
   }
-  // Prefer just under the selection; clamp into the visible viewport.
-  const top = Math.min(
-    Math.max(72, rect.bottom + 8),
-    Math.max(72, window.innerHeight - 56),
-  );
-  const preferredLeft = Math.min(
-    window.innerWidth - 360,
-    Math.max(12, rect.left + rect.width / 2 - 170),
-  );
+  // Prefer beside the selection so the next line stays readable; fall back above/below.
+  const floatWidth = 360;
+  const spaceRight = window.innerWidth - rect.right;
+  const spaceLeft = rect.left;
+  let preferredLeft;
+  let top;
+  if (spaceRight >= floatWidth + 16) {
+    preferredLeft = Math.min(window.innerWidth - floatWidth - 12, rect.right + 10);
+    top = Math.min(Math.max(72, rect.top), Math.max(72, window.innerHeight - 56));
+  } else if (spaceLeft >= floatWidth + 16) {
+    preferredLeft = Math.max(12, rect.left - floatWidth - 10);
+    top = Math.min(Math.max(72, rect.top), Math.max(72, window.innerHeight - 56));
+  } else {
+    preferredLeft = Math.min(
+      window.innerWidth - floatWidth - 12,
+      Math.max(12, rect.left + rect.width / 2 - floatWidth / 2),
+    );
+    const below = rect.bottom + 12;
+    const above = rect.top - 52;
+    top =
+      below + 56 < window.innerHeight
+        ? Math.max(72, below)
+        : Math.max(72, Math.min(above, window.innerHeight - 56));
+  }
   placeTaggerFloatRow(
     /** @type {HTMLElement[]} */ ([floatBtn, floatDeleteBtn, floatCopyBtn].filter(Boolean)),
     top,
@@ -8559,13 +8951,23 @@ async function openTaggedInFillForm() {
  * @param {boolean} preferContent
  */
 async function parseTemplatePayload(file, preferContent) {
+  const MAX_DOCX_BYTES = 25 * 1024 * 1024;
+  if (typeof file.size === "number" && file.size > MAX_DOCX_BYTES) {
+    const err = new Error("ไฟล์ใหญ่เกินไป (สูงสุด 25 MB)");
+    /** @type {any} */ (err).code = "FILE_TOO_LARGE";
+    throw err;
+  }
   const fd = new FormData();
   fd.append("file", file);
   if (preferContent) fd.append("includeContent", "1");
   const res = await fetch("/api/parse", { method: "POST", body: fd });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.error || `อ่านเทมเพลตไม่สำเร็จ: ${file.name}`);
+    const err = new Error(data.error || `อ่านเทมเพลตไม่สำเร็จ: ${file.name}`);
+    /** @type {any} */ (err).code = data.code || "";
+    /** @type {any} */ (err).suggestTagger = !!data.suggestTagger;
+    /** @type {any} */ (err).file = file;
+    throw err;
   }
   /** @type {FormField[]} */
   const fields = data.fields || [];
@@ -8734,10 +9136,22 @@ async function parseFile(file, errorEl) {
       void hydrateTemplateContent(multiSlots[0]);
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "เชื่อมต่อเซิร์ฟเวอร์ไม่ได้";
+    const msg = friendlyUploadError(err);
     if (errorEl) {
       errorEl.hidden = false;
       errorEl.textContent = msg;
+    }
+    if (err && typeof err === "object" && /** @type {any} */ (err).suggestTagger && /** @type {any} */ (err).file) {
+      const file = /** @type {any} */ (err).file;
+      showBanner(msg, "warn", {
+        action: {
+          label: "สร้างเทมเพลตจากเอกสารนี้",
+          onClick: () => {
+            void startTaggerSession(file, errorEl);
+          },
+        },
+      });
+      return;
     }
     showBanner(msg);
   }
@@ -9217,10 +9631,10 @@ async function runBatchFromSource(sourceFiles) {
     await runSourceMap(sourceFiles);
     return;
   }
-  if (!aiStatus.connected && !getClientAiKey()) {
+  if (!aiStatus.connected && !hasClientAiCredentials()) {
     showBanner("ต้องใส่ AI API key ของคุณก่อน");
     await connectGoogleAi();
-    if (!aiStatus.connected && !getClientAiKey()) return;
+    if (!aiStatus.connected && !hasClientAiCredentials()) return;
   }
   if (!providerFormAiSupported(getClientAiProvider())) {
     showBanner(
@@ -9395,11 +9809,56 @@ async function runBatchFromSource(sourceFiles) {
   }
 }
 
-/** Fields covered by inline document preview (text + lists). Images stay in sidebar form. */
+/** Collect {{tag}} names visible in the current layout/content preview. */
+function previewCoveredFieldNames() {
+  /** @type {Set<string>} */
+  const names = new Set();
+  const collect = (text) => {
+    const re = /\{\{([^{}]+)\}\}/g;
+    let m;
+    while ((m = re.exec(String(text || "")))) {
+      const inner = String(m[1] || "").trim();
+      if (!inner || inner.startsWith("#") || inner.startsWith("/")) continue;
+      names.add(inner);
+      // Also identity-ish cores for bool/auto
+      if (inner.startsWith("+")) names.add(inner.slice(1).trim());
+      const bool = /^([^?]+)\?/.exec(inner);
+      if (bool) names.add(bool[1].trim());
+    }
+  };
+  for (const b of state.fileLayout || []) {
+    if (b.type === "text") collect(b.text);
+    else if (b.type === "table") {
+      for (const row of b.headerRows || []) for (const c of row) collect(c?.text || c);
+      for (const c of b.templateCells || []) collect(c?.text || c);
+      for (const row of b.trailingRows || []) for (const c of row) collect(c?.text || c);
+      for (const row of b.staticRows || []) for (const c of row) collect(c?.text || c);
+      if (b.listName) names.add(b.listName);
+    }
+  }
+  collect(state.fileContent || "");
+  return names;
+}
+
+/**
+ * Fields covered by inline document preview (text + lists).
+ * Images always stay in the sidebar; also surface any field whose tag is not
+ * visible in the preview (e.g. header-only before layout includes that part).
+ */
 function fieldsOutsidePreview() {
   if (!state.showFullContent) return state.fields;
   if (!state.fileLayout.length && !state.fileContent) return state.fields;
-  return state.fields.filter((f) => f.type === "image");
+  const covered = previewCoveredFieldNames();
+  return state.fields.filter((f) => {
+    if (f.type === "image") return true;
+    if (covered.has(f.name)) return false;
+    for (const a of f.aliases || []) {
+      if (covered.has(a)) return false;
+    }
+    // List may be referenced only by {{#name}} which we add via listName.
+    if (f.type === "list" && covered.has(f.name)) return false;
+    return true;
+  });
 }
 
 function renderForm() {
@@ -9425,7 +9884,7 @@ function renderForm() {
   const extraFields =
     fieldsHtml &&
     `<div class="extra-fields">
-      ${useDocLayout ? `<h2 class="extra-fields-title">ฟิลด์เพิ่มเติม (รูปภาพ)</h2>` : ""}
+      ${useDocLayout ? `<h2 class="extra-fields-title">ฟิลด์เพิ่มเติม</h2>` : ""}
       ${fieldsHtml}
     </div>`;
 
@@ -9438,11 +9897,12 @@ function renderForm() {
           ${aiStatus.connected ? `AI · ${escapeHtml(getClientAiLabel() || aiStatus.providerLabel || String(aiStatus.model || "พร้อม").replace(/^gemini-/i, ""))}` : "ใส่ AI key"}
         </button>
         <button type="button" class="btn-secondary btn-compact" id="attachSource" ${aiStatus.connected ? "" : "disabled"} title="${aiStatus.connected ? (isMultiMode() ? "แนบต้นทาง — ส่ง Export JSON ให้ AI กรอกค่า แล้วนำ JSON กลับมาใส่จอ" : "แนบ PDF / Word / รูป — ส่งโครง JSON ให้ AI กรอกค่า") : "ต้องใส่ AI key ของคุณก่อน"}">${isMultiMode() ? "ต้นทาง → ให้ AI กรอก JSON" : "แนบเอกสารต้นทาง"}</button>
-        <input class="sr-only" type="file" id="attachSourceInput" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple />
+        <input class="sr-only" type="file" id="attachSourceInput" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple aria-label="แนบเอกสารต้นทางสำหรับ AI กรอกค่า" />
         <button type="button" class="btn-secondary btn-compact" id="exportJson" title="ส่งออกค่าที่กรอกเป็น JSON">Export JSON</button>
         <button type="button" class="btn-secondary btn-compact" id="importJson" title="นำเข้าค่าจากไฟล์ JSON">Import JSON</button>
-        <input class="sr-only" type="file" id="importJsonInput" accept="application/json,.json" />
-        <input class="sr-only" type="file" id="addTemplateInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple />
+        <input class="sr-only" type="file" id="importJsonInput" accept="application/json,.json" aria-label="เลือกไฟล์ JSON เพื่อนำเข้าค่า" />
+        <input class="sr-only" type="file" id="addTemplateInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="เลือกไฟล์เทมเพลต Word เพิ่ม" />
+        <button type="button" class="btn-secondary btn-compact" id="openTaggerFromForm" title="สร้างเทมเพลตใหม่จากเอกสารตัวอย่าง">สร้างเทมเพลต</button>
         <button type="button" class="linkish" id="goHomeBtn" title="กลับไปหน้าอัปโหลดเทมเพลต">← หน้าหลัก</button>
       </div>
     </div>
@@ -9468,6 +9928,23 @@ function renderForm() {
   });
   document.getElementById("loadNamedDraftBtn")?.addEventListener("click", () => {
     void openNamedDraftPicker();
+  });
+
+  document.getElementById("openTaggerFromForm")?.addEventListener("click", () => {
+    void (async () => {
+      const choice = await askDialog({
+        title: "สร้างเทมเพลตจากเอกสาร?",
+        body: "จะเปิดโหมดใส่แท็กจากเอกสารตัวอย่าง — ค่าที่กรอกในเทมเพลตปัจจุบันยังอยู่ในดราฟอัตโนมัติถ้าเคยบันทึกไว้",
+        actions: [
+          { id: "ok", label: "เปิดตัวสร้างเทมเพลต", kind: "primary" },
+          { id: "abort", label: "ยกเลิก", kind: "ghost" },
+        ],
+      });
+      if (choice !== "ok") return;
+      hideBanner();
+      clearFieldErrors();
+      renderTaggerUpload();
+    })();
   });
 
   document.getElementById("goHomeBtn")?.addEventListener("click", async () => {
@@ -9511,7 +9988,7 @@ function renderForm() {
   });
   const attachInput = /** @type {HTMLInputElement | null} */ (document.getElementById("attachSourceInput"));
   document.getElementById("attachSource")?.addEventListener("click", () => {
-    if (!aiStatus.connected && !getClientAiKey()) {
+    if (!aiStatus.connected && !hasClientAiCredentials()) {
       showBanner("ต้องใส่ AI API key ของคุณก่อนถึงจะแนบเอกสารได้");
       void connectGoogleAi();
       return;
@@ -9534,6 +10011,9 @@ function renderForm() {
       persistActiveSlot();
       const slot = multiSlots.find((s) => s.id === id);
       if (!slot) return;
+      // Drop validation UI from the previous template so errors do not carry over.
+      hideBanner();
+      clearFieldErrors();
       applySlotToState(slot);
       for (const f of state.fields) {
         if (f.type === "list") ensureListRows(f.name, f.itemFields);
@@ -9719,12 +10199,67 @@ function importValuesPayload(data, opts = {}) {
   if (!data || typeof data !== "object") {
     throw new Error("invalid values json");
   }
-  if (data.format && data.format !== "docx-form-values") {
+  if (!data.format || data.format !== "docx-form-values") {
     throw new Error("not docx-form-values");
+  }
+  if (data.version != null && Number(data.version) !== 1) {
+    throw new Error("unsupported values json version");
+  }
+  if (!data.values || typeof data.values !== "object" || Array.isArray(data.values)) {
+    throw new Error("values object required");
+  }
+  const keys = Object.keys(data.values);
+  if (keys.length === 0 && !(data.images && Object.keys(data.images).length)) {
+    throw new Error("empty values");
+  }
+  const typeErrors = validateImportedValueTypes(data);
+  if (typeErrors.length) {
+    throw new Error(`type mismatch: ${typeErrors.slice(0, 3).join("; ")}`);
   }
   applyValuesWithEmptySkip(data, {
     treatMissingImagesAsSkip: opts.treatMissingImagesAsSkip !== false,
   });
+}
+
+/**
+ * Validate imported JSON value types against the open template fields.
+ * @param {any} data
+ * @returns {string[]}
+ */
+function validateImportedValueTypes(data) {
+  /** @type {string[]} */
+  const errors = [];
+  const values =
+    data.values && typeof data.values === "object" && !Array.isArray(data.values)
+      ? data.values
+      : {};
+  for (const f of state.fields) {
+    if (!Object.prototype.hasOwnProperty.call(values, f.name)) continue;
+    const v = values[f.name];
+    if (f.type === "text") {
+      if (v != null && typeof v === "object") {
+        errors.push(`${f.name}: ต้องเป็นข้อความ`);
+      }
+    } else if (f.type === "bool") {
+      if (typeof v !== "boolean" && v !== 0 && v !== 1 && v !== "true" && v !== "false") {
+        errors.push(`${f.name}: ต้องเป็นค่าติ๊ก (true/false)`);
+      }
+    } else if (f.type === "list") {
+      if (!Array.isArray(v)) {
+        errors.push(`${f.name}: ต้องเป็นรายการ (อาร์เรย์)`);
+      } else {
+        for (let i = 0; i < v.length; i += 1) {
+          if (v[i] != null && typeof v[i] !== "object") {
+            errors.push(`${f.name}[${i}]: ต้องเป็นอ็อบเจ็กต์แถว`);
+            break;
+          }
+        }
+      }
+    } else if (f.type === "image") {
+      /* images come from data.images */
+    }
+  }
+  return errors;
 }
 
 /**
@@ -9914,8 +10449,18 @@ async function importValuesJson(file) {
     const text = await file.text();
     const data = JSON.parse(text);
     if (!data || typeof data !== "object") throw new Error("invalid");
-    if (data.format && data.format !== "docx-form-values") {
+    if (!data.format || data.format !== "docx-form-values") {
       showBanner("ไฟล์ JSON นี้ไม่ใช่รูปแบบ docx-form-values");
+      return;
+    }
+    if (
+      !data.values ||
+      typeof data.values !== "object" ||
+      Array.isArray(data.values) ||
+      (Object.keys(data.values).length === 0 &&
+        !(data.images && Object.keys(data.images).length))
+    ) {
+      showBanner("ไฟล์ JSON ไม่มีค่าที่นำเข้าได้");
       return;
     }
 
@@ -9940,7 +10485,14 @@ async function importValuesJson(file) {
     setTimeout(() => showBanner(""), 2400);
   } catch (err) {
     console.warn(err);
-    showBanner("อ่าน JSON ไม่ได้ — ตรวจว่าเป็นไฟล์ที่ Export จาก docx-form");
+    const msg = err instanceof Error ? err.message : "";
+    if (/type mismatch/i.test(msg)) {
+      showBanner(`ชนิดข้อมูลไม่ตรงกับฟิลด์ — ${msg.replace(/^type mismatch:\s*/i, "")}`);
+    } else if (/empty values/i.test(msg)) {
+      showBanner("ไฟล์ JSON ไม่มีค่าที่นำเข้าได้");
+    } else {
+      showBanner("อ่าน JSON ไม่ได้ — ตรวจว่าเป็นไฟล์ที่ Export จาก docx-form");
+    }
   }
 }
 
@@ -10324,10 +10876,10 @@ async function runSourceMap(files) {
     showBanner("อัปโหลดเทมเพลต .docx ก่อน แล้วค่อยแนบเอกสารต้นทาง");
     return;
   }
-  if (!aiStatus.connected && !getClientAiKey()) {
+  if (!aiStatus.connected && !hasClientAiCredentials()) {
     showBanner("ต้องใส่ AI API key ของคุณก่อนถึงจะแนบเอกสารได้");
     await connectGoogleAi();
-    if (!aiStatus.connected && !getClientAiKey()) return;
+    if (!aiStatus.connected && !hasClientAiCredentials()) return;
   }
   if (!providerFormAiSupported(getClientAiProvider())) {
     showBanner(
@@ -10483,6 +11035,20 @@ async function runSourceMap(files) {
 }
 
 function finishSourceMapResult(data) {
+  const aiMeta = data?.ai && typeof data.ai === "object" ? data.ai : {};
+  const fillStats = aiMeta.fillStats || {};
+  const warnings = Array.isArray(aiMeta.warnings) ? aiMeta.warnings : [];
+  const filledCount = Number(fillStats.filled || 0);
+  const relevant = aiMeta.relevant !== false && filledCount > 0;
+
+  if (!relevant || filledCount === 0) {
+    sourceMapSession = null;
+    renderForm();
+    const note = warnings[0] || "ไม่พบค่าที่ใช้ได้จากเอกสารต้นทาง — ค่าที่กรอกไว้ยังคงเดิม";
+    showBanner(note, "warn");
+    return;
+  }
+
   // Prefer AI-filled Export JSON → same Import path as the Import JSON button.
   const payload =
     data.valuesJson && typeof data.valuesJson === "object"
@@ -10500,8 +11066,14 @@ function finishSourceMapResult(data) {
     persistActiveSlot();
     renderForm();
     scheduleSaveDraft();
-    showBanner("Import JSON จาก AI ลงฟอร์มแล้ว — ตรวจทานแล้วค่อยสร้างเอกสาร", "success");
-    setTimeout(() => showBanner(""), 3600);
+    const truncNote = aiMeta.sourceTruncated
+      ? " · ต้นทางถูกตัด — ข้อมูลช่วงท้ายอาจไม่ครบ"
+      : "";
+    showBanner(
+      `Import JSON จาก AI ลงฟอร์มแล้ว (${filledCount} ช่อง)${truncNote} — ตรวจทานแล้วค่อยสร้างเอกสาร`,
+      aiMeta.sourceTruncated ? "warn" : "success",
+    );
+    setTimeout(() => showBanner(""), 4200);
   } catch (err) {
     console.warn(err);
     sourceMapSession = null;
@@ -10513,10 +11085,24 @@ function finishSourceMapResult(data) {
 /** Render structured layout from Word (real tables + paragraph text). */
 function renderDocumentFromLayout(blocks) {
   if (!blocks?.length) return `<p class="dropzone-hint">ไม่มีข้อความในไฟล์</p>`;
+  let lastPart = "";
   return blocks
     .map((b) => {
-      if (b.type === "text") return renderDocumentLayout(b.text || "");
-      if (b.type === "table") return renderWordTableBlock(b);
+      const part = b.part === "header" || b.part === "footer" ? b.part : "";
+      const partLabel =
+        part && part !== lastPart
+          ? `<div class="doc-sheet-label">${part === "header" ? "ส่วนหัวเอกสาร" : "ส่วนท้ายเอกสาร"}</div>`
+          : "";
+      if (part) lastPart = part;
+      else lastPart = "";
+      if (b.type === "text") {
+        const roleClass = part ? ` doc-para-${part}` : "";
+        const inner = renderDocumentLayout(b.text || "");
+        const body = roleClass ? `<div class="${roleClass.trim()}">${inner}</div>` : inner;
+        return partLabel + body;
+      }
+      if (b.type === "table") return partLabel + renderWordTableBlock(b);
+      if (b.type === "image") return partLabel + renderLayoutImageBlock(b);
       return "";
     })
     .join("");
@@ -10937,15 +11523,34 @@ function maybeMorphTextControl(el) {
 /** @param {HTMLInputElement | HTMLTextAreaElement} el */
 /** Clear validation highlight on one control when the user fills it. */
 function clearOneFieldError(el) {
-  if (!el || !String(el.value ?? "").trim()) return;
+  if (!el) return;
+  const raw = String(el.value ?? "").trim();
+  if (!raw) return;
+  const fieldName = el.name || el.dataset.docField || el.dataset.item || "";
+  const listName = el.dataset.list;
+  /** @type {any} */
+  let fieldMeta = null;
+  if (listName) {
+    const listField = state.fields.find((f) => f.type === "list" && f.name === listName);
+    fieldMeta =
+      listField?.type === "list"
+        ? listField.itemFields.find((x) => x.name === fieldName)
+        : null;
+  } else {
+    fieldMeta = state.fields.find((f) => f.name === fieldName) || null;
+  }
+  if (isEmailTypedField(fieldName, fieldMeta) && !isValidEmailValue(raw)) return;
   el.removeAttribute("aria-invalid");
   const wrap =
     el.closest(".doc-blank-wrap") ||
+    el.closest(".doc-table-cell-wrap") ||
     el.closest(".field") ||
     el.parentElement;
-  if (!wrap?.classList.contains("has-error")) return;
-  wrap.classList.remove("has-error");
-  wrap.querySelectorAll(".field-error").forEach((n) => n.remove());
+  if (wrap?.classList.contains("has-error")) {
+    wrap.classList.remove("has-error");
+    wrap.querySelectorAll(".field-error").forEach((n) => n.remove());
+  }
+  maybeClearValidationBanner();
 }
 
 function wireOneTextValueControl(el) {
@@ -10959,7 +11564,19 @@ function wireOneTextValueControl(el) {
       if (item == null || Number.isNaN(row)) return;
       if (!state.values[list]) state.values[list] = [];
       if (!state.values[list][row]) state.values[list][row] = {};
-      state.values[list][row][item] = el.value;
+      const nestedList = el.dataset.nestedList;
+      const nestedRow = Number(el.dataset.nestedRow);
+      if (nestedList && !Number.isNaN(nestedRow)) {
+        if (!Array.isArray(state.values[list][row][nestedList])) {
+          state.values[list][row][nestedList] = [];
+        }
+        if (!state.values[list][row][nestedList][nestedRow]) {
+          state.values[list][row][nestedList][nestedRow] = {};
+        }
+        state.values[list][row][nestedList][nestedRow][item] = el.value;
+      } else {
+        state.values[list][row][item] = el.value;
+      }
       clearOneFieldError(el);
       scheduleSaveDraft();
       maybeMorphTextControl(el);
@@ -11498,6 +12115,36 @@ function renderField(field) {
                 </label>
               </div>`;
                 }
+                if (item.type === "list") {
+                  const nestedRows = Array.isArray(row[item.name]) ? row[item.name] : [];
+                  const nestedHtml = nestedRows
+                    .map((nrow, nidx) => {
+                      const nestedInputs = (item.itemFields || [])
+                        .map((nitem) => {
+                          if (nitem.type === "list") {
+                            return `<p class="dropzone-hint">ลูปซ้อนลึกเกินที่ฟอร์มรองรับ</p>`;
+                          }
+                          if (nitem.type === "auto") {
+                            return `<div class="field" style="margin:0"><label>${escapeHtml(nitem.label || nitem.name)} <span class="badge">รันเอง</span></label>${renderAutoRunDisplay(nitem.label || nitem.name, nidx)}</div>`;
+                          }
+                          if (nitem.type === "bool") {
+                            const nchecked = !!nrow[nitem.name];
+                            return `<label class="bool-opt"><input type="checkbox" data-kind="bool" data-list="${escapeAttr(field.name)}" data-row="${idx}" data-nested-list="${escapeAttr(item.name)}" data-nested-row="${nidx}" data-item="${escapeAttr(nitem.name)}" ${nchecked ? "checked" : ""} ${skipped ? "disabled" : ""} /><span>${escapeHtml(nitem.label || nitem.name)}</span></label>`;
+                          }
+                          return `<div class="field" style="margin:0"><label>${escapeHtml(nitem.name)}</label><input type="text" data-kind="text" data-list="${escapeAttr(field.name)}" data-row="${idx}" data-nested-list="${escapeAttr(item.name)}" data-nested-row="${nidx}" data-item="${escapeAttr(nitem.name)}" value="${escapeAttr(String(nrow[nitem.name] ?? ""))}" ${skipped ? "disabled" : ""} /></div>`;
+                        })
+                        .join("");
+                      return `<div class="doc-list-row" style="margin:0.35rem 0 0.35rem 0.75rem"><div class="doc-list-row-head"><span>${escapeHtml(item.name)} · แถว ${nidx + 1}</span></div><div class="doc-list-row-body">${nestedInputs}</div></div>`;
+                    })
+                    .join("");
+                  return `
+              <div class="field" style="margin:0">
+                <div class="field-head">
+                  <label>${escapeHtml(item.name)} <span class="badge">ลูปซ้อน</span></label>
+                </div>
+                ${nestedHtml || `<p class="row-empty">ยังไม่มีแถวย่อย</p>`}
+              </div>`;
+                }
                 return `
               <div class="field ${itemSkipped ? "is-skipped" : ""}" style="margin:0">
                 <div class="field-head">
@@ -11547,12 +12194,24 @@ function wireFieldEvents() {
       state.skip[name] = t.checked;
       if (t.checked) {
         const field = state.fields.find((f) => f.name === name);
-        if (field?.type === "text") state.values[name] = "";
+        if (field?.type === "text" || field?.type === "email") state.values[name] = "";
         if (field?.type === "bool") state.values[name] = false;
         if (field?.type === "image") state.images[name] = null;
       }
       // Unchecking ข้าม re-enables the bool/text control via re-render
+      const keepValidation = validationBannerActive;
       renderForm();
+      if (keepValidation) {
+        const still = validateBeforeSubmit();
+        if (!still.length) hideBanner();
+        else {
+          showBanner(
+            `ยังมีช่องที่ไม่ได้กรอก (${still.length}) — กรอกให้ครบ หรือติ๊ก “ข้าม” ก่อนสร้างเอกสาร`,
+            "error",
+            { validation: true },
+          );
+        }
+      }
       scheduleSaveDraft();
     });
   });
@@ -11574,7 +12233,12 @@ function wireFieldEvents() {
           : null;
         state.values[list][row][item] = itemField?.type === "bool" ? false : "";
       }
+      const keepValidation = validationBannerActive;
       renderForm();
+      if (keepValidation) {
+        const still = validateBeforeSubmit();
+        if (!still.length) hideBanner();
+      }
       scheduleSaveDraft();
     });
   });
@@ -11603,8 +12267,20 @@ function wireFieldEvents() {
         if (item == null || Number.isNaN(row)) return;
         if (!state.values[list]) state.values[list] = [];
         if (!state.values[list][row]) state.values[list][row] = {};
-        state.values[list][row][item] = t.checked;
-        if (state.rowSkip[list]?.[row]) state.rowSkip[list][row][item] = false;
+        const nestedList = t.dataset.nestedList;
+        const nestedRow = Number(t.dataset.nestedRow);
+        if (nestedList && !Number.isNaN(nestedRow)) {
+          if (!Array.isArray(state.values[list][row][nestedList])) {
+            state.values[list][row][nestedList] = [];
+          }
+          if (!state.values[list][row][nestedList][nestedRow]) {
+            state.values[list][row][nestedList][nestedRow] = {};
+          }
+          state.values[list][row][nestedList][nestedRow][item] = t.checked;
+        } else {
+          state.values[list][row][item] = t.checked;
+          if (state.rowSkip[list]?.[row]) state.rowSkip[list][row][item] = false;
+        }
         scheduleSaveDraft();
         return;
       }
@@ -11628,6 +12304,7 @@ function wireFieldEvents() {
       const blank = {};
       for (const item of field.itemFields) {
         if (item.type === "bool") blank[item.name] = false;
+        else if (item.type === "list") blank[item.name] = [{}];
         else blank[item.name] = "";
       }
       state.values[list].push(blank);
@@ -11723,38 +12400,52 @@ function buildValuesPayloadFrom(snap) {
       values[f.name] = snap.skip[f.name]
         ? ""
         : String(snap.values[f.name] ?? "");
+      for (const a of f.aliases || []) values[a] = values[f.name];
     } else if (f.type === "bool") {
       const on = !snap.skip[f.name] && !!snap.values[f.name];
       values[f.name] = on ? f.trueText : f.falseText;
+      for (const a of f.aliases || []) values[a] = values[f.name];
     } else if (f.type === "auto") {
       values[f.name] = "1";
+      for (const a of f.aliases || []) values[a] = values[f.name];
     } else if (f.type === "image") {
       if (snap.skip[f.name] || !snap.images[f.name]) {
         values[f.name] = "";
+        for (const a of f.aliases || []) values[a] = "";
       }
     } else if (f.type === "list") {
       if (snap.skip[f.name]) {
         values[f.name] = [];
       } else {
-        const rows = (snap.values[f.name] || []).map((row, idx) => {
-          /** @type {Record<string, string>} */
+        const mapRow = (itemFields, row, idx, listName) => {
+          /** @type {Record<string, unknown>} */
           const out = {};
-          for (const item of f.itemFields) {
+          for (const item of itemFields) {
             if (item.type === "auto") {
               out[item.name] = String(idx + 1);
             } else if (item.type === "bool") {
               const on =
-                !snap.rowSkip[f.name]?.[idx]?.[item.name] && !!row[item.name];
+                !snap.rowSkip[listName]?.[idx]?.[item.name] && !!row[item.name];
               out[item.name] = on ? item.trueText : item.falseText;
+            } else if (item.type === "list") {
+              const nested = Array.isArray(row[item.name]) ? row[item.name] : [];
+              out[item.name] = nested.map((nr, nidx) =>
+                mapRow(item.itemFields || [], nr || {}, nidx, item.name),
+              );
             } else {
-              out[item.name] = snap.rowSkip[f.name]?.[idx]?.[item.name]
+              out[item.name] = snap.rowSkip[listName]?.[idx]?.[item.name]
                 ? ""
                 : String(row[item.name] ?? "");
             }
+            for (const a of item.aliases || []) out[a] = out[item.name];
           }
           return out;
-        });
+        };
+        const rows = (snap.values[f.name] || []).map((row, idx) =>
+          mapRow(f.itemFields, row, idx, f.name),
+        );
         values[f.name] = rows;
+        for (const a of f.aliases || []) values[a] = rows;
       }
     }
   }
@@ -11818,6 +12509,8 @@ async function createAllTemplatesZip() {
         : `${missing.slice(0, 8).join(", ")} และอีก ${missing.length - 8} ช่อง`;
     showBanner(
       `ยังมีช่องว่างในบางเทมเพลต (${missing.length}): ${listed} — กรอก/ข้ามให้ครบก่อนสร้างทั้งหมด`,
+      "error",
+      { validation: true },
     );
     // Jump to the first incomplete template and paint empty cells.
     if (firstBad && firstBad.id !== multiActiveId) {
@@ -11926,6 +12619,8 @@ async function onSubmit(e) {
         : `${missing.slice(0, 10).join(", ")} และอีก ${missing.length - 10} ช่อง`;
     showBanner(
       `ยังมีช่องที่ไม่ได้กรอก (${missing.length}): ${listed} — กรอกให้ครบ หรือติ๊ก “ข้าม” ก่อนสร้างเอกสาร`,
+      "error",
+      { validation: true },
     );
     return;
   }
@@ -12075,8 +12770,8 @@ async function boot() {
       const appEl = document.getElementById("app");
       if (appEl) {
         appEl.innerHTML =
-          `<p class="subhead">โหลดหน้าไม่สำเร็จ — รีเฟรชแรง หรือเปิด Console ดู error</p>` +
-          `<pre class="hint-error">${escapeHtml(String(err?.message || err))}</pre>`;
+          `<p class="subhead">โหลดหน้าไม่สำเร็จ — ลองรีเฟรชใหม่</p>` +
+          `<pre class="hint-error">${escapeHtml(friendlyUploadError(err))}</pre>`;
       }
       showBanner("โหลดหน้าไม่สำเร็จ — ลองรีเฟรชใหม่");
     }

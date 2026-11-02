@@ -18,6 +18,7 @@ import {
   getAnthropicApiBase,
   getGeminiApiBase,
 } from "./ai-providers";
+import { VAR_NAME_RE as NAME_RE } from "./field-names";
 import {
   extractTaggerPlainText,
   listEmptyTableCellHints,
@@ -87,7 +88,6 @@ const MAX_SUGGESTIONS = 80;
 const CONTACT_ENRICH_SLACK = 12;
 const MAX_FIELD_PLAIN = 200;
 const MAX_LIST_PLAIN = 1200;
-const NAME_RE = /^[\w\u0E00-\u0E7F.-]+$/u;
 /** Safety caps only — prefer sending the full document so the model decides. */
 const XML_PROMPT_MAX = 800_000;
 const PLAIN_PROMPT_MAX = 800_000;
@@ -787,7 +787,11 @@ Kinds / modes (schema the app understands — pick what fits the document):
 - "list" — repeating prose OUTSIDE tables: wrap the FIRST unit only (mode "wrap"). Name like "${listNameExample}". Tag inner samples inside that wrap; leave later units untagged.
 - "list-table" — repeating TABLE rows: wrap ONLY the first body/data row (mode "wrap-row"). Skip headers and later sample rows. Usually also emit replace/auto/bool for each non-empty sample cell on that prototype row (incl. first column), e.g. ${nameExample}. Empty meaningful cells → fill-empty-tc with cellIndex (name e.g. ${emptyNameExample}).
 - Prefer sample fill-in spots over headings/boilerplate as the replaced span (captions go in "label").
-- No nested lists. One wrap per repeating sample group / table.
+- Distinct meanings → distinct names even when values look alike: buyer vs seller address, buyer vs seller tax id, document date vs document number, party A vs party B phone. Derive names from the nearby label/role (e.g. ที่อยู่ผู้ซื้อ / ที่อยู่ผู้ขาย), never reuse one name for two roles.
+- Leave fixed letterhead, court/agency titles, section headings, logos captions, and other non-editable boilerplate as plain text — do NOT turn them into variables.
+- Cover typical fill blanks: end dates, signature lines, name lines, amounts, and empty table cells that a user would fill. If you intentionally skip a blank, omit it only when it is clearly instructional/boilerplate.
+- Repeating table body rows MUST use kind "list-table" (wrap-row on the first data row). Do not emit a flat text tag per cell across every sample row.
+- Nested lists are unsupported — one wrap level only. One wrap per repeating sample group / table.
 ${nameLanguagePromptRule(opts.nameLanguage)}
 ${truncNotes ? `\nNOTE: ${truncNotes}\n` : ""}
 FILE: ${opts.filename}
@@ -1364,22 +1368,30 @@ export function validateAiTagSuggestions(
     pending.push({ raw, kind, listLike: isListKind(kind), fillEmpty });
   }
 
-  // Seed list-table wrap-row for every prototype table that has SAMPLE/EMPTY
-  // hints. Models often skip Thai multi-row header tables when hints were
-  // missing historically; seeding before replaces keeps wrap soft-occupy first.
-  if (xml && (sampleHints.length || emptyHints.length)) {
+  // Seed list-table wrap-row for every detected prototype table row.
+  // Prefer sample/empty hints when present; otherwise use the prototype span
+  // itself so headerless repeating tables still get a loop suggestion.
+  if (xml && prototypes.length) {
     const tablesNeedingWrap = new Set<number>();
+    for (const p of prototypes) tablesNeedingWrap.add(p.tableIndex);
     for (const h of sampleHints) tablesNeedingWrap.add(h.tableIndex);
     for (const h of emptyHints) tablesNeedingWrap.add(h.tableIndex);
     for (const ti of tablesNeedingWrap) {
       const samples = sampleHints.filter((h) => h.tableIndex === ti);
       const empties = emptyHints.filter((h) => h.tableIndex === ti);
+      const proto = prototypes.find((p) => p.tableIndex === ti);
       const pick = samples[0] || empties[0];
-      if (!pick) continue;
+      const protoAnchor =
+        proto && proto.plainEnd > proto.plainStart
+          ? plainText.slice(proto.plainStart, proto.plainEnd)
+          : "";
+      const anchor = pick?.rowAnchor || protoAnchor;
+      const occurrence = pick?.occurrence ?? 0;
+      if (!anchor) continue;
       pending.push({
         raw: {
-          plainText: pick.rowAnchor,
-          occurrence: pick.occurrence,
+          plainText: anchor,
+          occurrence,
           name: inventListTableName(samples, empties, ti, lang),
           kind: "list-table",
           mode: "wrap-row",

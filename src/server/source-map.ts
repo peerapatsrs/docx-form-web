@@ -1,4 +1,4 @@
-import type { FormField } from "./docx-engine";
+import type { FormField, ListItemField } from "./docx-engine";
 import { detectKind, type ExtractedSource } from "./source-extract";
 
 export type MapCandidate = {
@@ -242,6 +242,46 @@ export type DocxFormValuesJson = {
   images: Record<string, unknown>;
 };
 
+/**
+ * True when a value carries real fill content.
+ * Empty / blank / false / nullish containers do not count (nested-aware).
+ */
+export function isFilledValue(value: unknown): boolean {
+  if (value == null) return false;
+  if (typeof value === "boolean") return value === true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.some((item) => isFilledValue(item));
+  if (typeof value === "object") {
+    return Object.values(value as Record<string, unknown>).some((item) =>
+      isFilledValue(item),
+    );
+  }
+  return false;
+}
+
+/** Count non-empty / non-all-skip values after an AI fill. */
+export function countFilledValues(valuesJson: DocxFormValuesJson): {
+  total: number;
+  filled: number;
+  skipped: number;
+} {
+  const values = (valuesJson?.values || {}) as Record<string, unknown>;
+  const skip = (valuesJson?.skip || {}) as Record<string, boolean>;
+  const keys = Object.keys(values);
+  let filled = 0;
+  let skipped = 0;
+  for (const k of keys) {
+    if (skip[k]) {
+      skipped += 1;
+      continue;
+    }
+    if (isFilledValue(values[k])) filled += 1;
+    else skipped += 1;
+  }
+  return { total: keys.length, filled, skipped };
+}
+
 export function toDocxFormValuesJson(
   templateFilename: string,
   fields: FormField[],
@@ -331,9 +371,18 @@ export function mergeAiIntoValuesJson(
   };
 }
 
+function writeAliased(
+  out: Record<string, unknown>,
+  field: { name: string; aliases?: string[] },
+  value: unknown,
+) {
+  out[field.name] = value;
+  for (const a of field.aliases || []) out[a] = value;
+}
+
 /**
  * Convert draft values/skip into the payload shape expected by fillTemplate
- * (bool → trueText/falseText, auto row numbers, skipped → "" / []).
+ * (bool → trueText/falseText, auto row numbers, skipped → "" / [], nested lists).
  * Mirrors the browser buildValuesPayload().
  */
 export function toFillValues(
@@ -344,50 +393,79 @@ export function toFillValues(
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
 
+  const fillItems = (
+    itemFields: ListItemField[],
+    row: Record<string, unknown> | undefined,
+    idx: number,
+    listName: string,
+  ): Record<string, unknown> => {
+    const rowOut: Record<string, unknown> = {};
+    for (const item of itemFields) {
+      if (item.type === "auto") {
+        writeAliased(rowOut, item, String(idx + 1));
+      } else if (item.type === "bool") {
+        const on =
+          !rowSkip[listName]?.[idx]?.[item.name] && !!row?.[item.name];
+        writeAliased(rowOut, item, on ? item.trueText : item.falseText);
+      } else if (item.type === "list") {
+        if (skip[item.name] || rowSkip[listName]?.[idx]?.[item.name]) {
+          writeAliased(rowOut, item, []);
+          continue;
+        }
+        const nestedRows = Array.isArray(row?.[item.name])
+          ? (row?.[item.name] as Record<string, unknown>[])
+          : [];
+        writeAliased(
+          rowOut,
+          item,
+          nestedRows.map((nr, nidx) =>
+            fillItems(item.itemFields, nr, nidx, item.name),
+          ),
+        );
+      } else {
+        writeAliased(
+          rowOut,
+          item,
+          rowSkip[listName]?.[idx]?.[item.name]
+            ? ""
+            : String(row?.[item.name] ?? ""),
+        );
+      }
+    }
+    return rowOut;
+  };
+
   for (const f of fields) {
     if (f.type === "text") {
-      out[f.name] = skip[f.name] ? "" : String(values[f.name] ?? "");
+      writeAliased(out, f, skip[f.name] ? "" : String(values[f.name] ?? ""));
       continue;
     }
     if (f.type === "bool") {
       const on = !skip[f.name] && !!values[f.name];
-      out[f.name] = on ? f.trueText : f.falseText;
+      writeAliased(out, f, on ? f.trueText : f.falseText);
       continue;
     }
     if (f.type === "auto") {
-      out[f.name] = "1";
+      writeAliased(out, f, "1");
       continue;
     }
     if (f.type === "image") {
-      // Batch path has no image uploads — clear image tags.
-      out[f.name] = "";
+      writeAliased(out, f, "");
       continue;
     }
     if (f.type === "list") {
       if (skip[f.name]) {
-        out[f.name] = [];
+        writeAliased(out, f, []);
         continue;
       }
       const rows = Array.isArray(values[f.name])
         ? (values[f.name] as Record<string, unknown>[])
         : [];
-      out[f.name] = rows.map((row, idx) => {
-        const rowOut: Record<string, unknown> = {};
-        for (const item of f.itemFields) {
-          if (item.type === "auto") {
-            rowOut[item.name] = String(idx + 1);
-          } else if (item.type === "bool") {
-            const on =
-              !rowSkip[f.name]?.[idx]?.[item.name] && !!row?.[item.name];
-            rowOut[item.name] = on ? item.trueText : item.falseText;
-          } else {
-            rowOut[item.name] = rowSkip[f.name]?.[idx]?.[item.name]
-              ? ""
-              : String(row?.[item.name] ?? "");
-          }
-        }
-        return rowOut;
-      });
+      writeAliased(
+        out,
+        f,
+        rows.map((row, idx) => fillItems(f.itemFields, row, idx, f.name)),
+      );
     }
   }
 

@@ -518,7 +518,20 @@ export function createApi(options: {
     const aiAdmin = await getAiAdminSettings().catch(() => ({
       defaultModel: "gemini-3.8-flash",
     }));
-    const creds = getRequestAiCredentials(c.req.raw);
+    // Resolve X-Ai-Key-Id → vault secret when the user is logged in (AI8).
+    let sessionUserId: string | null = null;
+    try {
+      const { auth } = await import("./auth");
+      const session = await auth.api.getSession({ headers: c.req.raw.headers });
+      sessionUserId = session?.user?.id ? String(session.user.id) : null;
+    } catch {
+      sessionUserId = null;
+    }
+    const { resolveRequestAiCredentials } = await import("./ai-config");
+    const creds = await resolveRequestAiCredentials(
+      c.req.raw,
+      sessionUserId,
+    );
     return c.json(
       geminiStatus({
         requestKey: creds.apiKey,
@@ -638,7 +651,10 @@ export function createApi(options: {
     }
   }
 
-  /** Logged-in user: list decrypted AI keys stored on server. */
+  /**
+   * Logged-in user: list AI keys stored on server.
+   * Never returns plaintext secrets — use X-Ai-Key-Id on AI calls to proxy.
+   */
   api.get("/ai/keys", async (c) => {
     const gate = await requireSessionUserId(c.req.raw);
     if (!gate.ok) return c.json({ error: gate.error }, gate.status);
@@ -651,7 +667,8 @@ export function createApi(options: {
           provider: e.provider,
           label: e.label,
           model: e.model,
-          apiKey: e.apiKey,
+          maskedKey: maskGeminiKey(e.apiKey),
+          hasKey: Boolean(e.apiKey),
           storeOnServer: true,
         })),
       });
@@ -735,6 +752,12 @@ export function createApi(options: {
 
   api.post("/parse", async (c) => {
     try {
+      const contentLength = Number(c.req.header("content-length") || 0);
+      // Multipart overhead is small vs 25MB — reject clearly oversized bodies early.
+      if (contentLength > MAX_DOCX_BYTES + 1024 * 1024) {
+        return c.json({ error: "ไฟล์ใหญ่เกินไป (สูงสุด 25 MB)" }, 400);
+      }
+
       const form = await c.req.formData();
       const file = form.get("file");
       if (!(file instanceof File)) {
@@ -760,13 +783,17 @@ export function createApi(options: {
         String(form.get("includeContent") || "").toLowerCase() === "1" ||
         String(form.get("includeContent") || "").toLowerCase() === "true";
 
-      const { fields } = await parseTemplate(buffer);
+      const parsed = await parseTemplate(buffer);
+      const { fields } = parsed;
+      const warnings = parsed.warnings || [];
 
       if (fields.length === 0) {
         return c.json(
           {
             error:
-              "ไม่พบตัวแปรในเทมเพลต — ใส่ {{ชื่อ}} ในข้อความ, แท็กใน Alt Text ของรูป, หรือ {{#รายการ}}…{{/}}",
+              "ไม่พบตัวแปรในเทมเพลต — เปิดโหมดสร้างเทมเพลตจากเอกสารนี้เพื่อใส่ {{ตัวแปร}} หรือใส่แท็กใน Word แล้วอัปโหลดใหม่",
+            code: "NO_VARIABLES",
+            suggestTagger: true,
             fields: [],
             filename: file.name,
           },
@@ -779,6 +806,7 @@ export function createApi(options: {
         fields,
         summary: summarizeFields(fields),
       };
+      if (warnings.length) payload.warnings = warnings;
 
       if (includeContent) {
         const layout = await extractDocumentLayout(buffer);
@@ -792,7 +820,7 @@ export function createApi(options: {
       return c.json(payload);
     } catch (err) {
       const message = formatTemplateError(err);
-      return c.json({ error: `อ่านเทมเพลตไม่สำเร็จ: ${message}` }, 400);
+      return c.json({ error: message.startsWith("อ่านเทมเพลต") ? message : `อ่านเทมเพลตไม่สำเร็จ: ${message}` }, 400);
     }
   });
 
@@ -800,7 +828,13 @@ export function createApi(options: {
     const denied = await requirePremium(c, PremiumFeature.AiSourceMap);
     if (denied) return denied;
 
-    const aiCreds = getRequestAiCredentials(c.req.raw);
+    const sessionGate = await requireSessionUserId(c.req.raw);
+    const sessionUserId = sessionGate.ok ? sessionGate.userId : null;
+    const { resolveRequestAiCredentials } = await import("./ai-config");
+    const aiCreds = await resolveRequestAiCredentials(
+      c.req.raw,
+      sessionUserId,
+    );
     const clientKey = aiCreds.apiKey;
     const clientModel = aiCreds.model;
     const clientProvider = aiCreds.provider;
@@ -808,7 +842,7 @@ export function createApi(options: {
       return c.json(
         {
           error:
-            "ยังไม่มี AI API key — กด «ใส่ AI key» แล้วเลือกผู้ให้บริการและใส่ key ของคุณ (เก็บในเบราว์เซอร์)",
+            "ยังไม่มี AI API key — กด «ใส่ AI key» แล้วเลือกผู้ให้บริการและใส่ key ของคุณ หรือซิงก์คีย์ขึ้นเซิร์ฟเวอร์แล้วส่ง X-Ai-Key-Id",
         },
         401,
       );
@@ -980,12 +1014,16 @@ export function createApi(options: {
           type: "log",
           message: `ส่งไฟล์ต้นทางจริง + Export JSON · ฟิลด์ ${fields.length} ตัว`,
         });
+        const { inspectSourceTruncation } = await import("./ai-fill");
+        const truncMeta = await inspectSourceTruncation(payloads);
         const valuesJson = await fillDocxFormValues(skeleton, payloads, {
           provider: clientProvider,
           apiKey: clientKey,
           model: clientModel,
           fields,
         });
+        const { countFilledValues } = await import("./source-map");
+        const fillStats = countFilledValues(valuesJson);
         await emit({
           type: "log",
           message: `ได้ Export JSON ที่ AI กรอกแล้ว — ${summarizeAiValuesJson(valuesJson)}`,
@@ -997,6 +1035,18 @@ export function createApi(options: {
           label: "พร้อม Import JSON ลงหน้าจอ",
         });
 
+        const warnings: string[] = [];
+        if (truncMeta.sourceTruncated) {
+          warnings.push(
+            "ต้นทางยาวเกินขีดจำกัดบริบท — ข้อมูลช่วงท้ายอาจไม่ครบ",
+          );
+        }
+        if (fillStats.filled === 0) {
+          warnings.push(
+            "ไม่พบค่าที่ใช้ได้จากเอกสารต้นทาง — ค่าที่กรอกไว้จะไม่ถูกล้าง",
+          );
+        }
+
         await emit({
           type: "result",
           valuesJson,
@@ -1004,8 +1054,19 @@ export function createApi(options: {
           skip: valuesJson.skip,
           rowSkip: valuesJson.rowSkip,
           extracted: sourceFilesMeta(payloads),
-          ai: { used: true, mode: "export-json-fill-files" },
-          message: "แมปเสร็จ",
+          ai: {
+            used: true,
+            mode: "export-json-fill-files",
+            fillStats,
+            sourceTruncated: truncMeta.sourceTruncated,
+            truncatedFiles: truncMeta.truncatedFiles,
+            relevant: fillStats.filled > 0,
+            warnings,
+          },
+          message:
+            fillStats.filled === 0
+              ? "ไม่พบค่าที่ใช้ได้จากต้นทาง"
+              : "แมปเสร็จ",
         });
       };
 
@@ -1117,6 +1178,8 @@ export function createApi(options: {
       }
 
       const buffer = Buffer.from(await file.arrayBuffer());
+      const { assertDocxReadable } = await import("./docx-errors");
+      await assertDocxReadable(buffer);
       const result = await tagger.tagTemplate(buffer, replacements);
       const base = file.name.replace(/\.docx$/i, "") || "template";
       const outName = `${base}-tagged.docx`;
@@ -1132,8 +1195,15 @@ export function createApi(options: {
         ...(result.warnings?.length ? { warnings: result.warnings } : {}),
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: `แท็กเทมเพลตไม่สำเร็จ: ${message}` }, 400);
+      const message = formatTemplateError(err);
+      return c.json(
+        {
+          error: message.startsWith("แท็กเทมเพลต")
+            ? message
+            : `แท็กเทมเพลตไม่สำเร็จ: ${message}`,
+        },
+        400,
+      );
     }
   });
 
@@ -1184,22 +1254,33 @@ export function createApi(options: {
           : typeof form.get("tagNameLang") === "string"
             ? String(form.get("tagNameLang") || "").trim()
             : "";
-      const headerCreds = getRequestAiCredentials(c.req.raw);
+      const sessionGate = await requireSessionUserId(c.req.raw);
+      const sessionUserId = sessionGate.ok ? sessionGate.userId : null;
+      const { resolveRequestAiCredentials } = await import("./ai-config");
+      const resolved = await resolveRequestAiCredentials(
+        c.req.raw,
+        sessionUserId,
+      );
       const clientProvider =
-        getAiProvider(formProvider)?.id || headerCreds.provider;
-      const clientKey = headerCreds.apiKey || formKey || undefined;
+        getAiProvider(formProvider)?.id || resolved.provider;
+      const clientKey = resolved.apiKey || formKey || undefined;
       const clientModel =
-        normalizeProviderModel(clientProvider, formModel || headerCreds.model) ||
+        normalizeProviderModel(clientProvider, formModel || resolved.model) ||
         defaultModelForProvider(clientProvider);
 
       if (!clientKey) {
         return c.json(
-          { error: "ต้องใส่ AI API key ของคุณก่อน (BYOK)" },
+          {
+            error:
+              "ต้องใส่ AI API key ของคุณก่อน (BYOK) หรือส่ง X-Ai-Key-Id ของคีย์ที่ซิงก์ไว้",
+          },
           400,
         );
       }
 
       const buffer = Buffer.from(await file.arrayBuffer());
+      const { assertDocxReadable } = await import("./docx-errors");
+      await assertDocxReadable(buffer);
       const { parseAiTagNameLanguage, suggestTemplateTags } = await import(
         "./ai-tag-draft"
       );
@@ -1226,10 +1307,16 @@ export function createApi(options: {
         staffRaw = false;
       }
 
+      const warnings: string[] = [];
+      if (result.plainText.length > 0 && result.suggestions.length === 0) {
+        warnings.push("AI ไม่เสนอแท็กที่ผ่านการตรวจสอบ — ลองตรวจเอกสารหรือใส่แท็กเอง");
+      }
+
       return c.json({
         suggestions: result.suggestions,
         count: result.suggestions.length,
         plainText: result.plainText,
+        ...(warnings.length ? { warnings } : {}),
         ...(staffRaw
           ? { rawAi: result.rawAi, rawText: result.rawText }
           : {}),
@@ -1797,7 +1884,11 @@ export function createApi(options: {
       }
 
       const zipBuf = Buffer.from(
-        await zip.generateAsync({ type: "nodebuffer" }),
+        await zip.generateAsync({
+          type: "nodebuffer",
+          compression: "DEFLATE",
+          compressionOptions: { level: 6 },
+        }),
       );
       return c.json({
         ok: true,

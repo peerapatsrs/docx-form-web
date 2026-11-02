@@ -25,6 +25,8 @@ services:
       # Runtime heap under free-tier 512MB RAM (leave headroom for native buffers).
       - key: NODE_OPTIONS
         value: --max-old-space-size=384
+      # Public origin — set all three to the same https://<service>.onrender.com
+      # (no hardcoded host in image). Render also passes these as Docker build-args.
       - key: APP_BASE_URL
         sync: false
       - key: BETTER_AUTH_URL

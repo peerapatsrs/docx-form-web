@@ -4,7 +4,10 @@ import * as z from "zod";
 import { isDevAuthEnabled } from "@/lib/dev-auth-flag";
 import { getAuthPool } from "./auth-db";
 
-export { isDevAuthEnabled } from "@/lib/dev-auth-flag";
+export {
+  getDefaultDevAuthEmail,
+  isDevAuthEnabled,
+} from "@/lib/dev-auth-flag";
 
 /**
  * Local/dev only: pick an existing DB user and get a real session cookie
@@ -13,23 +16,6 @@ export { isDevAuthEnabled } from "@/lib/dev-auth-flag";
  * Enabled when DEV_AUTH=1, or automatically in non-production.
  * Disable with DEV_AUTH=0.
  */
-
-/**
- * Preferred local/dev account for Run Local auto sign-in.
- * Order: DEV_AUTH_DEFAULT_EMAIL → first SUPERADMIN_EMAILS → peerapat.srs@gmail.com
- */
-export function getDefaultDevAuthEmail(): string {
-  const fromEnv = String(process.env.DEV_AUTH_DEFAULT_EMAIL || "")
-    .trim()
-    .toLowerCase();
-  if (fromEnv) return fromEnv;
-  const superadmin = String(process.env.SUPERADMIN_EMAILS || "")
-    .split(",")
-    .map((s) => s.trim().toLowerCase())
-    .find(Boolean);
-  if (superadmin) return superadmin;
-  return "peerapat.srs@gmail.com";
-}
 
 type DevUserRow = {
   id: string;

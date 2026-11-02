@@ -1,7 +1,10 @@
+import { connection } from "next/server";
 import { softwareApplicationJsonLd } from "@/lib/site-meta";
 
 /** Machine-readable product description for Google / rich results. */
-export function SiteJsonLd() {
+export async function SiteJsonLd() {
+  // Request-time so absolute URLs use the deployed base URL env, not build placeholders.
+  await connection();
   const data = softwareApplicationJsonLd();
   return (
     <script

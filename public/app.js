@@ -1746,13 +1746,10 @@ function providerDocs(id) {
 async function refreshAiLoginState() {
   try {
     const res = await fetch("/api/me", { credentials: "include" });
-    aiUserLoggedIn = res.ok;
-    if (res.ok) {
-      const data = await res.json().catch(() => ({}));
-      aiUserRole = String(data?.user?.role || "");
-    } else {
-      aiUserRole = "";
-    }
+    const data = await res.json().catch(() => ({}));
+    // /api/me returns 200 with user:null for guests (avoids console 401 noise).
+    aiUserLoggedIn = Boolean(res.ok && data?.user);
+    aiUserRole = aiUserLoggedIn ? String(data?.user?.role || "") : "";
   } catch {
     aiUserLoggedIn = false;
     aiUserRole = "";
@@ -2466,21 +2463,39 @@ async function connectGoogleAi() {
 
 async function checkHealth() {
   try {
-    const res = await fetch("/api/health", {
-      headers: aiAuthHeaders(),
-      credentials: "include",
-    });
-    if (!res.ok) throw new Error("bad");
-    const data = await res.json().catch(() => ({}));
-    setCreditsVersion(data.version || "0.0.0");
-    if (data.premium && typeof data.premium === "object") {
-      const paid = Boolean(data.premium.paid);
-      const maxRaw = Number(data.premium.maxMultiTemplates);
-      const freeMax = Number(data.premium.freeMaxMulti);
-      const paidMax = Number(data.premium.paidMaxMulti);
+    const [healthRes, entitlementRes, aiRes] = await Promise.all([
+      fetch("/api/health", {
+        headers: aiAuthHeaders(),
+        credentials: "include",
+      }),
+      fetch("/api/entitlement", {
+        headers: aiAuthHeaders(),
+        credentials: "include",
+      }),
+      fetch("/api/ai/status", {
+        headers: aiAuthHeaders(),
+        credentials: "include",
+      }),
+    ]);
+    if (!healthRes.ok) throw new Error("bad");
+    const health = await healthRes.json().catch(() => ({}));
+    if (!health || health.ok !== true) throw new Error("bad");
+
+    const entitlement = entitlementRes.ok
+      ? await entitlementRes.json().catch(() => ({}))
+      : {};
+    const premium =
+      entitlement.premium && typeof entitlement.premium === "object"
+        ? entitlement.premium
+        : null;
+    if (premium) {
+      const paid = Boolean(premium.paid);
+      const maxRaw = Number(premium.maxMultiTemplates);
+      const freeMax = Number(premium.freeMaxMulti);
+      const paidMax = Number(premium.paidMaxMulti);
       premiumStatus = {
         paid,
-        plan: String(data.premium.plan || (paid ? "pro" : "free")),
+        plan: String(premium.plan || (paid ? "pro" : "free")),
         maxMultiTemplates:
           Number.isFinite(maxRaw) && maxRaw > 0
             ? maxRaw
@@ -2498,19 +2513,23 @@ async function checkHealth() {
       };
       refreshPlanQuotaUi();
     }
-    if (data.ai && typeof data.ai === "object") {
-      applyAiStatus(data.ai);
+
+    if (aiRes.ok) {
+      const ai = await aiRes.json().catch(() => ({}));
+      if (ai && typeof ai === "object") applyAiStatus(ai);
+      else await refreshAiStatus();
     } else {
       await refreshAiStatus();
     }
+
     if (statusDot) {
       statusDot.classList.add("ok");
       statusDot.classList.remove("bad");
     }
     if (statusText) {
       statusText.textContent = aiStatus.connected
-        ? `localhost · ${aiStatus.providerLabel || "AI"} · ${aiStatus.model || ""}`
-        : "localhost · พร้อมใช้";
+        ? `พร้อมใช้ · ${aiStatus.providerLabel || "AI"} · ${aiStatus.model || ""}`
+        : "พร้อมใช้";
     }
   } catch {
     if (statusDot) {

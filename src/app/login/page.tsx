@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ComponentType } from "react";
 import { authClient } from "@/lib/auth-client";
 import {
   ExternalAccountMark,
@@ -8,8 +8,20 @@ import {
   PasskeyMark,
 } from "@/components/AuthIcons";
 import { BrandLogo, BRAND_NAME } from "@/components/BrandLogo";
-
 type ProviderInfo = { id: string; label: string };
+
+type DevUser = {
+  id: string;
+  name?: string | null;
+  email: string;
+  role?: string;
+  plan?: string;
+  banned?: boolean;
+};
+
+const INCLUDE_DEV_AUTH_CLIENT =
+  process.env.NODE_ENV !== "production" ||
+  process.env.NEXT_PUBLIC_DEV_AUTH === "1";
 
 const PROVIDER_LABELS: Record<string, string> = {
   google: "Google",
@@ -51,15 +63,6 @@ const AUTH_ERROR_HINTS: Record<string, string> = {
     "รอบล็อกอินนี้ใช้ไม่ได้แล้ว — เริ่มเข้าสู่ระบบใหม่จากหน้านี้",
 };
 
-type DevUser = {
-  id: string;
-  name?: string | null;
-  email: string;
-  role?: string;
-  plan?: string;
-  banned?: boolean;
-};
-
 function readLoginErrorFromQuery(): string {
   if (typeof window === "undefined") return "";
   try {
@@ -71,10 +74,19 @@ function readLoginErrorFromQuery(): string {
   }
 }
 
+type DevPickerProps = {
+  users: DevUser[];
+  busy: string | null;
+  onPick: (user: DevUser) => void;
+};
+
 export default function LoginPage() {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [devAuth, setDevAuth] = useState(false);
   const [devUsers, setDevUsers] = useState<DevUser[]>([]);
+  const [DevPicker, setDevPicker] = useState<ComponentType<DevPickerProps> | null>(
+    null,
+  );
   const [error, setError] = useState(readLoginErrorFromQuery);
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -90,42 +102,42 @@ export default function LoginPage() {
       /* ignore */
     }
 
-    void fetch("/api/auth-config")
-      .then((r) => r.json())
-      .then((data: { providers?: string[]; devAuth?: boolean }) => {
-        const list = Array.isArray(data.providers) ? data.providers : [];
-        setProviders(
-          list.map((id) => ({
-            id,
-            label: PROVIDER_LABELS[id] || id,
-          })),
-        );
-        setDevAuth(Boolean(data.devAuth));
-        if (data.devAuth) {
-          void fetch("/api/auth/dev/users", { credentials: "include" })
-            .then((r) => r.json())
-            .then((body: { users?: DevUser[] }) => {
-              const users = Array.isArray(body.users) ? body.users : [];
-              setDevUsers(users);
-              // Run Local: auto-pick the preferred default user when opened as guest.
-              const preferred = String(
-                (data as { devAuthDefaultEmail?: string | null })
-                  .devAuthDefaultEmail || "",
-              )
-                .trim()
-                .toLowerCase();
-              const target =
-                users.find(
-                  (u) => String(u.email || "").toLowerCase() === preferred,
-                ) || users[0];
-              if (target && !target.banned) {
-                void loginAsDev(target);
-              }
-            })
-            .catch(() => setDevUsers([]));
+    void (async () => {
+      const data = (await fetch("/api/auth-config")
+        .then((r) => r.json())
+        .catch(() => ({}))) as {
+        providers?: string[];
+        devAuth?: boolean;
+        devAuthDefaultEmail?: string | null;
+      };
+      const list = Array.isArray(data.providers) ? data.providers : [];
+      setProviders(
+        list.map((id) => ({
+          id,
+          label: PROVIDER_LABELS[id] || id,
+        })),
+      );
+
+      if (INCLUDE_DEV_AUTH_CLIENT && data.devAuth) {
+        const mod = await import("@/components/DevAuthControls");
+        setDevPicker(() => mod.DevUserPicker);
+        setDevAuth(true);
+        const users = await mod.listDevUsers();
+        setDevUsers(users);
+        const preferred = String(data.devAuthDefaultEmail || "")
+          .trim()
+          .toLowerCase();
+        const target =
+          users.find(
+            (u) => String(u.email || "").toLowerCase() === preferred,
+          ) || users[0];
+        if (target && !target.banned) {
+          void loginAsDev(target, mod.loginAsDevUser);
         }
-      })
-      .catch(() => setProviders([]));
+      } else {
+        setDevAuth(false);
+      }
+    })();
 
     // Conditional UI: offer existing passkeys when browser supports it
     if (
@@ -189,7 +201,14 @@ export default function LoginPage() {
     }
   }
 
-  async function loginAsDev(user: DevUser) {
+  async function loginAsDev(
+    user: DevUser,
+    loginFn?: (input: {
+      userId?: string;
+      email?: string;
+    }) => Promise<{ ok: boolean; message?: string }>,
+  ) {
+    if (!INCLUDE_DEV_AUTH_CLIENT) return;
     if (user.banned) {
       setError("ผู้ใช้นี้ถูกแบน");
       return;
@@ -197,24 +216,12 @@ export default function LoginPage() {
     setError("");
     setBusy(`dev-${user.id}`);
     try {
-      const res = await fetch("/api/auth/dev/login-as", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: user.id }),
-      });
-      const data = (await res.json().catch(() => ({}))) as {
-        ok?: boolean;
-        message?: string;
-        error?: string | { message?: string };
-      };
-      if (!res.ok || !data.ok) {
-        const msg =
-          (typeof data.error === "object" && data.error?.message) ||
-          data.message ||
-          data.error ||
-          "เลือก user ไม่สำเร็จ";
-        setError(String(msg));
+      const loginAsDevUser =
+        loginFn ||
+        (await import("@/components/DevAuthControls")).loginAsDevUser;
+      const result = await loginAsDevUser({ userId: user.id });
+      if (!result.ok) {
+        setError(result.message || "เลือก user ไม่สำเร็จ");
         setBusy(null);
         return;
       }
@@ -254,42 +261,12 @@ export default function LoginPage() {
           </p>
         ) : null}
 
-        {devAuth ? (
-          <section className="dev-user-panel" aria-label="Dev user picker">
-            <p className="auth-section-title">Dev — เลือก user (ไม่ต้อง OAuth)</p>
-            <p className="auth-hint">
-              ใช้เฉพาะ local · ตอนนี้มี{" "}
-              <strong>peerapat.srs@gmail.com</strong> เป็น superadmin
-            </p>
-            {devUsers.length === 0 ? (
-              <p className="auth-hint">ยังไม่มี user ในฐานข้อมูล — ล็อกอิน Google จริงครั้งหนึ่งก่อน</p>
-            ) : (
-              <ul className="dev-user-list">
-                {devUsers.map((u) => (
-                  <li key={u.id}>
-                    <button
-                      type="button"
-                      className="dev-user-btn"
-                      disabled={busy !== null || Boolean(u.banned)}
-                      onClick={() => void loginAsDev(u)}
-                    >
-                      <span className="dev-user-main">
-                        <strong>{u.name || u.email}</strong>
-                        <span>
-                          {u.email}
-                          {u.banned ? " · แบน" : ""}
-                        </span>
-                      </span>
-                      <span className="dev-user-meta">
-                        {u.role || "user"} · {u.plan || "free"}
-                        {busy === `dev-${u.id}` ? "…" : ""}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
+        {devAuth && DevPicker ? (
+          <DevPicker
+            users={devUsers}
+            busy={busy}
+            onPick={(u) => void loginAsDev(u)}
+          />
         ) : null}
 
         <div className="auth-actions">

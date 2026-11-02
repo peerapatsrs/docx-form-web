@@ -42,15 +42,8 @@ export const SITE_FEATURE_BULLETS = [
   "ล็อกอิน OAuth / พาสคีย์ · บัญชีและแผนสมาชิก",
 ] as const;
 
-export function absoluteUrl(path = "/"): string {
-  const base = (
-    process.env.NEXT_PUBLIC_APP_URL ||
-    process.env.BETTER_AUTH_URL ||
-    "http://localhost:3000"
-  ).replace(/\/$/, "");
-  if (!path || path === "/") return `${base}/`;
-  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
-}
+export { absoluteAppUrl as absoluteUrl, getAppBaseUrl } from "./app-base-url";
+import { absoluteAppUrl } from "./app-base-url";
 
 export function softwareApplicationJsonLd() {
   return {
@@ -61,8 +54,8 @@ export function softwareApplicationJsonLd() {
     applicationCategory: "BusinessApplication",
     operatingSystem: "Web",
     description: SITE_DESCRIPTION,
-    url: absoluteUrl("/"),
-    image: absoluteUrl("/brand/logo-mark.png"),
+    url: absoluteAppUrl("/"),
+    image: absoluteAppUrl("/brand/logo-mark.png"),
     author: {
       "@type": "Person",
       name: "Peerapat Surasing",

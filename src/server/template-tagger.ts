@@ -219,8 +219,8 @@ function collectWtNodes(xml: string): { nodes: WtNode[]; plainText: string } {
 
 /**
  * Pure-digit needles must be a complete token — not a shard of a phone/id.
- * Rejects: "3" inside "02-023-2599", "2" in "281", "1" in "1โฉนด…".
- * Longer IDs flush against a following Thai label (no tab) still match.
+ * Rejects short digits mid-phone / mid-id. Longer IDs flush against a following
+ * Thai label (no tab) still match.
  */
 function plainMatchAllowed(haystack: string, idx: number, needle: string): boolean {
   if (!/^\d+$/.test(needle)) return true;

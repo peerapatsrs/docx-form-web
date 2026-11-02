@@ -64,8 +64,22 @@ async function main() {
   const style = await fetch(`${BASE}/style.css`);
   ok("GET /style.css", style.ok, `status=${style.status}`);
 
+  const fieldNames = await fetch(`${BASE}/field-names.js`);
+  ok("GET /field-names.js", fieldNames.ok, `status=${fieldNames.status}`);
+  const fieldNamesBody = await fieldNames.text();
+  ok(
+    "field-names.js exposes DocxFieldNames",
+    /DocxFieldNames\s*=/.test(fieldNamesBody),
+  );
+
   const appJs = await fetch(`${BASE}/app.js`);
   ok("GET /app.js", appJs.ok, `status=${appJs.status}`);
+  const appBody = await appJs.text();
+  ok(
+    "app.js requires field-names.js",
+    /field-names\.js is not loaded/.test(appBody) &&
+      /docxFieldNames\(/.test(appBody),
+  );
 
   if (failed) {
     console.error(`\n${failed} failed`);

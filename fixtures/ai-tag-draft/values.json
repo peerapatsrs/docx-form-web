@@ -1,0 +1,450 @@
+{
+  "tableFirstRow": {
+    "xml": "table-first-row.xml",
+    "plain": "นอกตารางชื่อสมชายลำดับชื่อเขต / อำเภอ1ในตารางสมชาย2แถวสองไม่ควรแท็ก",
+    "suggestionsTh": [
+      {
+        "plainText": "นอกตารางชื่อสมชาย",
+        "name": "ชื่อนอก",
+        "kind": "text",
+        "mode": "replace"
+      },
+      {
+        "plainText": "ในตารางสมชาย",
+        "name": "รายการจำเลย",
+        "kind": "list-table",
+        "mode": "wrap-row"
+      },
+      {
+        "plainText": "1",
+        "name": "ลำดับ",
+        "kind": "auto",
+        "mode": "replace"
+      },
+      {
+        "plainText": "ในตารางสมชาย",
+        "name": "ชื่อ",
+        "kind": "text",
+        "mode": "replace"
+      },
+      {
+        "plainText": "ในตารางสมชาย",
+        "name": "เขต_อำเภอ",
+        "kind": "text",
+        "mode": "fill-empty-tc",
+        "cellIndex": 2
+      },
+      {
+        "plainText": "แถวสองไม่ควรแท็ก",
+        "name": "รายการแถวสอง",
+        "kind": "list-table",
+        "mode": "wrap-row"
+      },
+      {
+        "plainText": "2",
+        "name": "ลำดับ2",
+        "kind": "auto",
+        "mode": "replace"
+      },
+      {
+        "plainText": "แถวสองไม่ควรแท็ก",
+        "name": "ชื่อ2",
+        "kind": "text",
+        "mode": "replace"
+      }
+    ],
+    "suggestionsEn": [
+      {
+        "plainText": "ในตารางสมชาย",
+        "name": "defendant_rows",
+        "kind": "list-table",
+        "mode": "wrap-row"
+      }
+    ],
+    "expected": {
+      "outsideText": "นอกตารางชื่อสมชาย",
+      "prototypeCell": "ในตารางสมชาย",
+      "rejectedRowText": "แถวสองไม่ควรแท็ก",
+      "firstDigit": "1",
+      "rejectedDigit": "2",
+      "emptyCellIndex": 2
+    }
+  },
+  "multiHeader": {
+    "xml": "multi-header.xml",
+    "plain": "จำลยที่สืบตามเขตอำนาจศาล / ภูมิลำเนา ณวันฟ้องคดีสืบตามภูมิลำเนาปัจจุบัน / อื่นๆผลสืบเขต / อำเภอสำนักงานที่ดินจังหวัดพบ1เมืองตัวอย่างตัวอย่าง√2เมืองตัวอย่างตัวอย่าง√",
+    "suggestions": [
+      {
+        "plainText": "1",
+        "name": "ที่",
+        "kind": "auto",
+        "mode": "replace"
+      }
+    ],
+    "expected": {
+      "firstDigit": "1",
+      "listNamePattern": "จำเล|รายการ",
+      "headerRejectPattern": "สืบตามเขต"
+    }
+  },
+  "strayAuto": {
+    "plain": "จำเลยที่ 1 เป็นคู่ความนอกตาราง",
+    "suggestions": [
+      {
+        "plainText": "จำเลยที่",
+        "name": "จำเลยที่",
+        "kind": "auto",
+        "mode": "replace"
+      },
+      {
+        "plainText": "1",
+        "name": "ลำดับ",
+        "kind": "auto",
+        "mode": "replace"
+      }
+    ],
+    "expected": {
+      "labelText": "จำเลยที่",
+      "labelTag": "{{จำเลยที่}}",
+      "digitText": "1",
+      "digitTag": "{{ลำดับ}}"
+    }
+  },
+  "paragraphList": {
+    "xml": "paragraph-list.xml",
+    "plain": "หนังสือฟ้องจำเลยที่ 1 ชื่อ นายหนึ่ง ที่อยู่ บ้านหนึ่งจำเลยที่ 2 ชื่อ นายสอง ที่อยู่ บ้านสองจำเลยที่ 3 ชื่อ นายสาม ที่อยู่ บ้านสามจึงเรียนมาเพื่อโปรดพิจารณา",
+    "suggestions": [
+      {
+        "plainText": "จำเลยที่ 1 ชื่อ นายหนึ่ง ที่อยู่ บ้านหนึ่ง",
+        "name": "จำเลย1",
+        "kind": "text",
+        "mode": "replace"
+      },
+      {
+        "plainText": "จำเลยที่ 2 ชื่อ นายสอง ที่อยู่ บ้านสอง",
+        "name": "จำเลย2",
+        "kind": "text",
+        "mode": "replace"
+      },
+      {
+        "plainText": "จำเลยที่ 3 ชื่อ นายสาม ที่อยู่ บ้านสาม",
+        "name": "จำเลย3",
+        "kind": "text",
+        "mode": "replace"
+      },
+      {
+        "plainText": "นายหนึ่ง",
+        "name": "ชื่อ",
+        "kind": "text",
+        "mode": "replace"
+      },
+      {
+        "plainText": "1",
+        "name": "ลำดับ",
+        "kind": "auto",
+        "mode": "replace"
+      },
+      {
+        "plainText": "จำเลยที่ 1 ชื่อ นายหนึ่ง ที่อยู่ บ้านหนึ่งจำเลยที่ 2 ชื่อ นายสอง ที่อยู่ บ้านสองจำเลยที่ 3 ชื่อ นายสาม ที่อยู่ บ้านสาม",
+        "name": "รายการทั้งหมด",
+        "kind": "list",
+        "mode": "wrap"
+      }
+    ],
+    "expected": {
+      "firstUnitPlain": "จำเลยที่ 1 ชื่อ นายหนึ่ง ที่อยู่ บ้านหนึ่ง",
+      "wrapTag": "{{#รายการจำเลย}}",
+      "innerName": "นายหนึ่ง",
+      "firstDigit": "1",
+      "laterUnitRejectPattern": "นายสอง|นายสาม|จำเลย2|จำเลย3"
+    }
+  },
+  "paragraphTab": {
+    "xml": "paragraph-tab.xml",
+    "plain": "จำเลยที่\t1\tชื่อ นายหนึ่งจำเลยที่\t2\tชื่อ นายสองจำเลยที่\t3\tชื่อ นายสาม",
+    "suggestions": [
+      {
+        "plainText": "1",
+        "name": "จำเลยที่",
+        "kind": "text",
+        "mode": "replace"
+      },
+      {
+        "plainText": "นายสอง",
+        "name": "ชื่อ2",
+        "kind": "text",
+        "mode": "replace"
+      }
+    ],
+    "expected": {
+      "firstUnitPlain": "จำเลยที่\t1\tชื่อ นายหนึ่ง",
+      "laterName": "นายสอง"
+    }
+  },
+  "labelAnchored": {
+    "plain": "บริษัท ทดสอบ จำกัดประเภทหนี้\t\tกู้ยืม\t\tทะเบียนลูกหนี้\t10000001\tศาล\tตัวอย่างบุรี",
+    "suggestions": [
+      {
+        "plainText": "กู้ยืม",
+        "label": "ประเภทหนี้",
+        "name": "ประเภทหนี้",
+        "kind": "text",
+        "mode": "replace"
+      },
+      {
+        "plainText": "ประเภทหนี้ กู้ยืม",
+        "label": "ประเภทหนี้",
+        "name": "ประเภทหนี้ซ้ำ",
+        "kind": "text",
+        "mode": "replace"
+      },
+      {
+        "plainText": "10000001",
+        "label": "ทะเบียนลูกหนี้",
+        "name": "ทะเบียนลูกหนี้",
+        "kind": "text",
+        "mode": "replace"
+      }
+    ],
+    "expected": {
+      "loanValue": "กู้ยืม",
+      "loanLabel": "ประเภทหนี้",
+      "registryValue": "10000001",
+      "registryLabel": "ทะเบียนลูกหนี้"
+    }
+  },
+  "assignSpace": {
+    "plain": "ตามหนังสือมอบอำนาจ มอบหมายให้ บริษัท ตัวอย่าง เอบีซี จำกัด (ตัวอย่าง) เป็นผู้รับมอบ",
+    "suggestions": [
+      {
+        "plainText": "บริษัท ตัวอย่าง เอบีซี จำกัด",
+        "label": "มอบหมายให้",
+        "name": "ผู้รับมอบหมาย",
+        "kind": "text",
+        "mode": "replace"
+      },
+      {
+        "plainText": "บริษัท ตัวอย่าง เอบีซี จำกัด (ตัวอย่าง)",
+        "label": "มอบหมายให้",
+        "name": "ผู้รับมอบหมาย2",
+        "kind": "text",
+        "mode": "replace"
+      },
+      {
+        "plainText": "มอบหมายให้ บริษัท ตัวอย่าง เอบีซี จำกัด",
+        "label": "มอบหมายให้",
+        "name": "ผู้รับมอบหมาย3",
+        "kind": "text",
+        "mode": "replace"
+      }
+    ],
+    "expected": {
+      "companyNeedle": "เอบีซี",
+      "labelHint": "มอบหมายให้"
+    }
+  },
+  "phoneFlush": {
+    "plain": "ติดต่อสำนักงานใหญ่(โทร00-000-0000) สำนักงานสาขา(โทร00-000-0000,00-000-0001) ตัวอย่าง",
+    "suggestions": [
+      {
+        "plainText": "00-000-0000",
+        "label": "โทร",
+        "name": "โทรศัพท์",
+        "kind": "text",
+        "mode": "replace",
+        "occurrence": 0
+      },
+      {
+        "plainText": "00-000-0000,00-000-0001",
+        "label": "โทร",
+        "name": "โทรศัพท์สาขา",
+        "kind": "text",
+        "mode": "replace"
+      },
+      {
+        "plainText": "โทร00-000-0000",
+        "name": "โทรศัพท์3",
+        "kind": "text",
+        "mode": "replace",
+        "occurrence": 0
+      }
+    ],
+    "expected": {
+      "phone": "00-000-0000",
+      "phoneList": "00-000-0000,00-000-0001",
+      "labelHint": "โทร"
+    }
+  },
+  "flushText": {
+    "plain": "มอบหมายให้บริษัท ตัวอย่าง เอบีซี จำกัดเป็นผู้รับมอบ (โทรสำนักงานใหญ่) ปิดท้าย",
+    "suggestions": [
+      {
+        "plainText": "บริษัท ตัวอย่าง เอบีซี จำกัด",
+        "label": "มอบหมายให้",
+        "name": "ผู้รับมอบหมาย",
+        "kind": "text",
+        "mode": "replace"
+      },
+      {
+        "plainText": "สำนักงานใหญ่",
+        "label": "โทร",
+        "name": "โทรถึง",
+        "kind": "text",
+        "mode": "replace"
+      },
+      {
+        "plainText": "โทรสำนักงานใหญ่",
+        "name": "โทรถึง2",
+        "kind": "text",
+        "mode": "replace"
+      }
+    ],
+    "expected": {
+      "companyNeedle": "เอบีซี",
+      "labelHint": "มอบหมายให้",
+      "officeText": "สำนักงานใหญ่",
+      "officeLabel": "โทร",
+      "gluedOfficePrefix": "โทรสำนักงาน"
+    }
+  },
+  "multiOccurrence": {
+    "plain": "ชื่อสมชายใจดี ที่อยู่กรุงเทพฯ ชื่อสมชายใจดี เบอร์00-000 และชื่อสมชายใจดีอีกครั้ง",
+    "suggestions": [
+      {
+        "plainText": "สมชายใจดี",
+        "label": "ชื่อ",
+        "name": "ชื่อ",
+        "kind": "text",
+        "mode": "replace",
+        "occurrence": 0
+      }
+    ],
+    "expected": {
+      "nameText": "สมชายใจดี",
+      "fieldName": "ชื่อ",
+      "hitCount": 3
+    }
+  },
+  "phoneShard": {
+    "plain": "เบอร์โทรศัพท์ 00-003-0000,099-000-0001 ของจำเลยที่ 3 และจำเลยที่ 3 อีก",
+    "suggestions": [
+      {
+        "plainText": "3",
+        "label": "ของจำเลยที่",
+        "name": "ของจำเลยที่",
+        "kind": "text",
+        "mode": "replace",
+        "occurrence": 0
+      }
+    ],
+    "expected": {
+      "digit": "3",
+      "midPhoneFragment": "00-00"
+    }
+  },
+  "digitFlush": {
+    "plain": "1โฉนด/นส.3ก20000002        9001เมืองตัวอย่างตัวอย่าง ค่าจ้าง1200หนึ่งพันสองร้อยบาท",
+    "suggestions": [
+      {
+        "plainText": "1",
+        "label": "ที่",
+        "name": "ที่_แถว",
+        "kind": "text",
+        "mode": "replace"
+      },
+      {
+        "plainText": "9001",
+        "label": "หน้าสำรวจ",
+        "name": "หน้าสำรวจ",
+        "kind": "text",
+        "mode": "replace"
+      },
+      {
+        "plainText": "1200",
+        "label": "ราคา/หน่วย",
+        "name": "ราคาต่อหน่วย",
+        "kind": "text",
+        "mode": "replace"
+      }
+    ],
+    "expected": {
+      "rejectedDigit": "1",
+      "rejectedNextChar": "โ",
+      "pageSurvey": "9001",
+      "price": "1200"
+    }
+  },
+  "footerUnique": {
+    "xml": "footer-unique.xml",
+    "plain": "หัวคอลัมน์\n1ค่าจ้าง1200บาท\nภาษี\nรวมทั้งสิ้น           1,116หนึ่งพันหนึ่งร้อยสิบหกบาท",
+    "suggestions": [
+      {
+        "plainText": "1ค่าจ้าง1200บาท",
+        "name": "รายการค่าใช้จ่าย",
+        "kind": "list-table",
+        "mode": "wrap-row"
+      },
+      {
+        "plainText": "1200",
+        "label": "ราคา",
+        "name": "ราคา_แถว2",
+        "kind": "text",
+        "mode": "replace",
+        "occurrence": 0
+      },
+      {
+        "plainText": "1,116",
+        "label": "รวมทั้งสิ้น",
+        "name": "รวมทั้งสิ้น",
+        "kind": "text",
+        "mode": "replace"
+      },
+      {
+        "plainText": "หนึ่งพันหนึ่งร้อยสิบหกบาท",
+        "label": "รวมทั้งสิ้น",
+        "name": "รวมทั้งสิ้น_ตัวอักษร",
+        "kind": "text",
+        "mode": "replace"
+      }
+    ],
+    "expected": {
+      "totalDigits": "1,116",
+      "totalWords": "หนึ่งพันหนึ่งร้อยสิบหกบาท",
+      "prototypePrice": "1200"
+    }
+  },
+  "contactEnrich": {
+    "plain": "ที่อยู่ กรุงเทพฯ โทร 00-000-0000,099-000-0003 Email user@example.com ปิด",
+    "suggestions": [
+      {
+        "plainText": "กรุงเทพฯ",
+        "label": "ที่อยู่",
+        "name": "ที่อยู่",
+        "kind": "text",
+        "mode": "replace"
+      }
+    ],
+    "expected": {
+      "phoneNeedle": "00-000-0000",
+      "emailMarker": "@"
+    }
+  },
+  "hyphenPhone": {
+    "plain": "โทร 00-000-0000,099-000-0003 คดีหมายเลขแดงที่ - จบ",
+    "suggestions": [
+      {
+        "plainText": "-",
+        "label": "คดีหมายเลขแดงที่",
+        "name": "คดีแดง",
+        "kind": "text",
+        "mode": "replace"
+      }
+    ],
+    "expected": {
+      "hyphen": "-",
+      "phoneNeedle": "00-000-0000",
+      "labelAnchorNeedle": "แดงที่",
+      "labelAnchorLookbehind": 12
+    }
+  }
+}

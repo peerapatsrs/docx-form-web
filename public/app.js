@@ -20,6 +20,58 @@ function refreshShellElements() {
 }
 
 /**
+ * Field-name helpers from /public/field-names.js (loaded before this script).
+ * Single client source of truth — mirrors src/server/field-names.ts.
+ * @returns {{
+ *   normalizeFieldName: (raw: unknown) => string,
+ *   isValidFieldName: (raw: unknown) => boolean,
+ *   FIELD_NAME_ALLOWED_HINT: string,
+ * }}
+ */
+function docxFieldNames() {
+  const api = /** @type {any} */ (globalThis).DocxFieldNames;
+  if (!api?.isValidFieldName || !api?.normalizeFieldName) {
+    throw new Error("field-names.js is not loaded");
+  }
+  return api;
+}
+
+/** @param {unknown} raw */
+function normalizeFieldName(raw) {
+  return docxFieldNames().normalizeFieldName(raw);
+}
+
+/** @param {unknown} raw */
+function isValidFieldName(raw) {
+  return docxFieldNames().isValidFieldName(raw);
+}
+
+function fieldNameAllowedHint() {
+  return docxFieldNames().FIELD_NAME_ALLOWED_HINT || "ตัวอักษร ตัวเลข _ . - /";
+}
+
+/** @param {Record<string, unknown> | null | undefined} bag @param {string} fieldName */
+function lookupCompatValue(bag, fieldName) {
+  return docxFieldNames().lookupCompatValue(bag, fieldName);
+}
+
+/**
+ * @param {Array<{ name: string, type?: string, aliases?: string[], itemFields?: any[] }>} fields
+ * @param {Record<string, unknown> | null | undefined} values
+ */
+function projectValuesOntoFields(fields, values) {
+  return docxFieldNames().projectValuesOntoFields(fields, values);
+}
+
+/**
+ * @param {Array<{ name: string, aliases?: string[] }>} fields
+ * @param {Record<string, unknown> | null | undefined} bag
+ */
+function projectFlatOntoFields(fields, bag) {
+  return docxFieldNames().projectFlatOntoFields(fields, bag);
+}
+
+/**
  * @type {{
  *   file: File | null,
  *   filename: string,
@@ -393,10 +445,44 @@ function deserializeSlotFromDraft(raw) {
   }
   const file = draftBlobToFile(raw.file);
   if (!file) return null;
+  const fields = raw.fields;
+  const rawValues =
+    raw.values && typeof raw.values === "object" ? raw.values : {};
+  const rawSkip = raw.skip && typeof raw.skip === "object" ? raw.skip : {};
+  const rawRowSkip =
+    raw.rowSkip && typeof raw.rowSkip === "object" ? raw.rowSkip : {};
+  const values = projectValuesOntoFields(fields, rawValues);
+  const skip = projectFlatOntoFields(fields, rawSkip);
+  /** @type {Record<string, Record<string, boolean>[]>} */
+  const rowSkip = {};
+  for (const f of fields) {
+    if (f.type !== "list") continue;
+    const rsHit = lookupCompatValue(rawRowSkip, f.name);
+    if (!rsHit.hit || !Array.isArray(rsHit.value)) continue;
+    rowSkip[f.name] = rsHit.value.map((row) => {
+      if (!row || typeof row !== "object") return {};
+      /** @type {Record<string, boolean>} */
+      const next = {};
+      for (const item of f.itemFields || []) {
+        const cell = lookupCompatValue(row, item.name);
+        if (cell.hit) next[item.name] = !!cell.value;
+      }
+      return next;
+    });
+  }
   /** @type {Record<string, File | null>} */
   const images = {};
   if (raw.images && typeof raw.images === "object") {
+    for (const f of fields) {
+      if (f.type !== "image") continue;
+      const hit = lookupCompatValue(raw.images, f.name);
+      if (!hit.hit) continue;
+      images[f.name] = draftBlobToFile(hit.value);
+    }
+    // Keep any leftover exact keys that still match a field name.
     for (const [name, blob] of Object.entries(raw.images)) {
+      if (Object.prototype.hasOwnProperty.call(images, name)) continue;
+      if (!fields.some((f) => f.name === name)) continue;
       images[name] = draftBlobToFile(blob);
     }
   }
@@ -404,10 +490,10 @@ function deserializeSlotFromDraft(raw) {
     id: typeof raw.id === "string" && raw.id ? raw.id : newSlotId(),
     file,
     filename: raw.filename || file.name || "template.docx",
-    fields: raw.fields,
-    values: raw.values && typeof raw.values === "object" ? raw.values : {},
-    skip: raw.skip && typeof raw.skip === "object" ? raw.skip : {},
-    rowSkip: raw.rowSkip && typeof raw.rowSkip === "object" ? raw.rowSkip : {},
+    fields,
+    values,
+    skip,
+    rowSkip,
     fileContent: typeof raw.fileContent === "string" ? raw.fileContent : "",
     fileLayout: Array.isArray(raw.fileLayout) ? raw.fileLayout : [],
     images,
@@ -3621,8 +3707,8 @@ async function runTaggerAiDraft() {
     for (const s of sortedRaw) {
       const plain = String(s.plainText || "").trim();
       if (!plain) continue;
-      let name = String(s.name || "").trim().replace(/^#+/, "");
-      if (!name || !/^[\w\u0E00-\u0E7F.-]+$/u.test(name)) continue;
+      let name = normalizeFieldName(String(s.name || "").replace(/^#+/, ""));
+      if (!name || !isValidFieldName(name)) continue;
       // Same name at multiple spans is OK (one form field, many locations).
       // Only rename when this name is already used by a different plainText in-session.
       if (usedNames.has(name)) {
@@ -6061,13 +6147,13 @@ function suggestFieldNameFromHeader(headerText, used) {
   if (!raw) return "";
   // Skip pure punctuation / checkbox marks as header names.
   if (/^[✓√✖×xX\-–—·.•]+$/u.test(raw)) return "";
-  // Normalize separators first so "เขต / อำเภอ" → เขต_อำเภอ (not dropped).
+  // Keep slash names (e.g. "เขต / อำเภอ" → เขต/อำเภอ); fall back without marks.
   let base = suggestTaggerName(raw);
   if (!base || base === "field") {
     base = suggestTaggerName(raw.replace(/[/\\|·•]+/g, " "));
   }
   if (!base || base === "field") return "";
-  if (!/^[\w\u0E00-\u0E7F.-]+$/u.test(base)) return "";
+  if (!isValidFieldName(base)) return "";
   let name = base;
   let n = 2;
   while (used.has(name)) name = `${base}_${n++}`;
@@ -7414,15 +7500,18 @@ async function commitTaggerOps(ops) {
 }
 
 function suggestTaggerName(plain) {
-  const cleaned = String(plain)
-    .trim()
-    .replace(/[/\\|]+/g, "_")
+  const cleaned = normalizeFieldName(plain)
+    .replace(/\s*\/\s*/g, "/")
+    .replace(/[\\|]+/g, "_")
     .replace(/\s+/g, "_")
-    .replace(/[^\w\u0E00-\u0E7F.-]/gu, "")
+    .replace(/[^\w\u0E00-\u0E7F./-]/gu, "")
+    .replace(/\/{2,}/g, "/")
+    .replace(/^\/+|\/+$/g, "")
     .replace(/_+/g, "_")
     .replace(/^_+|_+$/g, "")
     .slice(0, 40);
-  return cleaned || "field";
+  if (!cleaned) return "field";
+  return isValidFieldName(cleaned) ? cleaned : "field";
 }
 
 /**
@@ -7444,7 +7533,7 @@ function suggestTaggerNameFromContext(sel) {
   if (at <= 0) return "";
   const before = original.slice(Math.max(0, at - 48), at);
   // Label immediately before tabs/spaces: "...ทะเบียนลูกค้า\t"
-  const m = /([\u0E00-\u0E7Fa-zA-Z][\u0E00-\u0E7Fa-zA-Z0-9._-]{0,39})\s*$/u.exec(
+  const m = /([\u0E00-\u0E7Fa-zA-Z][\u0E00-\u0E7Fa-zA-Z0-9._/-]{0,39})\s*$/u.exec(
     before.replace(/[\t ]+$/u, ""),
   );
   if (!m) return "";
@@ -7513,7 +7602,8 @@ async function confirmTaggerVariable() {
     /** @type {HTMLInputElement} */ (document.getElementById("taggerTrueText"))?.value ?? "";
   const falseText =
     /** @type {HTMLInputElement} */ (document.getElementById("taggerFalseText"))?.value ?? "";
-  const name = nameInput?.value?.trim() || "";
+  const name = normalizeFieldName(nameInput?.value || "");
+  if (nameInput && nameInput.value !== name) nameInput.value = name;
   if (!name) {
     showTaggerDialogError(
       kind === "list" || kind === "list-table"
@@ -7528,8 +7618,8 @@ async function confirmTaggerVariable() {
     showTaggerDialogError('ไม่ต้องใส่เครื่องหมาย + นำหน้า — ระบบจะสร้างเป็น {{+ชื่อ}} ให้');
     return;
   }
-  if (!/^[\w\u0E00-\u0E7F.-]+$/u.test(name)) {
-    showTaggerDialogError("ชื่อใช้ได้เฉพาะตัวอักษร ตัวเลข _ . -");
+  if (!isValidFieldName(name)) {
+    showTaggerDialogError(`ชื่อใช้ได้เฉพาะ${fieldNameAllowedHint()}`);
     return;
   }
 
@@ -7622,11 +7712,12 @@ async function confirmTaggerVariable() {
       if (!fieldName && cellIsEmpty) {
         fieldName = suggestFieldNameFromHeader(headers[idx] || "", usedAtConfirm);
       }
+      fieldName = normalizeFieldName(fieldName);
       if (!fieldName) continue;
       usedAtConfirm.add(fieldName);
-      if (!/^[\w\u0E00-\u0E7F.-]+$/u.test(fieldName)) {
+      if (!isValidFieldName(fieldName)) {
         showTaggerDialogError(
-          `ชื่อฟิลด์เซลล์ไม่ถูกต้อง: ${fieldName} — ใช้ตัวอักษร ตัวเลข _ . -`,
+          `ชื่อฟิลด์เซลล์ไม่ถูกต้อง: ${fieldName} — ใช้${fieldNameAllowedHint()}`,
         );
         return;
       }
@@ -7759,13 +7850,15 @@ async function confirmTaggerVariable() {
       document.querySelectorAll(".tagger-line-field")
     );
     for (const input of lineInputs) {
-      const rawField = input.value.trim();
+      const rawField = normalizeFieldName(input.value);
       if (!rawField) continue;
       const isAutoField = rawField.startsWith("+");
-      const fieldName = isAutoField ? rawField.slice(1).trim() : rawField;
-      if (!fieldName || !/^[\w\u0E00-\u0E7F.-]+$/u.test(fieldName)) {
+      const fieldName = normalizeFieldName(
+        isAutoField ? rawField.slice(1) : rawField,
+      );
+      if (!fieldName || !isValidFieldName(fieldName)) {
         showTaggerDialogError(
-          `ชื่อฟิลด์บรรทัดไม่ถูกต้อง: ${rawField} — ใช้ชื่อปกติ หรือ +ลำดับ สำหรับรันเลข`,
+          `ชื่อฟิลด์บรรทัดไม่ถูกต้อง: ${rawField} — ใช้${fieldNameAllowedHint()} หรือ +ลำดับ สำหรับรันเลข`,
         );
         return;
       }
@@ -8038,11 +8131,13 @@ async function saveTaggerEdit() {
   if (!id) return;
   const r = taggerSession.replacements.find((x) => x.id === id);
   if (!r || isTaggerDeleteOp(r)) return;
-  const name = String(
-    /** @type {HTMLInputElement | null} */ (document.getElementById("taggerEditName"))?.value || "",
-  ).trim();
-  if (!name || !/^[\w\u0E00-\u0E7F.-]+$/u.test(name)) {
-    showErr("ชื่อตัวแปรไม่ถูกต้อง — ใช้ตัวอักษร ตัวเลข ไทย . - _");
+  const nameEl = /** @type {HTMLInputElement | null} */ (
+    document.getElementById("taggerEditName")
+  );
+  const name = normalizeFieldName(nameEl?.value || "");
+  if (nameEl && nameEl.value !== name) nameEl.value = name;
+  if (!name || !isValidFieldName(name)) {
+    showErr(`ชื่อตัวแปรไม่ถูกต้อง — ใช้${fieldNameAllowedHint()}`);
     return;
   }
   const editKindRaw =
@@ -9465,6 +9560,27 @@ function writeImportPayloadIntoSlot(slot, payload) {
   const rowSkipIn =
     payload.rowSkip && typeof payload.rowSkip === "object" ? payload.rowSkip : {};
 
+  // Remap legacy NFKC keys onto current NFC field / item names first.
+  const projectedValues = projectValuesOntoFields(slot.fields || [], valuesIn);
+  const projectedSkip = projectFlatOntoFields(slot.fields || [], skipIn);
+  /** @type {Record<string, any>} */
+  const projectedRowSkip = {};
+  for (const f of slot.fields || []) {
+    if (f.type !== "list") continue;
+    const rsHit = lookupCompatValue(rowSkipIn, f.name);
+    if (!rsHit.hit || !Array.isArray(rsHit.value)) continue;
+    projectedRowSkip[f.name] = rsHit.value.map((row) => {
+      if (!row || typeof row !== "object") return {};
+      /** @type {Record<string, boolean>} */
+      const next = {};
+      for (const item of f.itemFields || []) {
+        const cell = lookupCompatValue(row, item.name);
+        if (cell.hit) next[item.name] = !!cell.value;
+      }
+      return next;
+    });
+  }
+
   /** @type {Record<string, any>} */
   const values = structuredClone(slot.values || {});
   /** @type {Record<string, boolean>} */
@@ -9478,12 +9594,12 @@ function writeImportPayloadIntoSlot(slot, payload) {
       skip[f.name] = true;
       continue;
     }
-    if (!Object.prototype.hasOwnProperty.call(valuesIn, f.name)) {
+    if (!Object.prototype.hasOwnProperty.call(projectedValues, f.name)) {
       // Keep skeleton skip if AI omitted the key.
       if (f.type === "bool") {
         values[f.name] = false;
-        skip[f.name] = Object.prototype.hasOwnProperty.call(skipIn, f.name)
-          ? !!skipIn[f.name]
+        skip[f.name] = Object.prototype.hasOwnProperty.call(projectedSkip, f.name)
+          ? !!projectedSkip[f.name]
           : false;
       } else if (f.type === "list") {
         values[f.name] = [];
@@ -9495,11 +9611,11 @@ function writeImportPayloadIntoSlot(slot, payload) {
       }
       continue;
     }
-    const val = valuesIn[f.name];
+    const val = projectedValues[f.name];
     if (f.type === "bool") {
       values[f.name] = coerceBoolValue(val);
-      skip[f.name] = Object.prototype.hasOwnProperty.call(skipIn, f.name)
-        ? !!skipIn[f.name]
+      skip[f.name] = Object.prototype.hasOwnProperty.call(projectedSkip, f.name)
+        ? !!projectedSkip[f.name]
         : false;
       continue;
     }
@@ -9507,23 +9623,22 @@ function writeImportPayloadIntoSlot(slot, payload) {
       const rows = Array.isArray(val) ? val : [];
       values[f.name] = rows.map((row) => {
         if (!row || typeof row !== "object") return row;
-        const next = { ...row };
+        /** @type {Record<string, any>} */
+        const next = {};
         for (const item of f.itemFields || []) {
-          if (
-            item.type === "bool" &&
-            Object.prototype.hasOwnProperty.call(next, item.name)
-          ) {
-            next[item.name] = coerceBoolValue(next[item.name]);
-          }
+          const cell = lookupCompatValue(row, item.name);
+          if (!cell.hit) continue;
+          next[item.name] =
+            item.type === "bool" ? coerceBoolValue(cell.value) : cell.value;
         }
         return next;
       });
       const empty = rows.length === 0;
-      skip[f.name] = Object.prototype.hasOwnProperty.call(skipIn, f.name)
-        ? !!skipIn[f.name]
+      skip[f.name] = Object.prototype.hasOwnProperty.call(projectedSkip, f.name)
+        ? !!projectedSkip[f.name]
         : empty;
-      if (Array.isArray(rowSkipIn[f.name])) {
-        rowSkip[f.name] = structuredClone(rowSkipIn[f.name]);
+      if (Array.isArray(projectedRowSkip[f.name])) {
+        rowSkip[f.name] = structuredClone(projectedRowSkip[f.name]);
       } else {
         rowSkip[f.name] = rows.map((row) => {
           /** @type {Record<string, boolean>} */
@@ -9537,9 +9652,11 @@ function writeImportPayloadIntoSlot(slot, payload) {
               rs[item.name] = true;
               continue;
             }
-            const cell = row[item.name];
+            const cell = lookupCompatValue(row, item.name);
             if (item.type === "bool") rs[item.name] = false;
-            else rs[item.name] = cell == null || String(cell).trim() === "";
+            else
+              rs[item.name] =
+                !cell.hit || cell.value == null || String(cell.value).trim() === "";
           }
           return rs;
         });
@@ -9548,8 +9665,8 @@ function writeImportPayloadIntoSlot(slot, payload) {
     }
     const str = val == null ? "" : String(val);
     values[f.name] = str;
-    skip[f.name] = Object.prototype.hasOwnProperty.call(skipIn, f.name)
-      ? !!skipIn[f.name]
+    skip[f.name] = Object.prototype.hasOwnProperty.call(projectedSkip, f.name)
+      ? !!projectedSkip[f.name]
       : !str.trim();
   }
 
@@ -10275,31 +10392,56 @@ function validateImportedValueTypes(data) {
  */
 function applyValuesWithEmptySkip(data, opts = {}) {
   const treatMissingImagesAsSkip = opts.treatMissingImagesAsSkip !== false;
-  const known = new Set(state.fields.map((f) => f.name));
-  const importedValues =
+  const rawValues =
     data.values && typeof data.values === "object" ? data.values : {};
-  const importedImages =
+  const rawImages =
     data.images && typeof data.images === "object" ? data.images : {};
-  const importedSkip =
+  const rawSkip =
     data.skip && typeof data.skip === "object" ? data.skip : {};
-  const importedRowSkip =
+  const rawRowSkip =
     data.rowSkip && typeof data.rowSkip === "object" ? data.rowSkip : {};
 
+  const importedValues = projectValuesOntoFields(state.fields, rawValues);
+  const importedSkip = projectFlatOntoFields(state.fields, rawSkip);
+  const importedImages = projectFlatOntoFields(
+    state.fields.filter((f) => f.type === "image"),
+    rawImages,
+  );
+  /** @type {Record<string, any>} */
+  const importedRowSkip = {};
+  for (const f of state.fields) {
+    if (f.type !== "list") continue;
+    const rsHit = lookupCompatValue(rawRowSkip, f.name);
+    if (!rsHit.hit || !Array.isArray(rsHit.value)) continue;
+    importedRowSkip[f.name] = rsHit.value.map((row) => {
+      if (!row || typeof row !== "object") return {};
+      /** @type {Record<string, boolean>} */
+      const next = {};
+      for (const item of f.itemFields || []) {
+        const cell = lookupCompatValue(row, item.name);
+        if (cell.hit) next[item.name] = !!cell.value;
+      }
+      return next;
+    });
+  }
+
   for (const [name, val] of Object.entries(importedValues)) {
-    if (!known.has(name)) continue;
     const field = state.fields.find((f) => f.name === name);
-    if (field?.type === "bool") {
+    if (!field) continue;
+    if (field.type === "bool") {
       state.values[name] = coerceBoolValue(val);
       continue;
     }
-    if (field?.type === "list" && Array.isArray(val)) {
+    if (field.type === "list" && Array.isArray(val)) {
       state.values[name] = val.map((row) => {
         if (!row || typeof row !== "object") return row;
-        const next = { ...row };
+        /** @type {Record<string, any>} */
+        const next = {};
         for (const item of field.itemFields) {
-          if (item.type === "bool" && Object.prototype.hasOwnProperty.call(next, item.name)) {
-            next[item.name] = coerceBoolValue(next[item.name]);
-          }
+          const cell = lookupCompatValue(row, item.name);
+          if (!cell.hit) continue;
+          next[item.name] =
+            item.type === "bool" ? coerceBoolValue(cell.value) : cell.value;
         }
         return next;
       });
@@ -10335,11 +10477,10 @@ function applyValuesWithEmptySkip(data, opts = {}) {
   };
 
   for (const [name, val] of Object.entries(importedSkip)) {
-    if (!known.has(name)) continue;
     state.skip[name] = !!val;
   }
   for (const [name, rows] of Object.entries(importedRowSkip)) {
-    if (!known.has(name) || !Array.isArray(rows)) continue;
+    if (!Array.isArray(rows)) continue;
     const listField = state.fields.find((f) => f.type === "list" && f.name === name);
     ensureRowSkip(
       name,
@@ -10386,12 +10527,13 @@ function applyValuesWithEmptySkip(data, opts = {}) {
           Array.isArray(rows) && rows[idx] && typeof rows[idx] === "object" ? rows[idx] : null;
         for (const item of f.itemFields) {
           if (item.type === "auto") continue;
-          if (srcRow && hasOwn(srcRow, item.name)) {
+          const cell = srcRow ? lookupCompatValue(srcRow, item.name) : { hit: false };
+          if (cell.hit) {
             row[item.name] =
-              item.type === "bool" ? coerceBoolValue(srcRow[item.name]) : srcRow[item.name];
+              item.type === "bool" ? coerceBoolValue(cell.value) : cell.value;
           }
           if (item.type === "bool") {
-            if (srcRow && hasOwn(srcRow, item.name)) {
+            if (cell.hit) {
               state.rowSkip[f.name][idx][item.name] = false;
             } else if (!hasOwn(state.rowSkip[f.name][idx], item.name)) {
               // Unmapped list bool stays editable
@@ -10400,8 +10542,8 @@ function applyValuesWithEmptySkip(data, opts = {}) {
             }
             continue;
           }
-          const missing = !srcRow || !hasOwn(srcRow, item.name);
-          const blank = !missing && isBlankFill(srcRow[item.name], item.type);
+          const missing = !cell.hit;
+          const blank = !missing && isBlankFill(cell.value, item.type);
           if (missing || blank) {
             state.rowSkip[f.name][idx][item.name] = true;
             state.values[f.name][idx][item.name] = "";

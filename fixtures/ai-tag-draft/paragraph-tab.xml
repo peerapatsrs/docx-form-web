@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>จำเลยที่</w:t><w:tab/><w:t>1</w:t><w:tab/><w:t>ชื่อ นายหนึ่ง</w:t></w:r></w:p>
+    <w:p><w:r><w:t>จำเลยที่</w:t><w:tab/><w:t>2</w:t><w:tab/><w:t>ชื่อ นายสอง</w:t></w:r></w:p>
+    <w:p><w:r><w:t>จำเลยที่</w:t><w:tab/><w:t>3</w:t><w:tab/><w:t>ชื่อ นายสาม</w:t></w:r></w:p>
+  </w:body>
+</w:document>

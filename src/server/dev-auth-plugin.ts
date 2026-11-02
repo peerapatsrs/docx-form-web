@@ -2,10 +2,10 @@ import { createAuthEndpoint, APIError } from "better-auth/api";
 import { setSessionCookie } from "better-auth/cookies";
 import * as z from "zod";
 import { isDevAuthEnabled } from "@/lib/dev-auth-flag";
-import { getDefaultDevAuthEmail } from "./dev-auth-email";
+import { getDefaultDevAuthEmail } from "./dev-auth-default-email";
 import { getAuthPool } from "./auth-db";
 
-export { getDefaultDevAuthEmail } from "./dev-auth-email";
+export { getDefaultDevAuthEmail } from "./dev-auth-default-email";
 export { isDevAuthEnabled } from "@/lib/dev-auth-flag";
 
 /**

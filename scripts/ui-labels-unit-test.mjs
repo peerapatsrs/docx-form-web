@@ -10,6 +10,11 @@ import {
   formatMissingFieldLabel,
   formatValidationBannerModel,
   seedListRowsIfEmpty,
+  isListRowEmpty,
+  listHasFilledRow,
+  collectMissingListValidation,
+  clipValidationItems,
+  formatInvalidEmailMissing,
   shouldShowSkipFirstUseTip,
   buildLayoutLabelMap,
   layoutBlocksToPlainText,
@@ -68,6 +73,57 @@ assert.deepEqual(seedListRowsIfEmpty([]), [{}]);
 const kept = [{ a: "1" }, { a: "2" }];
 assert.equal(seedListRowsIfEmpty(kept), kept);
 console.log("✓ seedListRowsIfEmpty");
+
+const itemFields7 = [
+  { name: "name", type: "text" },
+  { name: "qty", type: "text" },
+  { name: "price", type: "text" },
+  { name: "unit", type: "text" },
+  { name: "note", type: "text" },
+  { name: "sku", type: "text" },
+  { name: "desc", type: "text" },
+];
+assert.equal(isListRowEmpty({}, itemFields7), true);
+assert.equal(isListRowEmpty({ name: "", qty: "  " }, itemFields7), true);
+assert.equal(isListRowEmpty({ name: "A" }, itemFields7), false);
+assert.equal(listHasFilledRow([{}], itemFields7), false);
+assert.equal(listHasFilledRow(seedListRowsIfEmpty([]), itemFields7), false);
+assert.equal(listHasFilledRow([{ name: "A" }, {}], itemFields7), true);
+
+const emptySeeded = collectMissingListValidation({
+  fieldLabel: "รายการสินค้า",
+  itemFields: itemFields7,
+  rows: seedListRowsIfEmpty([]),
+});
+assert.equal(emptySeeded.mode, "need-row");
+assert.deepEqual(emptySeeded.missing, [
+  formatMissingFieldLabel("รายการสินค้า", UI_LABELS.validationListNeedFilledRow),
+]);
+assert.equal(emptySeeded.missing.length, 1);
+
+const partial = collectMissingListValidation({
+  fieldLabel: "รายการสินค้า",
+  itemFields: itemFields7,
+  rows: [{ name: "A", qty: "", price: "", unit: "", note: "", sku: "", desc: "" }, {}],
+  labelMap: { name: "สินค้า", qty: "จำนวน" },
+});
+assert.equal(partial.mode, "cells");
+assert.ok(partial.missing.every((s) => !s.includes("แถว 2.")));
+assert.ok(partial.missing.some((s) => s.includes("แถว 1.")));
+assert.ok(!partial.missing.includes(
+  formatMissingFieldLabel("รายการสินค้า", UI_LABELS.validationListNeedFilledRow),
+));
+console.log("✓ empty table row counts as one need-row item");
+
+assert.deepEqual(
+  clipValidationItems(Array.from({ length: 14 }, (_, i) => `f${i}`)),
+  [
+    ...Array.from({ length: 12 }, (_, i) => `f${i}`),
+    UI_LABELS.validationAndMoreFields(2),
+  ],
+);
+assert.equal(formatInvalidEmailMissing("อีเมล"), `อีเมล ${UI_LABELS.invalidEmailSuffix}`);
+console.log("✓ clipValidationItems + invalid email label");
 
 assert.equal(shouldShowSkipFirstUseTip(null), true);
 assert.equal(shouldShowSkipFirstUseTip(""), true);

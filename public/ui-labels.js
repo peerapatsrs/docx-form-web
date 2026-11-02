@@ -18,8 +18,16 @@ export const UI_LABELS = Object.freeze({
   validationTitle: (count) => `ยังมีช่องที่ยังไม่ได้กรอก (${count})`,
   validationHint: "กรอกให้ครบ หรือติ๊ก “ข้าม” ก่อนสร้างเอกสาร",
   validationListMinRows: "ต้องมีอย่างน้อย 1 แถว",
+  /** Banner item when a required table/list has no filled row (seeded empty rows do not count). */
+  validationListNeedFilledRow: "กรอกอย่างน้อย 1 แถว",
   validationRowPrefix: (listLabel, rowNum, itemLabel) =>
     `${listLabel} แถว ${rowNum}.${itemLabel}`,
+  validationAndMoreFields: (count) => `และอีก ${count} ช่อง`,
+  invalidEmailSuffix: "(รูปแบบอีเมลไม่ถูกต้อง)",
+  invalidEmailFieldError:
+    "รูปแบบอีเมลไม่ถูกต้อง — ตรวจอีกครั้ง หรือติ๊ก “ข้าม”",
+  fieldErrorPickFileOrSkip: "กรุณาเลือกไฟล์ หรือติ๊ก “ข้าม”",
+  fieldErrorAddRowOrSkip: "เพิ่มแถว หรือติ๊ก “ข้าม”",
 
   // Placeholders
   placeholderExamplePrefix: "เช่น ",
@@ -27,6 +35,7 @@ export const UI_LABELS = Object.freeze({
   // List / table
   listBadgeTable: "ตาราง",
   listBadgeFromFile: "ตารางจากไฟล์",
+  listBadgeList: "รายการ",
   addRow: "+ เพิ่มแถว",
   removeRow: "ลบ",
   removeRowTitle: "ลบแถว",
@@ -53,7 +62,17 @@ export const UI_LABELS = Object.freeze({
   importJson: "นำเข้า JSON",
   importJsonTitle: "นำเข้าค่าจากไฟล์ JSON",
   putAiKey: "ใส่ AI key",
+  aiReadyFallback: "พร้อม",
+  aiConnectedPrefix: "AI · ",
   attachSource: "แนบเอกสารต้นทาง",
+  attachSourceMulti: "ต้นทาง → ให้ AI กรอก JSON",
+  attachSourceInputAria: "แนบเอกสารต้นทางสำหรับ AI กรอกค่า",
+  attachSourceNeedKeyBanner: "ต้องใส่ AI API key ของคุณก่อนถึงจะแนบเอกสารได้",
+  attachSourceTitleNeedKey: "ต้องใส่ AI key ของคุณก่อน",
+  attachSourceTitleMulti:
+    "แนบต้นทาง — ส่ง Export JSON ให้ AI กรอกค่า แล้วนำ JSON กลับมาใส่จอ",
+  attachSourceTitleSingle: "แนบ PDF / Word / รูป — ส่งโครง JSON ให้ AI กรอกค่า",
+  addTemplateInputAria: "เลือกไฟล์เทมเพลต Word เพิ่ม",
   homeLink: "← หน้าหลัก",
   homeLinkTitle: "กลับไปหน้าอัปโหลดเทมเพลต",
   createTemplate: "สร้างเทมเพลต",
@@ -62,6 +81,12 @@ export const UI_LABELS = Object.freeze({
   createDocMulti: "สร้างเอกสาร…",
   saveDraft: "บันทึกดราฟ",
   loadDraft: "โหลดดราฟ",
+  multiMetaHint:
+    " · แนบต้นทาง → ระบบสร้างโครง JSON → AI กรอกค่า → ใส่ลงหน้าจอ",
+  stickyCtaHint:
+    "จะดาวน์โหลดไฟล์ใหม่ โดยไม่แก้ไฟล์ต้นฉบับ · ช่องว่างต้องติ๊ก “ข้าม” · ส่งออก/นำเข้า JSON ได้ด้านบน · บันทึกดราฟเพื่อกลับมาทำต่อข้ามวัน",
+  stickyCtaHintMulti:
+    " · หลายเทมเพลต: แนบต้นทางเพื่อแมป JSON ลงจอ แล้วกดสร้างเลือกไฟล์เดียวหรือทั้งหมด",
 
   // Home
   homeHeadline: "เติมตัวแปรใน Word",
@@ -70,17 +95,56 @@ export const UI_LABELS = Object.freeze({
   dropzoneDrag: "ลากไฟล์ .docx มาวางที่นี่",
   dropzonePick: "เลือกไฟล์",
   dropzoneFreeLimit: "ฟรีสูงสุด 2 ไฟล์ต่อครั้ง",
+  dropzoneAriaUploadWord: "อัปโหลดไฟล์ Word",
+  dropzoneAriaUploadTemplates: "อัปโหลดไฟล์เทมเพลต Word",
+  showFullContentLabel: "แสดงรายละเอียดเนื้อหาในไฟล์ทั้งหมด",
   noTemplateTitle: "ยังไม่มีเทมเพลต?",
   noTemplateDesc: "ไฮไลต์ข้อความในไฟล์ตัวอย่าง แล้วแทนด้วย {{ตัวแปร}}",
   createTemplateFromDoc: "สร้างเทมเพลตจากเอกสาร",
   manualVarsDetails: "วิธีใส่ตัวแปรด้วยมือ",
   startCreateTemplate: "เริ่มสร้างเทมเพลต",
+  loadDraftAria: "โหลดดราฟ",
+  loadDraftEmptyLoading: "กำลังโหลดรายการดราฟ…",
+  tipKindText: "ข้อความ",
+  tipKindBool: "ติ๊ก",
+  tipKindAuto: "รันเลข",
+  tipKindImage: "รูป",
+  tipKindListTable: "ลิสต์ / ตาราง",
+  tipCodeText: "{{ชื่อ}}",
+  tipCodeBool: "{{พบ?√,×}}",
+  tipCodeAuto: "{{+ลำดับ}}",
+  tipCodeImage: "{{logo}}",
+  tipCodeList: "{{#รายการ}}…{{/}}",
+  tipNoteBoolLead: "หลัง",
+  tipNoteBoolTrail: "คือข้อความเมื่อจริง,เท็จ",
+  tipNoteAuto: "ใช้ได้เฉพาะในลูป {{#…}}…{{/}}",
+  tipNoteImage: "วางรูปใน Word แล้วใส่แท็กใน Alt Text",
 
   // Doc preview chrome
   docPreviewLabel: "ตัวอย่างเนื้อหาในไฟล์ (กรอกในช่องว่างได้)",
   extraFieldsTitle: "ฟิลด์เพิ่มเติม",
   extraFieldsImagesTitle: "ฟิลด์เพิ่มเติม (รูปภาพ)",
 });
+
+/**
+ * Cap a validation item list and append an "and N more" trailer when needed.
+ * @param {string[]} items
+ * @param {number} [limit]
+ * @returns {string[]}
+ */
+export function clipValidationItems(items, limit = 12) {
+  const list = Array.isArray(items) ? items.map((s) => String(s || "").trim()).filter(Boolean) : [];
+  const max = Math.max(1, Number(limit) || 12);
+  if (list.length <= max) return list;
+  return [...list.slice(0, max), UI_LABELS.validationAndMoreFields(list.length - max)];
+}
+
+/**
+ * @param {string} fieldLabel
+ */
+export function formatInvalidEmailMissing(fieldLabel) {
+  return `${String(fieldLabel || "").trim()} ${UI_LABELS.invalidEmailSuffix}`.trim();
+}
 
 /**
  * Prefer field.label, then layout-derived map, then the raw key.
@@ -148,6 +212,95 @@ export function formatValidationBannerModel(displayLabels) {
 export function seedListRowsIfEmpty(current) {
   if (!Array.isArray(current) || current.length === 0) return [{}];
   return current;
+}
+
+/**
+ * A list/table row is fully empty when every text/email cell is blank.
+ * Bool/auto columns are ignored (they always have a value).
+ * @param {Record<string, unknown> | null | undefined} row
+ * @param {Array<{ name?: string, type?: string }> | null | undefined} itemFields
+ */
+export function isListRowEmpty(row, itemFields) {
+  const fields = Array.isArray(itemFields) ? itemFields : [];
+  const data = row && typeof row === "object" ? row : {};
+  const textFields = fields.filter(
+    (f) => f && f.type !== "bool" && f.type !== "auto",
+  );
+  if (textFields.length === 0) {
+    // No fillable cells — treat as empty so seeded rows do not count as filled.
+    return true;
+  }
+  return textFields.every((f) => !String(data[f.name] ?? "").trim());
+}
+
+/**
+ * True when at least one row has any non-empty text/email cell.
+ * @param {unknown} rows
+ * @param {Array<{ name?: string, type?: string }> | null | undefined} itemFields
+ */
+export function listHasFilledRow(rows, itemFields) {
+  if (!Array.isArray(rows) || rows.length === 0) return false;
+  return rows.some((row) => !isListRowEmpty(row, itemFields));
+}
+
+/**
+ * Collect missing validation labels for a required list/table field.
+ * Fully empty rows (including the seeded starter row) are not counted cell-by-cell.
+ * When no filled row exists, returns a single "<label> (กรอกอย่างน้อย 1 แถว)" item.
+ *
+ * @param {{
+ *   fieldLabel: string,
+ *   itemFields: Array<{ name?: string, type?: string, label?: string }>,
+ *   rows: unknown,
+ *   rowSkip?: Record<number, Record<string, boolean>> | null,
+ *   labelMap?: Map<string, string> | Record<string, string> | null,
+ *   emailInvalid?: (raw: string) => boolean,
+ *   isEmailField?: (name: string, field: { name?: string, type?: string }) => boolean,
+ * }} opts
+ * @returns {{ missing: string[], mode: "need-row" | "cells" }}
+ */
+export function collectMissingListValidation(opts) {
+  const fieldLabel = String(opts?.fieldLabel || "").trim();
+  const itemFields = Array.isArray(opts?.itemFields) ? opts.itemFields : [];
+  const rows = Array.isArray(opts?.rows) ? opts.rows : [];
+  const rowSkip = opts?.rowSkip || null;
+  const labelMap = opts?.labelMap || null;
+  const needRowNote =
+    UI_LABELS.validationListNeedFilledRow || UI_LABELS.validationListMinRows;
+
+  if (!listHasFilledRow(rows, itemFields)) {
+    return {
+      missing: [formatMissingFieldLabel(fieldLabel, needRowNote)],
+      mode: "need-row",
+    };
+  }
+
+  /** @type {string[]} */
+  const missing = [];
+  rows.forEach((row, idx) => {
+    if (isListRowEmpty(row, itemFields)) return;
+    for (const item of itemFields) {
+      if (!item || item.type === "bool" || item.type === "auto") continue;
+      if (rowSkip?.[idx]?.[item.name]) continue;
+      const itemLabel = fieldDisplayLabel(item, labelMap, item.name);
+      const raw = String(row?.[item.name] ?? "").trim();
+      if (!raw) {
+        missing.push(UI_LABELS.validationRowPrefix(fieldLabel, idx + 1, itemLabel));
+      } else if (
+        typeof opts.isEmailField === "function" &&
+        typeof opts.emailInvalid === "function" &&
+        opts.isEmailField(item.name, item) &&
+        opts.emailInvalid(raw)
+      ) {
+        missing.push(
+          formatInvalidEmailMissing(
+            UI_LABELS.validationRowPrefix(fieldLabel, idx + 1, itemLabel),
+          ),
+        );
+      }
+    }
+  });
+  return { missing, mode: "cells" };
 }
 
 /**

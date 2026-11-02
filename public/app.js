@@ -4,7 +4,11 @@ import {
   formatExamplePlaceholder,
   formatMissingFieldLabel,
   formatValidationBannerModel,
+  formatInvalidEmailMissing,
+  clipValidationItems,
   seedListRowsIfEmpty,
+  isListRowEmpty,
+  collectMissingListValidation,
   shouldShowSkipFirstUseTip,
   buildLayoutLabelMap,
   layoutBlocksToPlainText,
@@ -1583,11 +1587,11 @@ function validateBeforeSubmit() {
         missing.push(formatMissingFieldLabel(fieldLabel));
         markFieldError(`#f-${cssId(f.name)}`, f.name);
       } else if (isEmailTypedField(f.name, f) && !isValidEmailValue(raw)) {
-        missing.push(`${fieldLabel} (รูปแบบอีเมลไม่ถูกต้อง)`);
+        missing.push(formatInvalidEmailMissing(fieldLabel));
         markFieldErrorMessage(
           `#f-${cssId(f.name)}`,
           f.name,
-          "รูปแบบอีเมลไม่ถูกต้อง — ตรวจอีกครั้ง หรือติ๊ก “ข้าม”",
+          UI_LABELS.invalidEmailFieldError,
         );
       }
     } else if (f.type === "bool") {
@@ -1601,52 +1605,53 @@ function validateBeforeSubmit() {
           if (!wrap.querySelector(".field-error")) {
             wrap.insertAdjacentHTML(
               "beforeend",
-              `<p class="field-error">กรุณาเลือกไฟล์ หรือติ๊ก “ข้าม”</p>`,
+              `<p class="field-error">${escapeHtml(UI_LABELS.fieldErrorPickFileOrSkip)}</p>`,
             );
           }
         }
       }
     } else if (f.type === "list") {
       const rows = state.values[f.name] || [];
-      if (rows.length === 0) {
-        missing.push(
-          formatMissingFieldLabel(fieldLabel, UI_LABELS.validationListMinRows),
-        );
+      const listResult = collectMissingListValidation({
+        fieldLabel,
+        itemFields: f.itemFields,
+        rows,
+        rowSkip: state.rowSkip[f.name],
+        labelMap,
+        isEmailField: isEmailTypedField,
+        emailInvalid: (raw) => !isValidEmailValue(raw),
+      });
+      missing.push(...listResult.missing);
+      if (listResult.mode === "need-row") {
         const rep = app.querySelector(`[data-list-field="${cssAttrSelector(f.name)}"]`);
         if (rep) {
           rep.classList.add("has-error");
           if (!rep.querySelector(".field-error")) {
             rep.insertAdjacentHTML(
               "beforeend",
-              `<p class="field-error">เพิ่มแถว หรือติ๊ก “ข้าม”</p>`,
+              `<p class="field-error">${escapeHtml(UI_LABELS.fieldErrorAddRowOrSkip)}</p>`,
             );
           }
         }
         continue;
       }
       rows.forEach((row, idx) => {
+        if (isListRowEmpty(row, f.itemFields)) return;
         for (const item of f.itemFields) {
           if (item.type === "bool" || item.type === "auto") continue;
           if (state.rowSkip[f.name]?.[idx]?.[item.name]) continue;
-          const itemLabel = fieldDisplayLabel(item, labelMap, item.name);
           const raw = String(row[item.name] ?? "").trim();
           if (!raw) {
-            missing.push(
-              UI_LABELS.validationRowPrefix(fieldLabel, idx + 1, itemLabel),
-            );
             markFieldError(
               `#l-${cssId(f.name)}-${idx}-${cssId(item.name)}`,
               item.name,
               { list: f.name, row: idx, item: item.name },
             );
           } else if (isEmailTypedField(item.name, item) && !isValidEmailValue(raw)) {
-            missing.push(
-              `${UI_LABELS.validationRowPrefix(fieldLabel, idx + 1, itemLabel)} (รูปแบบอีเมลไม่ถูกต้อง)`,
-            );
             markFieldErrorMessage(
               `#l-${cssId(f.name)}-${idx}-${cssId(item.name)}`,
               item.name,
-              "รูปแบบอีเมลไม่ถูกต้อง — ตรวจอีกครั้ง หรือติ๊ก “ข้าม”",
+              UI_LABELS.invalidEmailFieldError,
               { list: f.name, row: idx, item: item.name },
             );
           }
@@ -3098,17 +3103,17 @@ function renderEmpty() {
     <p class="subhead">${escapeHtml(UI_LABELS.homeSubhead)}</p>
     <div class="home-entry-grid">
       <section class="home-upload-card" aria-label="${escapeAttr(UI_LABELS.dropzoneDrag)}">
-        <button type="button" class="dropzone dropzone-primary" id="dropzone" aria-label="อัปโหลดไฟล์ Word">
+        <button type="button" class="dropzone dropzone-primary" id="dropzone" aria-label="${escapeAttr(UI_LABELS.dropzoneAriaUploadWord)}">
           <div class="dropzone-icon" aria-hidden="true">↑</div>
           <div class="dropzone-title">${escapeHtml(UI_LABELS.dropzoneDrag)}</div>
           <span class="btn-primary dropzone-pick">${escapeHtml(UI_LABELS.dropzonePick)}</span>
           <div class="dropzone-sub home-upload-limit">${escapeHtml(UI_LABELS.dropzoneFreeLimit)}</div>
         </button>
-        <input class="sr-only" type="file" id="fileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="อัปโหลดไฟล์เทมเพลต Word" />
+        <input class="sr-only" type="file" id="fileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="${escapeAttr(UI_LABELS.dropzoneAriaUploadTemplates)}" />
         <label class="upload-opt home-upload-opt" for="showFullContent">
           <input type="checkbox" id="showFullContent" ${state.showFullContent ? "checked" : ""} />
           <span>
-            <strong>แสดงรายละเอียดเนื้อหาในไฟล์ทั้งหมด</strong>
+            <strong>${escapeHtml(UI_LABELS.showFullContentLabel)}</strong>
             <small>${escapeHtml(multiUploadOptHint())}</small>
           </span>
         </label>
@@ -3121,36 +3126,36 @@ function renderEmpty() {
           <summary>${escapeHtml(UI_LABELS.manualVarsDetails)}</summary>
           <div class="upload-tips">
             <ul>
-              <li><span>ข้อความ</span> <code>{{ชื่อ}}</code></li>
+              <li><span>${escapeHtml(UI_LABELS.tipKindText)}</span> <code>${escapeHtml(UI_LABELS.tipCodeText)}</code></li>
               <li>
-                <span>ติ๊ก</span>
-                <code>{{พบ?√,×}}</code>
-                <small class="tip-note">หลัง <code>?</code> คือข้อความเมื่อจริง,เท็จ</small>
+                <span>${escapeHtml(UI_LABELS.tipKindBool)}</span>
+                <code>${escapeHtml(UI_LABELS.tipCodeBool)}</code>
+                <small class="tip-note">${escapeHtml(UI_LABELS.tipNoteBoolLead)} <code>?</code> ${escapeHtml(UI_LABELS.tipNoteBoolTrail)}</small>
               </li>
               <li>
-                <span>รันเลข</span>
-                <code>{{+ลำดับ}}</code>
-                <small class="tip-note">ใช้ได้เฉพาะในลูป {{#…}}…{{/}}</small>
+                <span>${escapeHtml(UI_LABELS.tipKindAuto)}</span>
+                <code>${escapeHtml(UI_LABELS.tipCodeAuto)}</code>
+                <small class="tip-note">${escapeHtml(UI_LABELS.tipNoteAuto)}</small>
               </li>
               <li>
-                <span>รูป</span>
-                <code>{{logo}}</code>
-                <small class="tip-note">วางรูปใน Word แล้วใส่แท็กใน Alt Text</small>
+                <span>${escapeHtml(UI_LABELS.tipKindImage)}</span>
+                <code>${escapeHtml(UI_LABELS.tipCodeImage)}</code>
+                <small class="tip-note">${escapeHtml(UI_LABELS.tipNoteImage)}</small>
               </li>
               <li>
-                <span>ลิสต์ / ตาราง</span>
-                <code>{{#รายการ}}…{{/}}</code>
+                <span>${escapeHtml(UI_LABELS.tipKindListTable)}</span>
+                <code>${escapeHtml(UI_LABELS.tipCodeList)}</code>
               </li>
             </ul>
           </div>
         </details>
       </section>
     </div>
-    <section class="draft-entry-panel home-draft-collapsed" id="emptyDraftPanel" aria-label="โหลดดราฟ">
+    <section class="draft-entry-panel home-draft-collapsed" id="emptyDraftPanel" aria-label="${escapeAttr(UI_LABELS.loadDraftAria)}">
       <details>
         <summary>${escapeHtml(UI_LABELS.loadDraft)}</summary>
         <div class="draft-entry-body" id="emptyDraftList">
-          <p class="draft-list-empty">กำลังโหลดรายการดราฟ…</p>
+          <p class="draft-list-empty">${escapeHtml(UI_LABELS.loadDraftEmptyLoading)}</p>
         </div>
       </details>
     </section>
@@ -9946,26 +9951,32 @@ function renderForm() {
     </div>`;
 
   const aiBtnLabel = aiStatus.connected
-    ? `AI · ${escapeHtml(getClientAiLabel() || aiStatus.providerLabel || String(aiStatus.model || "พร้อม").replace(/^gemini-/i, ""))}`
+    ? `${escapeHtml(UI_LABELS.aiConnectedPrefix)}${escapeHtml(getClientAiLabel() || aiStatus.providerLabel || String(aiStatus.model || UI_LABELS.aiReadyFallback).replace(/^gemini-/i, ""))}`
     : escapeHtml(UI_LABELS.putAiKey);
   const attachLabel = isMultiMode()
-    ? "ต้นทาง → ให้ AI กรอก JSON"
+    ? UI_LABELS.attachSourceMulti
     : UI_LABELS.attachSource;
+  const attachTitle = aiStatus.connected
+    ? isMultiMode()
+      ? UI_LABELS.attachSourceTitleMulti
+      : UI_LABELS.attachSourceTitleSingle
+    : UI_LABELS.attachSourceTitleNeedKey;
+  const stickyHint = `${UI_LABELS.stickyCtaHint}${isMultiMode() ? UI_LABELS.stickyCtaHintMulti : ""}`;
 
   app.innerHTML = `
     ${renderMultiTabs()}
     <div class="file-chip">
-      <span class="file-meta">${escapeHtml(summaryText(state.fields))}${isMultiMode() ? " · แนบต้นทาง → ระบบสร้างโครง JSON → AI กรอกค่า → ใส่ลงหน้าจอ" : ""}</span>
+      <span class="file-meta">${escapeHtml(summaryText(state.fields))}${isMultiMode() ? escapeHtml(UI_LABELS.multiMetaHint) : ""}</span>
       <div class="file-chip-actions file-chip-actions-desktop">
         <button type="button" class="btn-secondary btn-compact ${aiStatus.connected ? "is-ai-on" : ""}" id="googleAiBtn" title="${aiStatus.connected ? `คีย์「${getClientAiLabel() || aiStatus.entryLabel || "AI"}」· ${aiStatus.providerLabel || providerLabel(getClientAiProvider())} · ${aiStatus.model || ""} — จัดการคีย์` : "ใส่ AI API key ของคุณ (หลายเจ้าได้ · เก็บในเบราว์เซอร์)"}">
           ${aiBtnLabel}
         </button>
-        <button type="button" class="btn-secondary btn-compact" id="attachSource" ${aiStatus.connected ? "" : "disabled"} title="${aiStatus.connected ? (isMultiMode() ? "แนบต้นทาง — ส่ง Export JSON ให้ AI กรอกค่า แล้วนำ JSON กลับมาใส่จอ" : "แนบ PDF / Word / รูป — ส่งโครง JSON ให้ AI กรอกค่า") : "ต้องใส่ AI key ของคุณก่อน"}">${escapeHtml(attachLabel)}</button>
-        <input class="sr-only" type="file" id="attachSourceInput" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple aria-label="แนบเอกสารต้นทางสำหรับ AI กรอกค่า" />
+        <button type="button" class="btn-secondary btn-compact" id="attachSource" ${aiStatus.connected ? "" : "disabled"} title="${escapeAttr(attachTitle)}">${escapeHtml(attachLabel)}</button>
+        <input class="sr-only" type="file" id="attachSourceInput" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple aria-label="${escapeAttr(UI_LABELS.attachSourceInputAria)}" />
         <button type="button" class="btn-secondary btn-compact" id="exportJson" title="${escapeAttr(UI_LABELS.exportJsonTitle)}">${escapeHtml(UI_LABELS.exportJson)}</button>
         <button type="button" class="btn-secondary btn-compact" id="importJson" title="${escapeAttr(UI_LABELS.importJsonTitle)}">${escapeHtml(UI_LABELS.importJson)}</button>
         <input class="sr-only" type="file" id="importJsonInput" accept="application/json,.json" aria-label="${escapeAttr(UI_LABELS.importJsonTitle)}" />
-        <input class="sr-only" type="file" id="addTemplateInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="เลือกไฟล์เทมเพลต Word เพิ่ม" />
+        <input class="sr-only" type="file" id="addTemplateInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="${escapeAttr(UI_LABELS.addTemplateInputAria)}" />
         <button type="button" class="btn-secondary btn-compact" id="openTaggerFromForm" title="${escapeAttr(UI_LABELS.createTemplateTitle)}">${escapeHtml(UI_LABELS.createTemplate)}</button>
         <button type="button" class="linkish" id="goHomeBtn" title="${escapeAttr(UI_LABELS.homeLinkTitle)}">${escapeHtml(UI_LABELS.homeLink)}</button>
       </div>
@@ -9992,7 +10003,7 @@ function renderForm() {
           <button type="button" class="btn-secondary sticky-draft-btn" id="loadNamedDraftBtn">${escapeHtml(UI_LABELS.loadDraft)}</button>
         </div>
         <p class="dropzone-hint" style="margin:0.5rem 0 0;text-align:center">
-          จะดาวน์โหลดไฟล์ใหม่ โดยไม่แก้ไฟล์ต้นฉบับ · ช่องว่างต้องติ๊ก “ข้าม” · ส่งออก/นำเข้า JSON ได้ด้านบน · บันทึกดราฟเพื่อกลับมาทำต่อข้ามวัน${isMultiMode() ? " · หลายเทมเพลต: แนบต้นทางเพื่อแมป JSON ลงจอ แล้วกดสร้างเลือกไฟล์เดียวหรือทั้งหมด" : ""}
+          ${escapeHtml(stickyHint)}
         </p>
       </div>
     </form>
@@ -10070,7 +10081,7 @@ function renderForm() {
   const attachInput = /** @type {HTMLInputElement | null} */ (document.getElementById("attachSourceInput"));
   const openAttach = () => {
     if (!aiStatus.connected && !hasClientAiCredentials()) {
-      showBanner("ต้องใส่ AI API key ของคุณก่อนถึงจะแนบเอกสารได้");
+      showBanner(UI_LABELS.attachSourceNeedKeyBanner);
       void connectGoogleAi();
       return;
     }
@@ -12340,7 +12351,7 @@ function renderField(field) {
   return `
     <div class="repeater ${skipped ? "is-skipped" : ""}" data-list-field="${escapeAttr(field.name)}">
       <div class="repeater-head">
-        <h3>${escapeHtml(label)} <span class="badge">รายการ</span></h3>
+        <h3>${escapeHtml(label)} <span class="badge">${escapeHtml(UI_LABELS.listBadgeList)}</span></h3>
         <div class="repeater-actions">
           ${skipCheckbox(field.name, skipped)}
           <button type="button" class="btn-secondary add-row" data-list="${escapeAttr(field.name)}" ${skipped ? "disabled" : ""}>${escapeHtml(UI_LABELS.addRow)}</button>
@@ -12371,13 +12382,9 @@ function wireFieldEvents() {
         const still = validateBeforeSubmit();
         if (!still.length) hideBanner();
         else {
-          const items =
-            still.length <= 12
-              ? still
-              : [...still.slice(0, 12), `และอีก ${still.length - 12} ช่อง`];
           showBanner(UI_LABELS.validationTitle(still.length), "error", {
             validation: true,
-            items,
+            items: clipValidationItems(still),
           });
         }
       }
@@ -12647,24 +12654,16 @@ function missingFieldsForSlot(slot) {
       if (!slot.images[f.name]) missing.push(`${slot.filename}: ${fieldLabel}`);
     } else if (f.type === "list") {
       const rows = slot.values[f.name] || [];
-      if (rows.length === 0) {
-        missing.push(
-          `${slot.filename}: ${formatMissingFieldLabel(fieldLabel, UI_LABELS.validationListMinRows)}`,
-        );
-        continue;
-      }
-      rows.forEach((row, idx) => {
-        for (const item of f.itemFields) {
-          if (item.type === "bool" || item.type === "auto") continue;
-          if (slot.rowSkip[f.name]?.[idx]?.[item.name]) continue;
-          if (!String(row[item.name] ?? "").trim()) {
-            const itemLabel = fieldDisplayLabel(item, labelMap, item.name);
-            missing.push(
-              `${slot.filename}: ${UI_LABELS.validationRowPrefix(fieldLabel, idx + 1, itemLabel)}`,
-            );
-          }
-        }
+      const listResult = collectMissingListValidation({
+        fieldLabel,
+        itemFields: f.itemFields,
+        rows,
+        rowSkip: slot.rowSkip[f.name],
+        labelMap,
       });
+      for (const label of listResult.missing) {
+        missing.push(`${slot.filename}: ${label}`);
+      }
     }
   }
   return missing;
@@ -12682,13 +12681,9 @@ async function createAllTemplatesZip() {
     missing.push(...slotMissing);
   }
   if (missing.length) {
-    const items =
-      missing.length <= 12
-        ? missing
-        : [...missing.slice(0, 12), `และอีก ${missing.length - 12} ช่อง`];
     showBanner(UI_LABELS.validationTitle(missing.length), "error", {
       validation: true,
-      items,
+      items: clipValidationItems(missing),
     });
     // Jump to the first incomplete template and paint empty cells.
     if (firstBad && firstBad.id !== multiActiveId) {
@@ -12791,11 +12786,9 @@ async function onSubmit(e) {
 
   const missing = validateBeforeSubmit();
   if (missing.length) {
-    const items =
-      missing.length <= 12 ? missing : [...missing.slice(0, 12), `และอีก ${missing.length - 12} ช่อง`];
     showBanner(UI_LABELS.validationTitle(missing.length), "error", {
       validation: true,
-      items,
+      items: clipValidationItems(missing),
     });
     return;
   }

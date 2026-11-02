@@ -49,10 +49,37 @@ export function securityHeaders(): Record<string, string> {
   };
 }
 
-/** Short TTL for HTML / document navigations (CDN + browser). */
+/** Short TTL for public HTML / document navigations (CDN + browser). */
 export const HTML_CACHE_CONTROL =
   "public, max-age=0, s-maxage=60, must-revalidate";
+
+/**
+ * Session / user-specific HTML must not be stored in shared caches.
+ * Applies to authenticated surfaces such as account and admin.
+ */
+export const PRIVATE_NO_STORE_CACHE_CONTROL = "private, no-store";
 
 /** Long-lived cache only for content-hashed / versioned static assets. */
 export const VERSIONED_ASSET_CACHE_CONTROL =
   "public, max-age=31536000, immutable";
+
+/**
+ * Paths whose responses are user-specific and must never be cached publicly.
+ * Keep in sync with auth gates in the edge proxy.
+ */
+export function isPrivateDocumentPath(pathname: string): boolean {
+  const path = String(pathname || "").split("?")[0] || "/";
+  return (
+    path === "/account" ||
+    path.startsWith("/account/") ||
+    path === "/admin" ||
+    path.startsWith("/admin/")
+  );
+}
+
+/** Cache-Control for HTML document navigations based on path sensitivity. */
+export function documentCacheControl(pathname: string): string {
+  return isPrivateDocumentPath(pathname)
+    ? PRIVATE_NO_STORE_CACHE_CONTROL
+    : HTML_CACHE_CONTROL;
+}

@@ -6,7 +6,7 @@ import { getIpAddressHeaders } from "./client-ip";
 import { ac, roles } from "@/lib/auth-permissions";
 import { isSuperAdminEmail } from "./auth-superadmin";
 import { isDevAuthEnabled } from "@/lib/dev-auth-flag";
-import { getAppBaseUrl } from "@/lib/app-base-url";
+import { getBetterAuthBaseUrl } from "@/lib/app-base-url";
 import { devAuthPlugin } from "./dev-auth-plugin";
 
 function env(name: string): string | undefined {
@@ -15,7 +15,7 @@ function env(name: string): string | undefined {
 }
 
 function baseURL(): string {
-  return getAppBaseUrl();
+  return getBetterAuthBaseUrl();
 }
 
 function rpID(): string {

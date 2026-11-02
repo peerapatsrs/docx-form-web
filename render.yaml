@@ -1,0 +1,43 @@
+# Render Blueprint — free-tier test stack (Docker web + Postgres).
+# Schema migrations run at process start via src/instrumentation.ts
+# (preDeployCommand is not available on the free plan).
+
+databases:
+  - name: docx-form-db
+    plan: free
+    databaseName: docx_form
+    # Same-region web service reaches Postgres over the private network.
+    ipAllowList: []
+
+services:
+  - type: web
+    name: docx-form-web
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: docx-form-db
+          property: connectionString
+      # Runtime heap under free-tier 512MB RAM (leave headroom for native buffers).
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=384
+      - key: APP_BASE_URL
+        sync: false
+      - key: BETTER_AUTH_URL
+        sync: false
+      - key: NEXT_PUBLIC_APP_URL
+        sync: false
+      - key: BETTER_AUTH_SECRET
+        sync: false
+      - key: AI_VAULT_SECRET
+        sync: false
+      - key: SUPERADMIN_EMAILS
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false

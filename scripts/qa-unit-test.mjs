@@ -179,6 +179,60 @@ assert.ok(UNKNOWN_CLIENT_IP === "0.0.0.0"); // valid IP for Better Auth headers
   );
   assert.equal(req.headers.get("x-forwarded-for"), UNKNOWN_CLIENT_IP);
   assert.equal(req.headers.get("cf-connecting-ip"), null);
+  assert.equal(req.headers.get("x-real-ip"), null);
+  assert.equal(req.url, "http://localhost/api/auth/ok");
+  assert.equal(req.method, "GET");
+}
+
+// No IP headers must not throw (covers the auth get-session fail-closed path)
+{
+  assert.doesNotThrow(() =>
+    withResolvedClientIpHeaders(
+      new Request("http://localhost/api/auth/get-session"),
+      { trustCfConnectingIp: false },
+    ),
+  );
+}
+
+// Foreign Request brand: `new Request(request, { headers })` can throw across
+// realms / NextRequest brands; rebuild-from-primitives must still succeed.
+{
+  const real = new Request("http://localhost/api/auth/get-session", {
+    headers: { "x-forwarded-for": "203.0.113.77" },
+  });
+  const foreign = Object.create(Request.prototype, {
+    url: { get: () => real.url },
+    method: { get: () => "GET" },
+    headers: { get: () => real.headers },
+    body: { get: () => null },
+    bodyUsed: { get: () => false },
+  });
+  assert.throws(
+    () => new Request(/** @type {any} */ (foreign), { headers: new Headers() }),
+  );
+  const rewritten = withResolvedClientIpHeaders(
+    /** @type {any} */ (foreign),
+    { trustedProxyCount: 1, trustCfConnectingIp: false },
+  );
+  assert.equal(rewritten.headers.get("x-forwarded-for"), "203.0.113.77");
+  assert.equal(rewritten.url, "http://localhost/api/auth/get-session");
+}
+
+// POST body path: rebuild keeps method and does not throw
+{
+  const req = withResolvedClientIpHeaders(
+    new Request("http://localhost/api/auth/dev/login-as", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-forwarded-for": "203.0.113.8",
+      },
+      body: JSON.stringify({ email: "dev@example.com" }),
+    }),
+    { trustedProxyCount: 1, trustCfConnectingIp: false },
+  );
+  assert.equal(req.method, "POST");
+  assert.equal(req.headers.get("x-forwarded-for"), "203.0.113.8");
 }
 
 // Fail-closed: unresolvable multi-hop with too many trusted hops

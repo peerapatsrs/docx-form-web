@@ -83,7 +83,11 @@ export function writeAiConfig(patch: Partial<AiConfig>): AiConfig {
     return { ...readAiConfig(), ...patch, geminiApiKey: undefined };
   }
   const next: AiConfig = { ...readAiConfig(), ...patch };
-  if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true });
+  // turbopackIgnore: CONFIG_DIR is dynamic (env/home/tmp); without it Turbopack
+  // traces the whole project into the server bundle.
+  if (!existsSync(/* turbopackIgnore: true */ CONFIG_DIR)) {
+    mkdirSync(CONFIG_DIR, { recursive: true });
+  }
   writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2), "utf-8");
   return next;
 }
@@ -92,7 +96,9 @@ export function clearGeminiKey(): AiConfig {
   if (isByokOnly()) return {};
   const cur = readAiConfig();
   delete cur.geminiApiKey;
-  if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true });
+  if (!existsSync(/* turbopackIgnore: true */ CONFIG_DIR)) {
+    mkdirSync(CONFIG_DIR, { recursive: true });
+  }
   writeFileSync(CONFIG_PATH, JSON.stringify(cur, null, 2), "utf-8");
   return cur;
 }

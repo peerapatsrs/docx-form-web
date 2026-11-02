@@ -184,5 +184,30 @@ export function withResolvedClientIpHeaders(
   // Always a single-value XFF Better Auth can trust (real client or sentinel).
   headers.set("x-forwarded-for", ip);
 
-  return new Request(request, { headers });
+  return cloneRequestWithHeaders(request, headers);
+}
+
+/**
+ * Rebuild a Request with replacement headers without `new Request(request, …)`.
+ * Next.js may pass a NextRequest whose Request brand/realm differs from the
+ * global undici Request — cloning via the Request constructor then throws
+ * `TypeError: Cannot read private member #state`.
+ */
+function cloneRequestWithHeaders(request: Request, headers: Headers): Request {
+  const method = request.method || "GET";
+  const init: RequestInit & { duplex?: "half" } = {
+    method,
+    headers,
+  };
+
+  if (method !== "GET" && method !== "HEAD") {
+    const body = request.body;
+    if (body != null) {
+      init.body = body;
+      // Required by Node's undici when a stream body is present.
+      init.duplex = "half";
+    }
+  }
+
+  return new Request(request.url, init);
 }

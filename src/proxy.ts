@@ -3,6 +3,10 @@ import type { NextRequest } from "next/server";
 import { getSessionCookie } from "better-auth/cookies";
 import { HTML_CACHE_CONTROL, securityHeaders } from "@/lib/security-headers";
 import { isDevAuthEnabled } from "@/lib/dev-auth-flag";
+import {
+  buildSafeHttpsRedirectUrl,
+  safeAppPathUrl,
+} from "@/lib/public-origin";
 
 function applySecurityHeaders(response: NextResponse): NextResponse {
   const headers = securityHeaders();
@@ -25,8 +29,22 @@ function isDocumentNavigation(request: NextRequest): boolean {
 }
 
 /**
+ * Presented host is used only for allowlist checks — never as the redirect
+ * target. Prefer X-Forwarded-Host then Host for the check value alone.
+ */
+function presentedHostForAllowlist(request: NextRequest): string {
+  const raw =
+    request.headers.get("x-forwarded-host") ||
+    request.headers.get("host") ||
+    request.nextUrl.host ||
+    "";
+  return raw.split(",")[0].trim();
+}
+
+/**
  * Behind Render (and similar), TLS terminates at the proxy. Honor
  * x-forwarded-proto so cleartext hops redirect to HTTPS instead of erroring.
+ * Redirect target comes from APP_BASE_URL (etc.), not from Host headers.
  * Skip loopback / missing proto so container health checks stay on HTTP.
  */
 function maybeRedirectToHttps(request: NextRequest): NextResponse | null {
@@ -40,30 +58,13 @@ function maybeRedirectToHttps(request: NextRequest): NextResponse | null {
     .toLowerCase();
   if (proto !== "http") return null;
 
-  const host =
-    (
-      request.headers.get("x-forwarded-host") ||
-      request.headers.get("host") ||
-      ""
-    )
-      .split(",")[0]
-      .trim() || request.nextUrl.host;
-
-  const hostname = host.replace(/:\d+$/, "").toLowerCase();
-  if (
-    !hostname ||
-    hostname === "localhost" ||
-    hostname === "127.0.0.1" ||
-    hostname === "::1" ||
-    hostname.endsWith(".local")
-  ) {
-    return null;
-  }
-
-  // Build a fresh https URL from the public host — do not keep the
-  // container's listen port (e.g. :3000) from request.nextUrl.
   const path = `${request.nextUrl.pathname}${request.nextUrl.search}`;
-  const target = new URL(`https://${host}${path}`);
+  const target = buildSafeHttpsRedirectUrl(
+    path,
+    presentedHostForAllowlist(request),
+  );
+  if (!target) return null;
+
   return applySecurityHeaders(NextResponse.redirect(target, 308));
 }
 
@@ -94,7 +95,8 @@ export function proxy(request: NextRequest) {
   if (needsAuth) {
     const token = getSessionCookie(request);
     if (!token) {
-      const login = new URL("/login", request.url);
+      // Build from configured public origin — do not trust request.url host.
+      const login = new URL(safeAppPathUrl("/login"));
       login.searchParams.set("next", pathname);
       return applySecurityHeaders(NextResponse.redirect(login, 307));
     }

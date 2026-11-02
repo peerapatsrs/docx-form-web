@@ -2,10 +2,15 @@
 /**
  * Regression: dev-auth plugin must load via ESM and stay gated by DEV_AUTH.
  * Guards the next-build failure where CJS require() of the plugin was non-callable.
+ * Also asserts no hardcoded default emails and side-effect-free plugin module load.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const saved = { ...process.env };
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function restoreEnv() {
   for (const key of Object.keys(process.env)) {
@@ -28,6 +33,11 @@ function setDevAuthEnv(map) {
 
 async function loadFlagFresh() {
   const id = `../src/lib/dev-auth-flag.ts?t=${Date.now()}-${Math.random()}`;
+  return import(id);
+}
+
+async function loadEmailFresh() {
+  const id = `../src/server/dev-auth-email.ts?t=${Date.now()}-${Math.random()}`;
   return import(id);
 }
 
@@ -77,19 +87,61 @@ await check("getDefaultDevAuthEmail prefers DEV_AUTH_DEFAULT_EMAIL", async () =>
     DEV_AUTH_DEFAULT_EMAIL: "dev@example.com",
     SUPERADMIN_EMAILS: "admin@example.com",
   });
-  const { getDefaultDevAuthEmail } = await loadFlagFresh();
+  const { getDefaultDevAuthEmail } = await loadEmailFresh();
   assert.equal(getDefaultDevAuthEmail(), "dev@example.com");
 });
 
 await check("getDefaultDevAuthEmail falls back to SUPERADMIN_EMAILS", async () => {
   setDevAuthEnv({ SUPERADMIN_EMAILS: " admin@example.com , other@example.com" });
-  const { getDefaultDevAuthEmail } = await loadFlagFresh();
+  const { getDefaultDevAuthEmail } = await loadEmailFresh();
   assert.equal(getDefaultDevAuthEmail(), "admin@example.com");
 });
 
+await check("getDefaultDevAuthEmail returns undefined when unset (no hardcoded email)", async () => {
+  setDevAuthEnv({ NODE_ENV: "development" });
+  const { getDefaultDevAuthEmail } = await loadEmailFresh();
+  assert.equal(getDefaultDevAuthEmail(), undefined);
+});
+
+await check("dev-auth-flag has no getDefaultDevAuthEmail (server-only module)", async () => {
+  const flagSrc = readFileSync(path.join(root, "src/lib/dev-auth-flag.ts"), "utf8");
+  assert.doesNotMatch(flagSrc, /getDefaultDevAuthEmail/);
+  assert.doesNotMatch(flagSrc, /@[a-z0-9.-]+\.[a-z]{2,}/i);
+
+  const emailSrc = readFileSync(
+    path.join(root, "src/server/dev-auth-email.ts"),
+    "utf8",
+  );
+  assert.match(emailSrc, /import\s+["']server-only["']/);
+  assert.doesNotMatch(emailSrc, /@[a-z0-9.-]+\.[a-z]{2,}/i);
+});
+
+await check("dev-auth-plugin has no literal email and lazy getAuthPool only", async () => {
+  const src = readFileSync(
+    path.join(root, "src/server/dev-auth-plugin.ts"),
+    "utf8",
+  );
+  assert.doesNotMatch(src, /@[a-z0-9.-]+\.[a-z]{2,}/i);
+  assert.doesNotMatch(src, /peerapat/i);
+
+  // Strip comments/strings roughly enough for top-level call detection.
+  const stripped = src
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "");
+  const lines = stripped.split("\n");
+  let depth = 0;
+  for (const line of lines) {
+    const open = (line.match(/\{/g) || []).length;
+    const close = (line.match(/\}/g) || []).length;
+    if (depth === 0 && /\bgetAuthPool\s*\(/.test(line)) {
+      assert.fail(`getAuthPool() must not run at module top level: ${line.trim()}`);
+    }
+    depth += open - close;
+  }
+  assert.match(src, /getAuthPool\s*\(/);
+});
+
 await check("devAuthPlugin ESM export is callable (build-time / auth.ts load path)", async () => {
-  // Mirrors the static import auth.ts uses. A non-function here would break
-  // `next build` page-data collection whenever DEV_AUTH enables the plugin.
   const { devAuthPlugin } = await import("../src/server/dev-auth-plugin.ts");
   assert.equal(typeof devAuthPlugin, "function");
   const plugin = devAuthPlugin();
@@ -97,6 +149,26 @@ await check("devAuthPlugin ESM export is callable (build-time / auth.ts load pat
   assert.ok(plugin.endpoints);
   assert.ok(plugin.endpoints.listDevUsers);
   assert.ok(plugin.endpoints.loginAsDevUser);
+});
+
+await check("importing/calling factory does not open auth pool", async () => {
+  // auth-db caches a Pool on first getAuthPool(). Importing the plugin and
+  // calling the factory only registers endpoints — pool stays uncreated.
+  const authDb = await import(`../src/server/auth-db.ts?t=${Date.now()}`);
+  const before = authDb.getAuthPool;
+  assert.equal(typeof before, "function");
+
+  // Probe: replace getAuthPool temporarily via a fresh plugin import that uses
+  // the real module; ensure factory path does not invoke it by source contract
+  // above plus: creating the plugin object does not throw without DATABASE_URL.
+  delete process.env.DATABASE_URL;
+  const { devAuthPlugin } = await import(
+    `../src/server/dev-auth-plugin.ts?t=${Date.now()}`
+  );
+  assert.doesNotThrow(() => {
+    const plugin = devAuthPlugin();
+    assert.equal(plugin.id, "dev-auth");
+  });
 });
 
 await check("production + DEV_AUTH includes plugin factory result like auth.ts", async () => {

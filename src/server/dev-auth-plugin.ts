@@ -2,12 +2,11 @@ import { createAuthEndpoint, APIError } from "better-auth/api";
 import { setSessionCookie } from "better-auth/cookies";
 import * as z from "zod";
 import { isDevAuthEnabled } from "@/lib/dev-auth-flag";
+import { getDefaultDevAuthEmail } from "./dev-auth-email";
 import { getAuthPool } from "./auth-db";
 
-export {
-  getDefaultDevAuthEmail,
-  isDevAuthEnabled,
-} from "@/lib/dev-auth-flag";
+export { getDefaultDevAuthEmail } from "./dev-auth-email";
+export { isDevAuthEnabled } from "@/lib/dev-auth-flag";
 
 /**
  * Local/dev only: pick an existing DB user and get a real session cookie
@@ -15,6 +14,9 @@ export {
  *
  * Enabled when DEV_AUTH=1, or automatically in non-production.
  * Disable with DEV_AUTH=0.
+ *
+ * Module load is side-effect free: no pool open, no throwing env reads.
+ * DB access happens only inside endpoint handlers / listDevUsers.
  */
 
 type DevUserRow = {
@@ -29,12 +31,23 @@ type DevUserRow = {
 
 async function listDevUsers(): Promise<DevUserRow[]> {
   const pool = getAuthPool();
+  const preferred = getDefaultDevAuthEmail();
+  if (preferred) {
+    const { rows } = await pool.query<DevUserRow>(
+      `SELECT id, name, email, role, plan, image, banned
+       FROM "user"
+       ORDER BY
+         CASE WHEN lower(email) = $1 THEN 0 ELSE 1 END,
+         "createdAt" DESC
+       LIMIT 50`,
+      [preferred],
+    );
+    return rows;
+  }
   const { rows } = await pool.query<DevUserRow>(
     `SELECT id, name, email, role, plan, image, banned
      FROM "user"
-     ORDER BY
-       CASE WHEN lower(email) = 'peerapat.srs@gmail.com' THEN 0 ELSE 1 END,
-       "createdAt" DESC
+     ORDER BY "createdAt" DESC
      LIMIT 50`,
   );
   return rows;
@@ -85,12 +98,16 @@ export function devAuthPlugin() {
             });
           }
           const userId = String(ctx.body.userId || "").trim();
-          const email = String(ctx.body.email || "")
+          let email = String(ctx.body.email || "")
             .trim()
             .toLowerCase();
           if (!userId && !email) {
+            email = getDefaultDevAuthEmail() || "";
+          }
+          if (!userId && !email) {
             throw APIError.from("BAD_REQUEST", {
-              message: "ต้องส่ง userId หรือ email",
+              message:
+                "ต้องส่ง userId หรือ email หรือตั้ง DEV_AUTH_DEFAULT_EMAIL / SUPERADMIN_EMAILS",
               code: "MISSING_USER",
             });
           }

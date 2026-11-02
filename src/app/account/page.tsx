@@ -110,15 +110,17 @@ export default function AccountPage() {
   const reload = useCallback(async () => {
     setError("");
     const meRes = await fetch("/api/me", { credentials: "include" });
-    if (meRes.status === 401) {
+    const meData = (await meRes.json().catch(() => ({}))) as MePayload & {
+      error?: string;
+      user?: MePayload["user"] | null;
+    };
+    // Guests receive 200 + user:null — send them to login without treating it as an error.
+    if (meRes.ok && !meData.user) {
       // Full navigation — account is gated; soft router can leave app.js shell half-mounted.
       // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- hard nav required
       window.location.assign("/login");
       return;
     }
-    const meData = (await meRes.json().catch(() => ({}))) as MePayload & {
-      error?: string;
-    };
     if (!meRes.ok || !meData.user) {
       setError(meData.error || "โหลดบัญชีไม่สำเร็จ");
       setLoading(false);

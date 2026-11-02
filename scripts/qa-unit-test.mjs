@@ -144,6 +144,36 @@ console.log("✓ field-names");
   console.log("✓ client/server field-name rules in sync");
 }
 
+// Home page must load field-names.js before app.js (no standalone HTML; Next injects).
+{
+  const pageSrc = readFileSync(
+    join(__dirname, "..", "src", "app", "page.tsx"),
+    "utf8",
+  );
+  assert.match(pageSrc, /field-names\.js/);
+  assert.match(pageSrc, /\/app\.js\?v=/);
+  // Runtime order: create field-names → onload → loadAppAfterFieldNames → append app.js.
+  assert.match(
+    pageSrc,
+    /names\.onload\s*=\s*\(\)\s*=>\s*loadAppAfterFieldNames\(\)/,
+  );
+  assert.match(
+    pageSrc,
+    /function loadAppAfterFieldNames|const loadAppAfterFieldNames/,
+  );
+  const minifySrc = readFileSync(
+    join(__dirname, "..", "scripts", "minify-public.mjs"),
+    "utf8",
+  );
+  const minifyNames = minifySrc.indexOf("public/field-names.js");
+  const minifyApp = minifySrc.indexOf("public/app.js");
+  assert.ok(
+    minifyNames >= 0 && minifyApp > minifyNames,
+    "minify-public lists field-names.js before app.js",
+  );
+  console.log("✓ field-names.js load order (page.tsx + minify-public)");
+}
+
 // Legacy NFKC keys (ํ+า) must resolve onto current NFC field names.
 {
   const nfc = "จำนวน";

@@ -242,6 +242,24 @@ export type DocxFormValuesJson = {
   images: Record<string, unknown>;
 };
 
+/**
+ * True when a value carries real fill content.
+ * Empty / blank / false / nullish containers do not count (nested-aware).
+ */
+export function isFilledValue(value: unknown): boolean {
+  if (value == null) return false;
+  if (typeof value === "boolean") return value === true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.some((item) => isFilledValue(item));
+  if (typeof value === "object") {
+    return Object.values(value as Record<string, unknown>).some((item) =>
+      isFilledValue(item),
+    );
+  }
+  return false;
+}
+
 /** Count non-empty / non-all-skip values after an AI fill. */
 export function countFilledValues(valuesJson: DocxFormValuesJson): {
   total: number;
@@ -258,21 +276,7 @@ export function countFilledValues(valuesJson: DocxFormValuesJson): {
       skipped += 1;
       continue;
     }
-    const v = values[k];
-    if (v == null || v === "") {
-      skipped += 1;
-      continue;
-    }
-    if (Array.isArray(v)) {
-      if (v.length === 0) skipped += 1;
-      else filled += 1;
-      continue;
-    }
-    if (typeof v === "boolean") {
-      filled += 1;
-      continue;
-    }
-    if (String(v).trim()) filled += 1;
+    if (isFilledValue(values[k])) filled += 1;
     else skipped += 1;
   }
   return { total: keys.length, filled, skipped };

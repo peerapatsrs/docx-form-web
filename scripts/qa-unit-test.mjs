@@ -19,6 +19,10 @@ import {
   trustCfConnectingIp,
   withResolvedClientIpHeaders,
 } from "../src/server/client-ip.ts";
+import {
+  countFilledValues,
+  isFilledValue,
+} from "../src/server/source-map.ts";
 
 console.log("qa-unit-test");
 
@@ -218,5 +222,57 @@ assert.ok(UNKNOWN_CLIENT_IP === "0.0.0.0"); // valid IP for Better Auth headers
   assert.equal(req.headers.get("x-forwarded-for"), "203.0.113.40");
 }
 console.log("✓ client-ip resolution");
+
+assert.equal(isFilledValue(true), true);
+assert.equal(isFilledValue(false), false);
+assert.equal(isFilledValue(""), false);
+assert.equal(isFilledValue("  "), false);
+assert.equal(isFilledValue(null), false);
+assert.equal(isFilledValue(undefined), false);
+assert.equal(isFilledValue([]), false);
+assert.equal(isFilledValue([{}]), false);
+assert.equal(isFilledValue([{ a: "" }, { b: false }]), false);
+assert.equal(isFilledValue([{ a: "x" }]), true);
+assert.equal(isFilledValue({ a: false, b: "" }), false);
+assert.equal(isFilledValue({ a: false, b: "ok" }), true);
+assert.equal(isFilledValue(0), true);
+
+const emptyFill = countFilledValues({
+  format: "docx-form-values",
+  version: 1,
+  exportedAt: "2026-01-01T00:00:00.000Z",
+  template: "t.docx",
+  fields: [
+    { name: "flag", type: "bool" },
+    { name: "name", type: "text" },
+    { name: "rows", type: "list" },
+  ],
+  values: { flag: false, name: "", rows: [{ item: false }, { item: "" }] },
+  skip: {},
+  rowSkip: {},
+  images: {},
+});
+assert.equal(emptyFill.filled, 0);
+assert.equal(emptyFill.skipped, 3);
+assert.equal(emptyFill.total, 3);
+
+const mixedFill = countFilledValues({
+  format: "docx-form-values",
+  version: 1,
+  exportedAt: "2026-01-01T00:00:00.000Z",
+  template: "t.docx",
+  fields: [
+    { name: "flag", type: "bool" },
+    { name: "name", type: "text" },
+    { name: "other", type: "text" },
+  ],
+  values: { flag: true, name: "Ada", other: "" },
+  skip: { other: true },
+  rowSkip: {},
+  images: {},
+});
+assert.equal(mixedFill.filled, 2);
+assert.equal(mixedFill.skipped, 1);
+console.log("✓ countFilledValues false/empty");
 
 console.log("\nAll qa unit tests passed");

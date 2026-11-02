@@ -4,7 +4,6 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { authClient } from "@/lib/auth-client";
 import { ProfileAvatar } from "@/components/ProfileAvatar";
-
 type SessionUser = {
   name?: string | null;
   email?: string | null;
@@ -54,32 +53,28 @@ export function AuthBar() {
           return;
         }
 
-        // Run Local (DEV_AUTH): sign in as the default DB user automatically.
-        const cfg = (await fetch("/api/auth-config")
-          .then((r) => r.json())
-          .catch(() => null)) as {
-          devAuth?: boolean;
-          devAuthDefaultEmail?: string | null;
-        } | null;
-        const email = String(cfg?.devAuthDefaultEmail || "")
-          .trim()
-          .toLowerCase();
-        if (!cfg?.devAuth || !email) {
-          setLoading(false);
-          return;
-        }
-
-        const res = await fetch("/api/auth/dev/login-as", {
-          method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email }),
-        });
-        if (cancelled) return;
-        if (res.ok) {
-          const again = await authClient.getSession();
+        // Dev-only auto sign-in. Condition uses build-time env so production
+        // bundles (without NEXT_PUBLIC_DEV_AUTH) drop this import entirely.
+        if (
+          process.env.NODE_ENV !== "production" ||
+          process.env.NEXT_PUBLIC_DEV_AUTH === "1"
+        ) {
+          const { fetchDevAuthConfig, loginAsDevUser } = await import(
+            "@/components/DevAuthControls"
+          );
+          const cfg = await fetchDevAuthConfig();
+          const email = cfg.defaultEmail;
+          if (!cfg.enabled || !email) {
+            setLoading(false);
+            return;
+          }
+          const result = await loginAsDevUser({ email });
           if (cancelled) return;
-          setUser(again.data?.user ?? null);
+          if (result.ok) {
+            const again = await authClient.getSession();
+            if (cancelled) return;
+            setUser(again.data?.user ?? null);
+          }
         }
       } finally {
         if (!cancelled) setLoading(false);

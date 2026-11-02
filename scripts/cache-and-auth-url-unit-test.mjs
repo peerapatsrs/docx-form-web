@@ -99,6 +99,27 @@ await check("public paths keep shared HTML cache control", async () => {
   assert.equal(documentCacheControl("/accountant"), HTML_CACHE_CONTROL);
 });
 
+/**
+ * Home (`/`) is intentionally public-cacheable: AuthBar / app.js load session
+ * client-side after hydration; the document response itself has no per-user
+ * SSR fields. Keep this assertion so a future private-path expansion does not
+ * silently blanket the marketing shell.
+ */
+await check("home `/` stays public (session UI is client-fetched, not SSR)", async () => {
+  const {
+    isPrivateDocumentPath,
+    documentCacheControl,
+    HTML_CACHE_CONTROL,
+    PRIVATE_NO_STORE_CACHE_CONTROL,
+  } = await loadSecurityHeaders();
+
+  assert.equal(isPrivateDocumentPath("/"), false);
+  assert.equal(documentCacheControl("/"), HTML_CACHE_CONTROL);
+  assert.notEqual(documentCacheControl("/"), PRIVATE_NO_STORE_CACHE_CONTROL);
+  assert.match(documentCacheControl("/"), /public/);
+  assert.match(documentCacheControl("/"), /s-maxage=60/);
+});
+
 await check("BETTER_AUTH_URL wins over APP_BASE_URL for auth origin", async () => {
   process.env.APP_BASE_URL = "https://app.example.com";
   process.env.BETTER_AUTH_URL = "https://auth.example.com";

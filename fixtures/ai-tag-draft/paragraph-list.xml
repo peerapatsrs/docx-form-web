@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>หนังสือฟ้อง</w:t></w:r></w:p>
+    <w:p><w:r><w:t>จำเลยที่ 1 ชื่อ นายหนึ่ง ที่อยู่ บ้านหนึ่ง</w:t></w:r></w:p>
+    <w:p><w:r><w:t>จำเลยที่ 2 ชื่อ นายสอง ที่อยู่ บ้านสอง</w:t></w:r></w:p>
+    <w:p><w:r><w:t>จำเลยที่ 3 ชื่อ นายสาม ที่อยู่ บ้านสาม</w:t></w:r></w:p>
+    <w:p><w:r><w:t>จึงเรียนมาเพื่อโปรดพิจารณา</w:t></w:r></w:p>
+  </w:body>
+</w:document>

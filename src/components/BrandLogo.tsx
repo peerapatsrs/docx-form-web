@@ -1,7 +1,8 @@
 import Image from "next/image";
 
-/** Single source for the app mark — always `/brand/logo-mark.png`. */
-export const BRAND_LOGO_SRC = "/brand/logo-mark.png";
+/** Display mark: SVG (tiny). Raster `/brand/logo-mark.png` kept for OG / icons. */
+export const BRAND_LOGO_SRC = "/brand/logo-mark.svg";
+export const BRAND_LOGO_RASTER_SRC = "/brand/logo-mark.png";
 export const BRAND_NAME = "docx-form";
 
 type BrandLogoProps = {

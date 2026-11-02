@@ -59,8 +59,8 @@ export const metadata: Metadata = {
     images: [
       {
         url: "/brand/logo-mark.png",
-        width: 512,
-        height: 512,
+        width: 192,
+        height: 192,
         alt: `${SITE_NAME} logo — กรอกแบบฟอร์ม Word จากเทมเพลต .docx`,
       },
     ],
@@ -94,7 +94,7 @@ export default function RootLayout({
           rel="stylesheet"
         />
         {/* eslint-disable-next-line @next/next/no-css-tags */}
-        <link rel="stylesheet" href="/style.css?v=web24" />
+        <link rel="stylesheet" href="/style.css?v=web25" />
       </head>
       <body>
         <SiteJsonLd />

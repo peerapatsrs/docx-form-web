@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Scan source/test trees for committed embedded payloads and binary documents.
+ * Scan source/test/scripts trees for committed embedded payloads and binary documents.
  * Prints path:line and rule name only; never prints matched content.
  */
 
@@ -9,8 +9,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 // --- configurable thresholds / exclusions ---
-const SCAN_ROOTS = ["src", "test", "tests"];
+const SCAN_ROOTS = ["src", "test", "tests", "scripts"];
 const EXCLUDED_DIR_NAMES = new Set(["fixtures", "config", "node_modules", ".git"]);
+/** Relative paths skipped entirely (scanner source, etc.). */
+const EXCLUDED_RELATIVE_FILES = new Set(["scripts/ci/scan-embedded-data.mjs"]);
 const BINARY_DOC_EXTENSIONS = new Set([".docx", ".pdf", ".xlsx", ".zip"]);
 const TEXT_EXTENSIONS = new Set([
   ".ts",
@@ -44,11 +46,22 @@ const LONG_BASE64_RE = new RegExp(
 );
 const DATA_URI_BASE64_RE = /data:[^,\s]*;base64,[A-Za-z0-9+/]{32,}={0,2}/gi;
 const DOC_SIGNATURE_RE = /(?:UEsDB|JVBERi0)[A-Za-z0-9+/=]*/g;
+/**
+ * Inline WordprocessingML: full documents, xmlns, or markup lines that open with
+ * structural tags (avoids mid-comment mentions like "the <w:tr> element").
+ */
+const INLINE_OOXML_RE =
+  /<w:document\b|wordprocessingml\/2006\/main|^\s*<w:(?:body|tbl|tr|tc)(?:\s|>|\/)/gm;
+/** Sample / example form payloads (names, phones, addresses) embedded as literals. */
+const SAMPLE_FORM_RE =
+  /นายหนึ่ง|นายสอง|นายสาม|บ้านหนึ่ง|บ้านสอง|บ้านสาม|นอกตารางชื่อสมชาย|ในตารางสมชาย|สมชายใจดี|เมืองปทุมธานี|02-023-2599|096-392-396[0-9]|biglegal@[a-z.]+|ค่าจ้าง1200|หนึ่งพันหนึ่งร้อยสิบหกบาท|บริษัท กฎหมาย บีไอจี|จำเลยที่\s+[0-9๐-๙]+\s+ชื่อ/gu;
 
 const RULES = [
   { name: "long-base64", re: LONG_BASE64_RE },
   { name: "data-uri-base64", re: DATA_URI_BASE64_RE },
   { name: "binary-doc-signature", re: DOC_SIGNATURE_RE },
+  { name: "inline-ooxml", re: INLINE_OOXML_RE },
+  { name: "sample-form-string", re: SAMPLE_FORM_RE },
 ];
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -78,8 +91,11 @@ function shouldScanText(filePath) {
   if (!ext) return true;
   if (BINARY_DOC_EXTENSIONS.has(ext)) return false;
   if (TEXT_EXTENSIONS.has(ext)) return true;
-  // skip known non-text binaries
-  if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".eot", ".bin"].includes(ext)) {
+  if (
+    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".eot", ".bin"].includes(
+      ext,
+    )
+  ) {
     return false;
   }
   return true;
@@ -94,6 +110,8 @@ for (const rootName of SCAN_ROOTS) {
 
   for (const filePath of walk(root)) {
     const rel = path.relative(repoRoot, filePath).split(path.sep).join("/");
+    if (EXCLUDED_RELATIVE_FILES.has(rel)) continue;
+
     const ext = path.extname(filePath).toLowerCase();
 
     if (BINARY_DOC_EXTENSIONS.has(ext)) {
@@ -117,7 +135,6 @@ for (const rootName of SCAN_ROOTS) {
     } catch {
       continue;
     }
-    // skip files that are not valid text
     if (content.includes("\u0000")) continue;
 
     const lines = content.split(/\r?\n/);
@@ -127,7 +144,6 @@ for (const rootName of SCAN_ROOTS) {
         rule.re.lastIndex = 0;
         if (rule.re.test(line)) {
           findings.push({ file: rel, line: i + 1, rule: rule.name });
-          // one report per rule per line
         }
       }
     }

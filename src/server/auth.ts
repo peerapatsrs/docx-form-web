@@ -4,7 +4,8 @@ import { admin } from "better-auth/plugins";
 import { getAuthPool } from "./auth-db";
 import { ac, roles } from "@/lib/auth-permissions";
 import { isSuperAdminEmail } from "./auth-superadmin";
-import { devAuthPlugin } from "./dev-auth-plugin";
+import { isDevAuthEnabled } from "@/lib/dev-auth-flag";
+import { getAppBaseUrl } from "@/lib/app-base-url";
 
 function env(name: string): string | undefined {
   const v = String(process.env[name] || "").trim();
@@ -12,11 +13,7 @@ function env(name: string): string | undefined {
 }
 
 function baseURL(): string {
-  return (
-    env("BETTER_AUTH_URL") ||
-    env("NEXT_PUBLIC_APP_URL") ||
-    "http://localhost:3000"
-  );
+  return getAppBaseUrl();
 }
 
 function rpID(): string {
@@ -202,11 +199,14 @@ export const auth = betterAuth({
         userVerification: "required",
       },
     }),
-    // Local only: /api/auth/dev/users + /api/auth/dev/login-as
-    ...(process.env.NODE_ENV === "production" &&
-    String(process.env.DEV_AUTH || "").trim() !== "1"
-      ? []
-      : [devAuthPlugin()]),
+    // Local only: /api/auth/dev/users + /api/auth/dev/login-as (not registered when disabled)
+    ...(() => {
+      if (!isDevAuthEnabled()) return [];
+      // Lazy load so production deployments with DEV_AUTH off never mount the routes.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports -- conditional load
+      const { devAuthPlugin } = require("./dev-auth-plugin") as typeof import("./dev-auth-plugin");
+      return [devAuthPlugin()];
+    })(),
   ],
 });
 

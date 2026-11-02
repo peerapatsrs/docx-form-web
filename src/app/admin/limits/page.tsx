@@ -48,7 +48,7 @@ export default function AdminLimitsPage() {
         return;
       }
       if (data.limits) setLimits(data.limits);
-      setOk("บันทึกลิมิตแล้ว — มีผลกับ /api/health ทันที");
+      setOk("บันทึกลิมิตแล้ว — มีผลกับ /api/entitlement ทันที");
     } finally {
       setBusy(false);
     }

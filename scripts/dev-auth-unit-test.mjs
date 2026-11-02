@@ -37,7 +37,8 @@ async function loadFlagFresh() {
 }
 
 async function loadEmailFresh() {
-  const id = `../src/server/dev-auth-email.ts?t=${Date.now()}-${Math.random()}`;
+  // Plain helper (no server-only) — same module migrate/plugin use.
+  const id = `../src/server/dev-auth-default-email.ts?t=${Date.now()}-${Math.random()}`;
   return import(id);
 }
 
@@ -103,17 +104,30 @@ await check("getDefaultDevAuthEmail returns undefined when unset (no hardcoded e
   assert.equal(getDefaultDevAuthEmail(), undefined);
 });
 
-await check("dev-auth-flag has no getDefaultDevAuthEmail (server-only module)", async () => {
+await check("plain email helper has no server-only; wrapper does", async () => {
   const flagSrc = readFileSync(path.join(root, "src/lib/dev-auth-flag.ts"), "utf8");
   assert.doesNotMatch(flagSrc, /getDefaultDevAuthEmail/);
   assert.doesNotMatch(flagSrc, /@[a-z0-9.-]+\.[a-z]{2,}/i);
 
-  const emailSrc = readFileSync(
+  const plainSrc = readFileSync(
+    path.join(root, "src/server/dev-auth-default-email.ts"),
+    "utf8",
+  );
+  assert.doesNotMatch(plainSrc, /server-only/);
+  assert.doesNotMatch(plainSrc, /@[a-z0-9.-]+\.[a-z]{2,}/i);
+
+  const wrapSrc = readFileSync(
     path.join(root, "src/server/dev-auth-email.ts"),
     "utf8",
   );
-  assert.match(emailSrc, /import\s+["']server-only["']/);
-  assert.doesNotMatch(emailSrc, /@[a-z0-9.-]+\.[a-z]{2,}/i);
+  assert.match(wrapSrc, /import\s+["']server-only["']/);
+
+  const pluginSrc = readFileSync(
+    path.join(root, "src/server/dev-auth-plugin.ts"),
+    "utf8",
+  );
+  assert.match(pluginSrc, /dev-auth-default-email/);
+  assert.doesNotMatch(pluginSrc, /from\s+["']\.\/dev-auth-email["']/);
 });
 
 await check("dev-auth-plugin has no literal email and lazy getAuthPool only", async () => {
@@ -124,7 +138,6 @@ await check("dev-auth-plugin has no literal email and lazy getAuthPool only", as
   assert.doesNotMatch(src, /@[a-z0-9.-]+\.[a-z]{2,}/i);
   assert.doesNotMatch(src, /peerapat/i);
 
-  // Strip comments/strings roughly enough for top-level call detection.
   const stripped = src
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/.*$/gm, "");
@@ -152,15 +165,9 @@ await check("devAuthPlugin ESM export is callable (build-time / auth.ts load pat
 });
 
 await check("importing/calling factory does not open auth pool", async () => {
-  // auth-db caches a Pool on first getAuthPool(). Importing the plugin and
-  // calling the factory only registers endpoints — pool stays uncreated.
   const authDb = await import(`../src/server/auth-db.ts?t=${Date.now()}`);
-  const before = authDb.getAuthPool;
-  assert.equal(typeof before, "function");
+  assert.equal(typeof authDb.getAuthPool, "function");
 
-  // Probe: replace getAuthPool temporarily via a fresh plugin import that uses
-  // the real module; ensure factory path does not invoke it by source contract
-  // above plus: creating the plugin object does not throw without DATABASE_URL.
   delete process.env.DATABASE_URL;
   const { devAuthPlugin } = await import(
     `../src/server/dev-auth-plugin.ts?t=${Date.now()}`

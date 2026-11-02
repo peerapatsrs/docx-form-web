@@ -97,10 +97,12 @@ export function clearGeminiKey(): AiConfig {
   return cur;
 }
 
+/** Mask secrets for UI lists — last 4 only (never prefix+suffix of the secret). */
 export function maskGeminiKey(key: string): string {
   const k = String(key || "").trim();
-  if (k.length < 10) return "••••";
-  return `${k.slice(0, 6)}…${k.slice(-4)}`;
+  if (!k) return "••••";
+  if (k.length <= 4) return "••••";
+  return `••••…${k.slice(-4)}`;
 }
 
 /** Key sent by the browser for this request only. */
@@ -139,6 +141,17 @@ export function getRequestAiProvider(req?: Request | null): string {
   return p?.id || "google";
 }
 
+/** Optional vault key id — server looks up the secret instead of accepting plaintext. */
+export function getRequestAiKeyId(req?: Request | null): string | undefined {
+  if (!req) return undefined;
+  const id = String(
+    req.headers.get("x-ai-key-id") ||
+      req.headers.get("x-docx-ai-key-id") ||
+      "",
+  ).trim();
+  return id || undefined;
+}
+
 /** Unified BYOK credentials from headers (new + legacy Gemini). */
 export function getRequestAiCredentials(
   req?: Request | null,
@@ -148,6 +161,38 @@ export function getRequestAiCredentials(
   const model =
     getRequestGeminiModel(req) || defaultModelForProvider(provider);
   return { provider, apiKey, model };
+}
+
+/**
+ * Resolve credentials preferring vault key id (no plaintext round-trip).
+ * Falls back to per-request API key header for unsynced / guest BYOK.
+ */
+export async function resolveRequestAiCredentials(
+  req: Request,
+  userId?: string | null,
+): Promise<RequestAiCredentials & { keyId?: string }> {
+  const base = getRequestAiCredentials(req);
+  const keyId = getRequestAiKeyId(req);
+  if (keyId && userId) {
+    try {
+      const { getUserAiKey } = await import("./ai-key-vault");
+      const row = await getUserAiKey(userId, keyId);
+      if (row?.apiKey) {
+        return {
+          provider: row.provider || base.provider,
+          apiKey: row.apiKey,
+          model:
+            normalizeProviderModel(row.provider || base.provider, row.model) ||
+            base.model ||
+            defaultModelForProvider(row.provider || base.provider),
+          keyId: row.id,
+        };
+      }
+    } catch {
+      /* fall through to header key */
+    }
+  }
+  return { ...base, keyId };
 }
 
 /**

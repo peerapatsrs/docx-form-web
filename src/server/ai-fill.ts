@@ -36,7 +36,56 @@ For lists: values[listName] = array of row objects with ALL item keys (0+ rows);
 Bool must be true/false. Prefer exact source text; do not invent IDs/names/case numbers.
 Tables: "—" means empty cell; column order matters — do NOT shift values left across empty cells.
 If similar headers appear twice (earlier vs later), keys with 「ปัจจุบัน」/current → later set; unmarked pair → earlier set.
-Checkbox-style keys (e.g. พบ / ไม่) → true when √/✓ is in that cell.`;
+Checkbox-style keys (e.g. พบ / ไม่) → true when √/✓ is in that cell.
+If the source is unrelated to the template (wrong document / no overlapping facts), leave every value empty with skip=true and set "relevant": false on the root object.`;
+
+export const DOCX_XML_TEXT_CAP = 120_000;
+export const PDF_TEXT_CAP = 80_000;
+
+export type AiFillMeta = {
+  sourceTruncated: boolean;
+  truncatedFiles: string[];
+};
+
+/** Inspect whether source extraction will drop trailing content for prompt caps. */
+export async function inspectSourceTruncation(
+  files: AiSourceFile[],
+): Promise<AiFillMeta> {
+  const truncatedFiles: string[] = [];
+  const { detectKind, extractSourceFile } = await import("./source-extract");
+  for (const f of files) {
+    const name = f.filename || "source";
+    const kind = detectKind(name, f.mimeType);
+    if (kind === "docx") {
+      try {
+        const JSZip = (await import("jszip")).default;
+        const zip = await JSZip.loadAsync(f.buffer);
+        const xmlFile = zip.file("word/document.xml");
+        const xml = xmlFile ? await xmlFile.async("string") : "";
+        if (xml.length > DOCX_XML_TEXT_CAP) truncatedFiles.push(name);
+      } catch {
+        /* ignore — fill path will surface read errors */
+      }
+    } else if (kind === "pdf") {
+      try {
+        const extracted = await extractSourceFile({
+          buffer: f.buffer,
+          filename: name,
+          mimeType: f.mimeType || "application/pdf",
+        });
+        if ((extracted.text || "").length > PDF_TEXT_CAP) {
+          truncatedFiles.push(name);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return {
+    sourceTruncated: truncatedFiles.length > 0,
+    truncatedFiles,
+  };
+}
 
 function slimExportSkeleton(skeleton: DocxFormValuesJson) {
   return {
@@ -150,7 +199,7 @@ async function sourceAsTextAndImages(files: AiSourceFile[]): Promise<{
         const xmlFile = zip.file("word/document.xml");
         const xml = xmlFile ? await xmlFile.async("string") : "";
         textBlocks.push(
-          `===== FILE: ${name} (Word document.xml) =====\n${xml.slice(0, 120_000)}`,
+          `===== FILE: ${name} (Word document.xml) =====\n${xml.slice(0, DOCX_XML_TEXT_CAP)}`,
         );
       } catch {
         textBlocks.push(`===== FILE: ${name} (docx — อ่าน XML ไม่สำเร็จ) =====`);
@@ -165,7 +214,7 @@ async function sourceAsTextAndImages(files: AiSourceFile[]): Promise<{
           mimeType: mime || "application/pdf",
         });
         textBlocks.push(
-          `===== FILE: ${name} (PDF text) =====\n${(extracted.text || "").slice(0, 80_000)}`,
+          `===== FILE: ${name} (PDF text) =====\n${(extracted.text || "").slice(0, PDF_TEXT_CAP)}`,
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

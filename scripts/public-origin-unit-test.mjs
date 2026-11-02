@@ -128,3 +128,6 @@ if (failed) {
   process.exit(1);
 }
 console.log("\nAll public-origin unit tests passed");
+
+// Keep QA helper coverage on the same entry main's test:unit runs.
+await import("./qa-unit-test.mjs");

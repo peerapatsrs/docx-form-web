@@ -1,6 +1,10 @@
 import JSZip from "jszip";
 import { extractDocumentLayout } from "./docx-layout";
 import { extractDocumentText } from "./docx-engine";
+import {
+  normalizeVarName,
+  validateVarName as sharedValidateVarName,
+} from "./field-names";
 
 export type TagReplacement = {
   id: string;
@@ -86,8 +90,6 @@ type WtNode = {
   openTag: string;
 };
 
-const NAME_RE = /^[\w\u0E00-\u0E7F.-]+$/u;
-
 function decodeXmlEntities(s: string): string {
   return s
     .replace(/&amp;/g, "&")
@@ -119,12 +121,7 @@ function buildOpenTag(existingOpenInner: string, text: string): string {
 }
 
 function validateVarName(name: string, kind: string): string | null {
-  const n = String(name || "").trim();
-  if (!n) return `${kind}ว่างไม่ได้`;
-  if (!NAME_RE.test(n)) {
-    return `${kind}ใช้ได้เฉพาะตัวอักษร ตัวเลข _ . -`;
-  }
-  return null;
+  return sharedValidateVarName(normalizeVarName(name), kind);
 }
 
 /** Validate a field / bool / auto tag payload (not loop wrappers). */
@@ -2008,7 +2005,13 @@ export async function tagTemplate(
   xml = ensureTableListHeaders(xml);
   zip.file("word/document.xml", xml);
 
-  const outBuf = Buffer.from(await zip.generateAsync({ type: "nodebuffer" }));
+  const outBuf = Buffer.from(
+    await zip.generateAsync({
+      type: "nodebuffer",
+      compression: "DEFLATE",
+      compressionOptions: { level: 6 },
+    }),
+  );
   const { plainText } = collectWtNodes(
     (await (await JSZip.loadAsync(outBuf)).file("word/document.xml")!.async("string")),
   );

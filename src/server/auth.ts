@@ -141,6 +141,17 @@ export const auth = betterAuth({
     enabled: true,
     window: 60,
     max: 40,
+    // Passkey challenge minting is cheap to abuse — tighter than global auth traffic.
+    customRules: {
+      "/passkey/generate-register-options": {
+        window: 60,
+        max: 8,
+      },
+      "/passkey/generate-authenticate-options": {
+        window: 60,
+        max: 10,
+      },
+    },
   },
   advanced: {
     useSecureCookies: process.env.NODE_ENV === "production",

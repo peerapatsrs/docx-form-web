@@ -180,6 +180,8 @@ function sanitizeName(raw: string): string {
     .replace(/[\\|]+/g, "_")
     .replace(/\s+/g, "_")
     .replace(/[^\w\u0E00-\u0E7F./-]/gu, "")
+    .replace(/\/{2,}/g, "/")
+    .replace(/^\/+|\/+$/g, "")
     .replace(/_+/g, "_")
     .replace(/^_+|_+$/g, "")
     .slice(0, 40);

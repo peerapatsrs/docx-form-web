@@ -2,15 +2,20 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 import JSZip from "jszip";
 import { TagDisposition, TagPlacement } from "easy-template-x";
 import {
+  VAR_NAME_RE,
+  VAR_NAME_RE_SOURCE,
   fieldIdentityKey,
+  isValidVarName,
   normalizeVarName,
   validateUploadedTagName,
   validateVarName,
 } from "../src/server/field-names.ts";
 import {
+  assertTagsBalanced,
   fillTemplate,
   parseBoolTagName,
   parseTemplate,
@@ -19,6 +24,10 @@ import {
 import { mergeSplitTemplateTagsInXml } from "../src/server/docx-merge-tags.ts";
 import { formatTemplateError } from "../src/server/docx-errors.ts";
 import { maskGeminiKey } from "../src/server/ai-config.ts";
+import {
+  validateListCloseTag,
+  validateListOpenTag,
+} from "../src/server/template-tagger.ts";
 import {
   UNKNOWN_CLIENT_IP,
   clientIpFromXForwardedFor,
@@ -73,10 +82,61 @@ assert.deepEqual(
 );
 assert.notEqual(jumnoon.normalize("NFKC"), jumnoon);
 assert.equal(validateVarName("ที่อยู่/เบอร์"), null);
+assert.equal(isValidVarName("ที่อยู่/เบอร์"), true);
 assert.equal(validateUploadedTagName("เขต/อำเภอ"), null);
 assert.equal(validateUploadedTagName("พบ?√,"), null);
 assert.equal(validateUploadedTagName("รายการ"), null);
+// Leading / trailing / double slash must not pass (collide with {{/…}}).
+for (const bad of ["/x", "x/", "x//y", "/", "//", "/x/", "a//b"]) {
+  assert.equal(isValidVarName(bad), false, `expected reject ${bad}`);
+  assert.ok(validateVarName(bad), `expected error for ${bad}`);
+}
+assert.equal(validateListCloseTag("{{/}}"), null);
+assert.equal(validateListCloseTag("{{/loop}}"), null);
+assert.equal(validateListOpenTag("{{#loop}}"), null);
+assert.ok(validateListCloseTag("{{/x//y}}"));
+{
+  const closeTags = [
+    { name: "loop", disposition: TagDisposition.Open, placement: TagPlacement.TextNode },
+    { name: "item", disposition: TagDisposition.SelfClosed, placement: TagPlacement.TextNode },
+    { name: "loop", disposition: TagDisposition.Close, placement: TagPlacement.TextNode },
+  ];
+  assert.doesNotThrow(() => assertTagsBalanced(/** @type {any} */ (closeTags)));
+  const bareClose = [
+    { name: "loop", disposition: TagDisposition.Open, placement: TagPlacement.TextNode },
+    { name: "", disposition: TagDisposition.Close, placement: TagPlacement.TextNode },
+  ];
+  assert.doesNotThrow(() => assertTagsBalanced(/** @type {any} */ (bareClose)));
+}
 console.log("✓ field-names");
+
+// Client public/field-names.js must mirror server VAR_NAME_RE_SOURCE.
+{
+  const clientSrc = readFileSync(
+    join(__dirname, "..", "public", "field-names.js"),
+    "utf8",
+  );
+  const m = /FIELD_NAME_RE_SOURCE\s*=\s*String\.raw`([^`]+)`/.exec(clientSrc);
+  assert.ok(m, "public/field-names.js must define FIELD_NAME_RE_SOURCE");
+  assert.equal(m[1], VAR_NAME_RE_SOURCE);
+  // Classic browser script — evaluate into this context like a <script> tag.
+  vm.runInThisContext(clientSrc, { filename: "public/field-names.js" });
+  const client = /** @type {any} */ (globalThis).DocxFieldNames;
+  assert.ok(client?.isValidFieldName);
+  assert.equal(client.FIELD_NAME_RE_SOURCE, VAR_NAME_RE_SOURCE);
+  assert.equal(client.FIELD_NAME_RE.source, VAR_NAME_RE.source);
+  assert.equal(client.isValidFieldName("ที่อยู่/เบอร์"), true);
+  assert.equal(VAR_NAME_RE.test("ที่อยู่/เบอร์"), true);
+  for (const bad of ["/x", "x/", "x//y", "/"]) {
+    assert.equal(client.isValidFieldName(bad), false, `client reject ${bad}`);
+    assert.equal(VAR_NAME_RE.test(bad), false, `server reject ${bad}`);
+  }
+  // NFC on client before validate
+  const nfcName = "จำนวน";
+  assert.equal(client.normalizeFieldName(nfcName), nfcName);
+  assert.equal(client.isValidFieldName(nfcName), true);
+  console.log("✓ client/server field-name rules in sync");
+}
 
 const tags = [
   { name: "outer", disposition: TagDisposition.Open, placement: TagPlacement.TextNode },

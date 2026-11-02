@@ -172,12 +172,14 @@ function buildTag(
 
 function sanitizeName(raw: string): string {
   return String(raw || "")
+    .normalize("NFC")
     .trim()
     .replace(/^#+/, "")
     .replace(/^\++/, "")
-    .replace(/[/\\|]+/g, "_")
+    .replace(/\s*\/\s*/g, "/")
+    .replace(/[\\|]+/g, "_")
     .replace(/\s+/g, "_")
-    .replace(/[^\w\u0E00-\u0E7F.-]/gu, "")
+    .replace(/[^\w\u0E00-\u0E7F./-]/gu, "")
     .replace(/_+/g, "_")
     .replace(/^_+|_+$/g, "")
     .slice(0, 40);
@@ -186,12 +188,13 @@ function sanitizeName(raw: string): string {
 /** ASCII-only sanitize for English variable names. */
 function sanitizeNameAscii(raw: string): string {
   return String(raw || "")
+    .normalize("NFC")
     .trim()
     .replace(/^#+/, "")
     .replace(/^\++/, "")
-    .replace(/[/\\|]+/g, "_")
+    .replace(/[\\|]+/g, "_")
     .replace(/\s+/g, "_")
-    .replace(/[^A-Za-z0-9_.-]/g, "")
+    .replace(/[^A-Za-z0-9_./-]/g, "")
     .replace(/_+/g, "_")
     .replace(/^_+|_+$/g, "")
     .slice(0, 40)

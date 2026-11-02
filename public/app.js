@@ -3622,7 +3622,7 @@ async function runTaggerAiDraft() {
       const plain = String(s.plainText || "").trim();
       if (!plain) continue;
       let name = String(s.name || "").trim().replace(/^#+/, "");
-      if (!name || !/^[\w\u0E00-\u0E7F.-]+$/u.test(name)) continue;
+      if (!name || !/^[\w\u0E00-\u0E7F./-]+$/u.test(name)) continue;
       // Same name at multiple spans is OK (one form field, many locations).
       // Only rename when this name is already used by a different plainText in-session.
       if (usedNames.has(name)) {
@@ -6061,13 +6061,13 @@ function suggestFieldNameFromHeader(headerText, used) {
   if (!raw) return "";
   // Skip pure punctuation / checkbox marks as header names.
   if (/^[✓√✖×xX\-–—·.•]+$/u.test(raw)) return "";
-  // Normalize separators first so "เขต / อำเภอ" → เขต_อำเภอ (not dropped).
+  // Keep slash names (e.g. "เขต / อำเภอ" → เขต/อำเภอ); fall back without marks.
   let base = suggestTaggerName(raw);
   if (!base || base === "field") {
     base = suggestTaggerName(raw.replace(/[/\\|·•]+/g, " "));
   }
   if (!base || base === "field") return "";
-  if (!/^[\w\u0E00-\u0E7F.-]+$/u.test(base)) return "";
+  if (!/^[\w\u0E00-\u0E7F./-]+$/u.test(base)) return "";
   let name = base;
   let n = 2;
   while (used.has(name)) name = `${base}_${n++}`;
@@ -7415,10 +7415,12 @@ async function commitTaggerOps(ops) {
 
 function suggestTaggerName(plain) {
   const cleaned = String(plain)
+    .normalize("NFC")
     .trim()
-    .replace(/[/\\|]+/g, "_")
+    .replace(/\s*\/\s*/g, "/")
+    .replace(/[\\|]+/g, "_")
     .replace(/\s+/g, "_")
-    .replace(/[^\w\u0E00-\u0E7F.-]/gu, "")
+    .replace(/[^\w\u0E00-\u0E7F./-]/gu, "")
     .replace(/_+/g, "_")
     .replace(/^_+|_+$/g, "")
     .slice(0, 40);
@@ -7444,7 +7446,7 @@ function suggestTaggerNameFromContext(sel) {
   if (at <= 0) return "";
   const before = original.slice(Math.max(0, at - 48), at);
   // Label immediately before tabs/spaces: "...ทะเบียนลูกค้า\t"
-  const m = /([\u0E00-\u0E7Fa-zA-Z][\u0E00-\u0E7Fa-zA-Z0-9._-]{0,39})\s*$/u.exec(
+  const m = /([\u0E00-\u0E7Fa-zA-Z][\u0E00-\u0E7Fa-zA-Z0-9._/-]{0,39})\s*$/u.exec(
     before.replace(/[\t ]+$/u, ""),
   );
   if (!m) return "";
@@ -7528,8 +7530,8 @@ async function confirmTaggerVariable() {
     showTaggerDialogError('ไม่ต้องใส่เครื่องหมาย + นำหน้า — ระบบจะสร้างเป็น {{+ชื่อ}} ให้');
     return;
   }
-  if (!/^[\w\u0E00-\u0E7F.-]+$/u.test(name)) {
-    showTaggerDialogError("ชื่อใช้ได้เฉพาะตัวอักษร ตัวเลข _ . -");
+  if (!/^[\w\u0E00-\u0E7F./-]+$/u.test(name)) {
+    showTaggerDialogError("ชื่อใช้ได้เฉพาะตัวอักษร ตัวเลข _ . - /");
     return;
   }
 
@@ -7624,7 +7626,7 @@ async function confirmTaggerVariable() {
       }
       if (!fieldName) continue;
       usedAtConfirm.add(fieldName);
-      if (!/^[\w\u0E00-\u0E7F.-]+$/u.test(fieldName)) {
+      if (!/^[\w\u0E00-\u0E7F./-]+$/u.test(fieldName)) {
         showTaggerDialogError(
           `ชื่อฟิลด์เซลล์ไม่ถูกต้อง: ${fieldName} — ใช้ตัวอักษร ตัวเลข _ . -`,
         );
@@ -7763,7 +7765,7 @@ async function confirmTaggerVariable() {
       if (!rawField) continue;
       const isAutoField = rawField.startsWith("+");
       const fieldName = isAutoField ? rawField.slice(1).trim() : rawField;
-      if (!fieldName || !/^[\w\u0E00-\u0E7F.-]+$/u.test(fieldName)) {
+      if (!fieldName || !/^[\w\u0E00-\u0E7F./-]+$/u.test(fieldName)) {
         showTaggerDialogError(
           `ชื่อฟิลด์บรรทัดไม่ถูกต้อง: ${rawField} — ใช้ชื่อปกติ หรือ +ลำดับ สำหรับรันเลข`,
         );
@@ -8041,7 +8043,7 @@ async function saveTaggerEdit() {
   const name = String(
     /** @type {HTMLInputElement | null} */ (document.getElementById("taggerEditName"))?.value || "",
   ).trim();
-  if (!name || !/^[\w\u0E00-\u0E7F.-]+$/u.test(name)) {
+  if (!name || !/^[\w\u0E00-\u0E7F./-]+$/u.test(name)) {
     showErr("ชื่อตัวแปรไม่ถูกต้อง — ใช้ตัวอักษร ตัวเลข ไทย . - _");
     return;
   }

@@ -11,6 +11,7 @@ import {
   assertDocxReadable,
   formatTemplateError as mapTemplateError,
 } from "./docx-errors";
+import { mergeSplitTemplateTagsInDocx } from "./docx-merge-tags";
 import {
   fieldIdentityKey,
   fieldIdentityKeyFromTag,
@@ -351,9 +352,14 @@ export function assertTagsBalanced(tags: Tag[]): void {
   }
 }
 
-export async function parseTemplate(buffer: Buffer): Promise<ParseResult> {
+async function prepareTemplateBuffer(buffer: Buffer): Promise<Buffer> {
   await assertDocxReadable(buffer);
-  const tags = await handler.parseTags(buffer);
+  return mergeSplitTemplateTagsInDocx(buffer);
+}
+
+export async function parseTemplate(buffer: Buffer): Promise<ParseResult> {
+  const prepared = await prepareTemplateBuffer(buffer);
+  const tags = await handler.parseTags(prepared);
   assertTagsBalanced(tags);
   const { fields, warnings } = tagsToFieldsWithWarnings(tags);
   return warnings.length ? { fields, warnings } : { fields };
@@ -421,6 +427,7 @@ export async function fillTemplate(input: FillInput): Promise<Buffer> {
     data[img.name] = content;
   }
 
-  const out = await handler.process(input.template, data);
+  const prepared = await prepareTemplateBuffer(input.template);
+  const out = await handler.process(prepared, data);
   return Buffer.from(out);
 }

@@ -12,7 +12,14 @@ export type LayoutCell = {
   widthDxa?: number;
 };
 
-export type LayoutTextBlock = { type: "text"; text: string };
+export type LayoutTextBlock = { type: "text"; text: string; role?: "header" | "footer" | "body" };
+export type LayoutImageBlock = {
+  type: "image";
+  /** Alt text / description when available. */
+  alt?: string;
+  /** Which document region the image came from. */
+  role?: "header" | "footer" | "body";
+};
 export type LayoutTableBlock = {
   type: "table";
   /** Header rows from Word (with colspan/rowspan). */
@@ -32,8 +39,9 @@ export type LayoutTableBlock = {
   colWidths?: number[];
   /** Word floating table (tblpPr) — visual order may differ from XML order. */
   floating?: boolean;
+  role?: "header" | "footer" | "body";
 };
-export type LayoutBlock = LayoutTextBlock | LayoutTableBlock;
+export type LayoutBlock = LayoutTextBlock | LayoutTableBlock | LayoutImageBlock;
 
 export type DocumentLayout = {
   blocks: LayoutBlock[];
@@ -204,6 +212,143 @@ function paragraphPlainText(pXml: string): string {
   return cellPlainText(pXml);
 }
 
+function paragraphHasDrawing(pXml: string): boolean {
+  return /<w:drawing\b|<w:pict\b|<w:object\b/i.test(pXml);
+}
+
+function paragraphImageAlt(pXml: string): string {
+  const descr =
+    /descr="([^"]*)"/.exec(pXml)?.[1] ||
+    /name="([^"]*)"/.exec(pXml)?.[1] ||
+    "";
+  return decodeXmlEntities(descr).trim();
+}
+
+/** Resolve header/footer part paths from document.xml.rels (and fall back to word/header*.xml). */
+async function resolveHeaderFooterParts(
+  zip: JSZip,
+  documentXml: string,
+): Promise<{ headers: string[]; footers: string[] }> {
+  const headers: string[] = [];
+  const footers: string[] = [];
+  const seen = new Set<string>();
+  const push = (kind: "header" | "footer", path: string) => {
+    const norm = path.replace(/^\//, "");
+    if (!norm || seen.has(norm)) return;
+    seen.add(norm);
+    if (kind === "header") headers.push(norm);
+    else footers.push(norm);
+  };
+
+  const relsFile =
+    zip.file("word/_rels/document.xml.rels") ||
+    zip.file("word/_rels/document.xml.rels".toLowerCase());
+  const relsXml = relsFile ? await relsFile.async("string") : "";
+  const idToTarget = new Map<string, string>();
+  if (relsXml) {
+    const relRe =
+      /<Relationship\b[^>]*\bId="([^"]+)"[^>]*\bTarget="([^"]+)"[^>]*\/?>/gi;
+    let rm: RegExpExecArray | null;
+    while ((rm = relRe.exec(relsXml))) {
+      idToTarget.set(rm[1], rm[2].replace(/^\//, ""));
+    }
+  }
+
+  const refRe = /<w:(headerReference|footerReference)\b([^>]*)\/?>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = refRe.exec(documentXml))) {
+    const kind = m[1] === "headerReference" ? "header" : "footer";
+    const id = /\br:id="([^"]+)"/.exec(m[2] || "")?.[1];
+    if (!id) continue;
+    const target = idToTarget.get(id);
+    if (!target) continue;
+    const path = target.startsWith("word/") ? target : `word/${target}`;
+    push(kind, path);
+  }
+
+  // Fallback: include any header/footer parts present in the package.
+  if (!headers.length || !footers.length) {
+    for (const name of Object.keys(zip.files)) {
+      if (/^word\/header\d*\.xml$/i.test(name)) push("header", name);
+      if (/^word\/footer\d*\.xml$/i.test(name)) push("footer", name);
+    }
+  }
+  return { headers, footers };
+}
+
+/**
+ * Parse a header/footer/body XML fragment into layout blocks (text, tables, image markers).
+ */
+function parseXmlRegion(
+  xml: string,
+  role: "header" | "footer" | "body",
+): LayoutBlock[] {
+  const rootMatch =
+    /<(?:w:hdr|w:ftr|w:body)\b[^>]*>([\s\S]*)<\/(?:w:hdr|w:ftr|w:body)>/i.exec(
+      xml,
+    );
+  const region = rootMatch ? rootMatch[1] : xml;
+  const blocks: LayoutBlock[] = [];
+  let textBuf: string[] = [];
+  const flushText = () => {
+    const text = textBuf.join("").replace(/\n{3,}/g, "\n\n").trim();
+    if (text) blocks.push({ type: "text", text, role });
+    textBuf = [];
+  };
+
+  let pos = 0;
+  while (pos < region.length) {
+    const tblAt = region.indexOf("<w:tbl", pos);
+    const pAt = region.indexOf("<w:p", pos);
+    if (tblAt < 0 && pAt < 0) break;
+
+    if (tblAt >= 0 && (pAt < 0 || tblAt <= pAt)) {
+      const end = region.indexOf("</w:tbl>", tblAt);
+      if (end < 0) break;
+      const tblXml = region.slice(tblAt, end + "</w:tbl>".length);
+      const inner = tblXml.replace(/^<w:tbl\b[^>]*>/, "").replace(/<\/w:tbl>$/, "");
+      flushText();
+      const floating = /<w:tblpPr\b/.test(tblXml);
+      const rows = parseTableRawRows(inner);
+      const colWidths = parseTblGridWidths(inner);
+      if (rows.length) {
+        const block = tableToBlock(rows, floating, colWidths);
+        block.role = role;
+        blocks.push(block);
+      }
+      pos = end + "</w:tbl>".length;
+      continue;
+    }
+
+    if (pAt >= 0) {
+      const slice = region.slice(pAt, pAt + 6);
+      if (!(slice.startsWith("<w:p>") || slice.startsWith("<w:p "))) {
+        pos = pAt + 4;
+        continue;
+      }
+      const end = region.indexOf("</w:p>", pAt);
+      if (end < 0) break;
+      const pXml = region.slice(pAt, end + "</w:p>".length);
+      if (paragraphHasDrawing(pXml)) {
+        flushText();
+        blocks.push({
+          type: "image",
+          alt: paragraphImageAlt(pXml) || undefined,
+          role,
+        });
+      }
+      const t = paragraphPlainText(pXml);
+      if (t) textBuf.push(t + "\n");
+      else if (!paragraphHasDrawing(pXml)) textBuf.push("\n");
+      pos = end + "</w:p>".length;
+      continue;
+    }
+    break;
+  }
+  flushText();
+  return blocks;
+}
+
 function stripLoopWrappers(cell: string): string {
   return cell
     .replace(/\{\{#([^}]*)\}\}/g, "")
@@ -284,63 +429,49 @@ function reorderFloatingTableCaptions(blocks: LayoutBlock[]): LayoutBlock[] {
 }
 
 /**
- * Walk document body in order: paragraphs → text blocks, tables → real table structure.
+ * Walk document headers, body, and footers: paragraphs → text, drawings → image
+ * markers, tables → real table structure (for fill form + tagger preview).
  */
 export async function extractDocumentLayout(buffer: Buffer): Promise<DocumentLayout> {
   const zip = await JSZip.loadAsync(buffer);
   const file = zip.file("word/document.xml");
   if (!file) return { blocks: [] };
   const xml = await file.async("string");
-  const bodyMatch = /<w:body\b[^>]*>([\s\S]*)<\/w:body>/i.exec(xml);
-  if (!bodyMatch) return { blocks: [] };
-  const body = bodyMatch[1];
+  const { headers, footers } = await resolveHeaderFooterParts(zip, xml);
 
   const blocks: LayoutBlock[] = [];
-  let textBuf: string[] = [];
-  const flushText = () => {
-    const text = textBuf.join("").replace(/\n{3,}/g, "\n\n").trim();
-    if (text) blocks.push({ type: "text", text });
-    textBuf = [];
-  };
 
-  let pos = 0;
-  while (pos < body.length) {
-    const tblAt = body.indexOf("<w:tbl", pos);
-    const pAt = body.indexOf("<w:p", pos);
-    if (tblAt < 0 && pAt < 0) break;
-
-    if (tblAt >= 0 && (pAt < 0 || tblAt <= pAt)) {
-      const end = body.indexOf("</w:tbl>", tblAt);
-      if (end < 0) break;
-      const tblXml = body.slice(tblAt, end + "</w:tbl>".length);
-      const inner = tblXml.replace(/^<w:tbl\b[^>]*>/, "").replace(/<\/w:tbl>$/, "");
-      flushText();
-      const floating = /<w:tblpPr\b/.test(tblXml);
-      const rows = parseTableRawRows(inner);
-      const colWidths = parseTblGridWidths(inner);
-      if (rows.length) blocks.push(tableToBlock(rows, floating, colWidths));
-      pos = end + "</w:tbl>".length;
-      continue;
+  for (const path of headers) {
+    const part = zip.file(path);
+    if (!part) continue;
+    const partXml = await part.async("string");
+    const regionBlocks = parseXmlRegion(partXml, "header");
+    if (regionBlocks.length) {
+      blocks.push({
+        type: "text",
+        text: "— ส่วนหัวเอกสาร —",
+        role: "header",
+      });
+      blocks.push(...regionBlocks);
     }
-
-    if (pAt >= 0) {
-      const slice = body.slice(pAt, pAt + 6);
-      if (!(slice.startsWith("<w:p>") || slice.startsWith("<w:p "))) {
-        pos = pAt + 4;
-        continue;
-      }
-      const end = body.indexOf("</w:p>", pAt);
-      if (end < 0) break;
-      const pXml = body.slice(pAt, end + "</w:p>".length);
-      const t = paragraphPlainText(pXml);
-      if (t) textBuf.push(t + "\n");
-      else textBuf.push("\n");
-      pos = end + "</w:p>".length;
-      continue;
-    }
-    break;
   }
-  flushText();
+
+  blocks.push(...parseXmlRegion(xml, "body"));
+
+  for (const path of footers) {
+    const part = zip.file(path);
+    if (!part) continue;
+    const partXml = await part.async("string");
+    const regionBlocks = parseXmlRegion(partXml, "footer");
+    if (regionBlocks.length) {
+      blocks.push({
+        type: "text",
+        text: "— ส่วนท้ายเอกสาร —",
+        role: "footer",
+      });
+      blocks.push(...regionBlocks);
+    }
+  }
 
   return { blocks: reorderFloatingTableCaptions(blocks) };
 }

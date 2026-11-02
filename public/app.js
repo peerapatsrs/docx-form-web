@@ -601,43 +601,77 @@ async function restoreDraft() {
 }
 
 function defaultNamedDraftTitle() {
-  const base = state.filename ? String(state.filename).replace(/\.docx$/i, "") : "ดราฟ";
-  return `${base} · ${formatDraftDate(new Date().toISOString())}`;
+  const base = state.filename
+    ? String(state.filename).replace(/\.docx$/i, "")
+    : "ดราฟ";
+  return base;
 }
 
+/** Display draft name separately from template filename with one shared timestamp. */
+function formatNamedDraftListTitle(d) {
+  const filename = String(d?.filename || "").trim();
+  const base = filename.replace(/\.docx$/i, "");
+  let title = String(d?.title || "").trim();
+  if (title) {
+    title = title
+      .replace(/\s*[·•|]\s*\d{1,2}\s*[\/.\-]\s*\d{1,2}\s*[\/.\-]\s*\d{2,4}.*$/u, "")
+      .replace(/\s*[·•|]\s*\d{1,2}:\d{2}.*$/u, "")
+      .trim();
+  }
+  if (!title) return filename || "ไม่มีชื่อ";
+  if (!filename) return title;
+  if (title === filename || title === base) return `${title} — ${filename}`;
+  if (title.includes(filename) || (base && title.includes(base))) return title;
+  return `${title} — ${filename}`;
+}
+
+let namedDraftSaveBusy = false;
+
 async function promptSaveNamedDraft() {
+  if (namedDraftSaveBusy) return;
+  if (document.getElementById("appDialog")) return;
   if (!state.file || !state.fields.length) {
     showBanner("ยังไม่มีเทมเพลตให้บันทึกดราฟ");
     return;
   }
-  const result = await askDialog({
-    title: "บันทึกดราฟ",
-    body: "ตั้งชื่อดราฟเพื่อโหลดกลับภายหลัง (ข้ามวัน / สลับงานได้) — เก็บในเบราว์เซอร์นี้ผ่าน IndexedDB",
-    input: {
-      label: "ชื่อดราฟ (ไม่บังคับ)",
-      placeholder: defaultNamedDraftTitle(),
-      value: defaultNamedDraftTitle(),
-      type: "text",
-    },
-    actions: [
-      { id: "save", label: "บันทึก", kind: "primary" },
-      { id: "abort", label: "ยกเลิก", kind: "ghost" },
-    ],
-  });
-  if (!result || result === "abort" || typeof result !== "object") return;
-  const title = String(result.value || "").trim() || defaultNamedDraftTitle();
+  namedDraftSaveBusy = true;
+  const saveBtn = /** @type {HTMLButtonElement | null} */ (
+    document.getElementById("saveNamedDraftBtn")
+  );
+  if (saveBtn) saveBtn.disabled = true;
   try {
-    const payload = await buildDraftPayload();
-    await namedDraftPut({
-      ...payload,
-      id: crypto.randomUUID(),
-      title,
+    const result = await askDialog({
+      title: "บันทึกดราฟ",
+      body: "ตั้งชื่อดราฟเพื่อโหลดกลับภายหลัง (ข้ามวัน / สลับงานได้) — เก็บในเบราว์เซอร์นี้ผ่าน IndexedDB",
+      input: {
+        label: "ชื่อดราฟ (ไม่บังคับ)",
+        placeholder: defaultNamedDraftTitle(),
+        value: defaultNamedDraftTitle(),
+        type: "text",
+      },
+      actions: [
+        { id: "save", label: "บันทึก", kind: "primary" },
+        { id: "abort", label: "ยกเลิก", kind: "ghost" },
+      ],
     });
-    showBanner(`บันทึกดราฟแล้ว: ${title}`, "success");
-    setTimeout(() => showBanner(""), 2800);
-  } catch (err) {
-    console.warn("named draft save failed", err);
-    showBanner("บันทึกดราฟไม่สำเร็จ");
+    if (!result || result === "abort" || typeof result !== "object") return;
+    const title = String(result.value || "").trim() || defaultNamedDraftTitle();
+    try {
+      const payload = await buildDraftPayload();
+      await namedDraftPut({
+        ...payload,
+        id: crypto.randomUUID(),
+        title,
+      });
+      showBanner(`บันทึกดราฟแล้ว: ${title}`, "success");
+      setTimeout(() => showBanner(""), 2800);
+    } catch (err) {
+      console.warn("named draft save failed", err);
+      showBanner("บันทึกดราฟไม่สำเร็จ");
+    }
+  } finally {
+    namedDraftSaveBusy = false;
+    if (saveBtn) saveBtn.disabled = false;
   }
 }
 
@@ -714,8 +748,8 @@ function renderNamedDraftListHtml(drafts, opts = {}) {
       .map(
         (d) => `<li class="draft-list-item" data-draft-id="${escapeAttr(d.id)}">
           <div class="draft-list-main">
-            <strong class="draft-list-title">${escapeHtml(d.title || d.filename || "ไม่มีชื่อ")}</strong>
-            <span class="draft-list-meta">${escapeHtml(d.filename || "—")} · ${escapeHtml(formatDraftDate(d.savedAt))}</span>
+            <strong class="draft-list-title">${escapeHtml(formatNamedDraftListTitle(d))}</strong>
+            <span class="draft-list-meta">${escapeHtml(formatDraftDate(d.savedAt))}</span>
           </div>
           <div class="draft-list-actions">
             <button type="button" class="btn-secondary btn-compact" data-draft-load="${escapeAttr(d.id)}">โหลด</button>
@@ -809,11 +843,13 @@ async function openNamedDraftPicker() {
   overlay.className = "dialog-overlay";
   overlay.setAttribute("role", "dialog");
   overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-labelledby", "namedDraftDialogTitle");
+  overlay.setAttribute("aria-describedby", "namedDraftDialogBody");
 
   overlay.innerHTML = `
     <div class="dialog-card dialog-card-wide">
-      <h2 class="dialog-title">โหลดดราฟ</h2>
-      <p class="dialog-body">เลือกดราฟที่บันทึกไว้ในเบราว์เซอร์นี้ (คงอยู่ข้ามวัน)</p>
+      <h2 class="dialog-title" id="namedDraftDialogTitle">โหลดดราฟ</h2>
+      <p class="dialog-body" id="namedDraftDialogBody">เลือกดราฟที่บันทึกไว้ในเบราว์เซอร์นี้ (คงอยู่ข้ามวัน)</p>
       <div id="namedDraftDialogList">${renderNamedDraftListHtml(drafts)}</div>
       <div class="dialog-actions dialog-actions-stack">
         <button type="button" class="btn-ghost" data-draft-close>ปิด</button>
@@ -821,13 +857,15 @@ async function openNamedDraftPicker() {
     </div>
   `;
 
+  let releaseFocus = () => {};
   const close = () => {
+    releaseFocus();
     overlay.remove();
     document.removeEventListener("keydown", onKey);
   };
   const onKey = (e) => {
     if (e.key !== "Escape") return;
-    if (document.getElementById("appDialog")) return;
+    if (document.getElementById("appDialog") || document.getElementById("appConfirmDialog")) return;
     close();
   };
 
@@ -848,6 +886,10 @@ async function openNamedDraftPicker() {
 
   document.addEventListener("keydown", onKey);
   document.body.appendChild(overlay);
+  releaseFocus = trapFocusInOverlay(overlay);
+  /** @type {HTMLButtonElement | null} */ (
+    overlay.querySelector("[data-draft-close]")
+  )?.focus();
 }
 
 /**
@@ -896,23 +938,28 @@ function explainSkippedTemplates(opts) {
   });
 }
 
+/** True while the visible banner is a field-validation summary. */
+let validationBannerActive = false;
+
 function hideBanner() {
   if (!banner) return;
   banner.hidden = true;
   banner.textContent = "";
   banner.classList.remove("success", "progress");
   banner.removeAttribute("aria-busy");
+  validationBannerActive = false;
 }
 
 /**
  * @param {string} message
  * @param {'error'|'success'|'progress'|'warn'} [kind]
- * @param {{ action?: { label: string, onClick: () => void }, note?: string }} [opts]
+ * @param {{ action?: { label: string, onClick: () => void }, note?: string, validation?: boolean }} [opts]
  */
 function showBanner(message, kind = "error", opts = {}) {
   if (!banner) return;
   banner.hidden = !message;
   banner.classList.remove("success", "progress");
+  validationBannerActive = !!(message && opts.validation);
   if (!message) {
     hideBanner();
     return;
@@ -951,6 +998,97 @@ function showBanner(message, kind = "error", opts = {}) {
   if (kind === "error") {
     banner.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
+}
+
+/**
+ * Keep Tab/Shift+Tab focus inside a dialog overlay until it is dismissed.
+ * @param {HTMLElement} overlay
+ * @returns {() => void} teardown
+ */
+function trapFocusInOverlay(overlay) {
+  const previouslyFocused =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const focusableSelector =
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  const getFocusable = () =>
+    [...overlay.querySelectorAll(focusableSelector)].filter(
+      (el) => el instanceof HTMLElement && !el.hasAttribute("disabled") && el.offsetParent !== null,
+    );
+  const onKeyDown = (e) => {
+    if (e.key !== "Tab") return;
+    const nodes = getFocusable();
+    if (!nodes.length) {
+      e.preventDefault();
+      overlay.focus();
+      return;
+    }
+    const first = nodes[0];
+    const last = nodes[nodes.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey) {
+      if (active === first || !overlay.contains(active)) {
+        e.preventDefault();
+        last.focus();
+      }
+    } else if (active === last || !overlay.contains(active)) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
+  overlay.setAttribute("tabindex", "-1");
+  document.addEventListener("keydown", onKeyDown, true);
+  return () => {
+    document.removeEventListener("keydown", onKeyDown, true);
+    if (previouslyFocused && document.contains(previouslyFocused)) {
+      previouslyFocused.focus();
+    }
+  };
+}
+
+/**
+ * Confirm dialog that stacks above an existing appDialog (does not replace it).
+ * @param {{ title: string, body: string, confirmLabel?: string, abortLabel?: string }} opts
+ * @returns {Promise<boolean>}
+ */
+function askStackedConfirm(opts) {
+  return new Promise((resolve) => {
+    const existing = document.getElementById("appConfirmDialog");
+    if (existing) existing.remove();
+    const overlay = document.createElement("div");
+    overlay.id = "appConfirmDialog";
+    overlay.className = "dialog-overlay dialog-overlay-confirm";
+    overlay.setAttribute("role", "alertdialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-labelledby", "appConfirmTitle");
+    overlay.setAttribute("aria-describedby", "appConfirmBody");
+    overlay.innerHTML = `
+      <div class="dialog-card">
+        <h2 class="dialog-title" id="appConfirmTitle">${escapeHtml(opts.title)}</h2>
+        <p class="dialog-body" id="appConfirmBody">${escapeHtml(opts.body)}</p>
+        <div class="dialog-actions dialog-actions-stack">
+          <button type="button" class="btn-primary" data-confirm="ok">${escapeHtml(opts.confirmLabel || "ยืนยัน")}</button>
+          <button type="button" class="btn-ghost" data-confirm="abort">${escapeHtml(opts.abortLabel || "ยกเลิก")}</button>
+        </div>
+      </div>`;
+    const releaseFocus = trapFocusInOverlay(overlay);
+    const finish = (ok) => {
+      releaseFocus();
+      overlay.remove();
+      document.removeEventListener("keydown", onKey);
+      resolve(ok);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") finish(false);
+    };
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) finish(false);
+    });
+    overlay.querySelector('[data-confirm="ok"]')?.addEventListener("click", () => finish(true));
+    overlay.querySelector('[data-confirm="abort"]')?.addEventListener("click", () => finish(false));
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(overlay);
+    /** @type {HTMLButtonElement | null} */ (overlay.querySelector('[data-confirm="ok"]'))?.focus();
+  });
 }
 
 /**
@@ -1040,12 +1178,14 @@ function askDialog(opts) {
     overlay.className = "dialog-overlay";
     overlay.setAttribute("role", "dialog");
     overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-labelledby", "appDialogTitle");
+    overlay.setAttribute("aria-describedby", "appDialogBody");
     // When link tracks the select, put it under the dropdown so it updates with the choice.
     const linkAfterSelect = !!linkForSelect;
     overlay.innerHTML = `
       <div class="dialog-card">
-        <h2 class="dialog-title">${escapeHtml(opts.title)}</h2>
-        <p class="dialog-body">${escapeHtml(opts.body)}</p>
+        <h2 class="dialog-title" id="appDialogTitle">${escapeHtml(opts.title)}</h2>
+        <p class="dialog-body" id="appDialogBody">${escapeHtml(opts.body)}</p>
         ${linkAfterSelect ? "" : linkHtml}
         ${inputHtml}
         ${selectHtml}
@@ -1069,7 +1209,9 @@ function askDialog(opts) {
       };
     };
 
+    let releaseFocus = () => {};
     const finish = (value) => {
+      releaseFocus();
       overlay.remove();
       document.removeEventListener("keydown", onKey);
       resolve(value);
@@ -1129,6 +1271,7 @@ function askDialog(opts) {
     }
     document.addEventListener("keydown", onKey);
     document.body.appendChild(overlay);
+    releaseFocus = trapFocusInOverlay(overlay);
     const inputEl = /** @type {HTMLInputElement | null} */ (overlay.querySelector("#dialogInput"));
     if (inputEl) {
       inputEl.focus();
@@ -1209,6 +1352,35 @@ function clearFieldErrors() {
   });
 }
 
+/** Clear the validation summary banner once every highlighted field is fixed. */
+function maybeClearValidationBanner() {
+  if (!validationBannerActive || !app) return;
+  if (app.querySelector("[aria-invalid='true'], .has-error")) return;
+  hideBanner();
+}
+
+/** Field names that should be treated as email-typed values. */
+function isEmailTypedField(name, field) {
+  if (field && (field.type === "email" || field.valueType === "email")) return true;
+  const n = String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "");
+  return (
+    n === "email" ||
+    n === "e-mail" ||
+    n === "อีเมล" ||
+    n === "อีเมล์" ||
+    /(^|[_.-])(e-?mail|อีเมล์?|อีเมล)($|[_.-])/i.test(String(name || "").trim())
+  );
+}
+
+function isValidEmailValue(value) {
+  const v = String(value || "").trim();
+  if (!v) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v);
+}
+
 /**
  * @param {string} [inputSelector]
  * @param {string} [name]
@@ -1254,7 +1426,42 @@ function scrollToFirstFieldError() {
   target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
 }
 
-/** Highlight empty required fields and return their display names. */
+/**
+ * Mark a field invalid with a custom message (used for type checks).
+ * @param {string} inputSelector
+ * @param {string} name
+ * @param {string} message
+ * @param {{ list: string, row: number, item: string } | null} [listRef]
+ */
+function markFieldErrorMessage(inputSelector, name, message, listRef = null) {
+  markFieldError(inputSelector, name, listRef);
+  /** @type {Element | null} */
+  let input = inputSelector ? app.querySelector(inputSelector) : null;
+  if (!input && name) {
+    input = app.querySelector(`[data-doc-field="${cssAttrSelector(name)}"]`);
+  }
+  if (!input && listRef) {
+    input = app.querySelector(
+      `[data-list="${cssAttrSelector(listRef.list)}"][data-row="${listRef.row}"][data-item="${cssAttrSelector(listRef.item)}"]`,
+    );
+  }
+  if (!input) return;
+  const field =
+    input.closest(".field") ||
+    input.closest(".doc-blank-wrap") ||
+    input.closest(".doc-list") ||
+    input.parentElement;
+  const existing = field?.querySelector(".field-error");
+  if (existing) existing.textContent = message;
+  else if (field && !input.closest(".doc-table-cell-wrap, td")) {
+    input.insertAdjacentHTML(
+      "afterend",
+      `<p class="field-error">${escapeHtml(message)}</p>`,
+    );
+  }
+}
+
+/** Highlight empty / mistyped required fields and return their display names. */
 function validateBeforeSubmit() {
   clearFieldErrors();
   /** @type {string[]} */
@@ -1263,10 +1470,18 @@ function validateBeforeSubmit() {
   for (const f of state.fields) {
     if (state.skip[f.name]) continue;
 
-    if (f.type === "text") {
-      if (!String(state.values[f.name] ?? "").trim()) {
+    if (f.type === "text" || f.type === "email") {
+      const raw = String(state.values[f.name] ?? "").trim();
+      if (!raw) {
         missing.push(f.name);
         markFieldError(`#f-${cssId(f.name)}`, f.name);
+      } else if (isEmailTypedField(f.name, f) && !isValidEmailValue(raw)) {
+        missing.push(`${f.name} (รูปแบบอีเมลไม่ถูกต้อง)`);
+        markFieldErrorMessage(
+          `#f-${cssId(f.name)}`,
+          f.name,
+          "รูปแบบอีเมลไม่ถูกต้อง — ตรวจอีกครั้ง หรือติ๊ก “ข้าม”",
+        );
       }
     } else if (f.type === "bool") {
       // always true/false — no required check
@@ -1304,12 +1519,22 @@ function validateBeforeSubmit() {
         for (const item of f.itemFields) {
           if (item.type === "bool" || item.type === "auto") continue;
           if (state.rowSkip[f.name]?.[idx]?.[item.name]) continue;
-          if (!String(row[item.name] ?? "").trim()) {
+          const raw = String(row[item.name] ?? "").trim();
+          if (!raw) {
             const label = `${f.name} แถว ${idx + 1}.${item.name}`;
             missing.push(label);
             markFieldError(
               `#l-${cssId(f.name)}-${idx}-${cssId(item.name)}`,
               item.name,
+              { list: f.name, row: idx, item: item.name },
+            );
+          } else if (isEmailTypedField(item.name, item) && !isValidEmailValue(raw)) {
+            const label = `${f.name} แถว ${idx + 1}.${item.name} (รูปแบบอีเมลไม่ถูกต้อง)`;
+            missing.push(label);
+            markFieldErrorMessage(
+              `#l-${cssId(f.name)}-${idx}-${cssId(item.name)}`,
+              item.name,
+              "รูปแบบอีเมลไม่ถูกต้อง — ตรวจอีกครั้ง หรือติ๊ก “ข้าม”",
               { list: f.name, row: idx, item: item.name },
             );
           }
@@ -2230,6 +2455,9 @@ async function openAiKeysManager() {
     overlay.className = "dialog-overlay";
     overlay.setAttribute("role", "dialog");
     overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-labelledby", "aiKeysDialogTitle");
+    overlay.setAttribute("aria-describedby", "aiKeysDialogBody");
+    let releaseFocus = () => {};
 
     const paint = () => {
       const vault = readAiVault();
@@ -2243,8 +2471,8 @@ async function openAiKeysManager() {
         : "ยังไม่ล็อกอิน · คีย์อยู่แค่เครื่องนี้";
       overlay.innerHTML = `
         <div class="dialog-card dialog-card-wide">
-          <h2 class="dialog-title">คีย์ AI ของคุณ</h2>
-          <p class="dialog-body">${escapeHtml(quotaHint)} · ${escapeHtml(syncHint)}</p>
+          <h2 class="dialog-title" id="aiKeysDialogTitle">คีย์ AI ของคุณ</h2>
+          <p class="dialog-body" id="aiKeysDialogBody">${escapeHtml(quotaHint)} · ${escapeHtml(syncHint)}</p>
           ${renderList()}
           <div class="dialog-actions dialog-actions-stack">
             <button type="button" class="btn-primary" data-ai-act="add" title="${allowAdd ? "เพิ่มคีย์ผู้ให้บริการ" : "แผนฟรีมีได้ 1 คีย์ — จ่ายแล้วถึงจะเพิ่มได้อีก"}">${allowAdd ? "เพิ่มคีย์" : "เพิ่มคีย์ (จ่ายแล้ว)"}</button>
@@ -2255,6 +2483,7 @@ async function openAiKeysManager() {
         </div>`;
 
       overlay.querySelector('[data-ai-act="close"]')?.addEventListener("click", () => {
+        releaseFocus();
         overlay.remove();
         document.removeEventListener("keydown", onKey);
         resolve("close");
@@ -2266,6 +2495,7 @@ async function openAiKeysManager() {
             paint();
             return;
           }
+          releaseFocus();
           overlay.remove();
           document.removeEventListener("keydown", onKey);
           const ok = await promptAddAiKey();
@@ -2300,6 +2530,7 @@ async function openAiKeysManager() {
           e ? "success" : undefined,
         );
         setTimeout(() => showBanner(""), 2800);
+        releaseFocus();
         overlay.remove();
         document.removeEventListener("keydown", onKey);
         resolve("use");
@@ -2314,6 +2545,7 @@ async function openAiKeysManager() {
             vaultNow.entries.find((e) => e.id === checked?.value) ||
             getActiveAiEntry();
           if (!entry) return;
+          releaseFocus();
           overlay.remove();
           document.removeEventListener("keydown", onKey);
           showBanner("กำลังดึงรายการโมเดลจาก API…", "progress");
@@ -2412,12 +2644,26 @@ async function openAiKeysManager() {
             const id = btn.getAttribute("data-del");
             const vaultNow = readAiVault();
             const doomed = vaultNow.entries.find((e) => e.id === id);
-            if (doomed?.storeOnServer) await deleteServerAiKey(id);
-            vaultNow.entries = vaultNow.entries.filter((e) => e.id !== id);
-            if (vaultNow.activeId === id) {
-              vaultNow.activeId = vaultNow.entries[0]?.id || null;
+            if (!doomed) return;
+            const confirmed = await askStackedConfirm({
+              title: "ลบคีย์นี้?",
+              body: `ลบ「${doomed.label || providerLabel(doomed.provider)}」แล้วกู้คืนไม่ได้ — คีย์อื่นยังอยู่ครบ`,
+              confirmLabel: "ลบคีย์",
+              abortLabel: "ยกเลิก",
+            });
+            if (!confirmed) return;
+            const latest = readAiVault();
+            const still = latest.entries.find((e) => e.id === id);
+            if (!still) {
+              paint();
+              return;
             }
-            writeAiVault(vaultNow);
+            if (still.storeOnServer) await deleteServerAiKey(id);
+            latest.entries = latest.entries.filter((e) => e.id !== id);
+            if (latest.activeId === id) {
+              latest.activeId = latest.entries[0]?.id || null;
+            }
+            writeAiVault(latest);
             applyAiStatus({
               connected: !!getClientAiKey(),
               byok: true,
@@ -2430,23 +2676,25 @@ async function openAiKeysManager() {
       });
     };
 
+    const finishManager = (value) => {
+      releaseFocus();
+      overlay.remove();
+      document.removeEventListener("keydown", onKey);
+      resolve(value);
+    };
     const onKey = (e) => {
       if (e.key === "Escape") {
-        overlay.remove();
-        document.removeEventListener("keydown", onKey);
-        resolve("abort");
+        if (document.getElementById("appConfirmDialog")) return;
+        finishManager("abort");
       }
     };
     overlay.addEventListener("click", (e) => {
-      if (e.target === overlay) {
-        overlay.remove();
-        document.removeEventListener("keydown", onKey);
-        resolve("abort");
-      }
+      if (e.target === overlay) finishManager("abort");
     });
     document.addEventListener("keydown", onKey);
     document.body.appendChild(overlay);
     paint();
+    releaseFocus = trapFocusInOverlay(overlay);
   });
 }
 
@@ -2456,8 +2704,8 @@ async function connectGoogleAi() {
     const added = await promptAddAiKey();
     if (state.file) renderForm();
     if (taggerSession) renderTaggerWorkspace();
-    if (added) return;
-    // Still allow opening manager (empty) via second path
+    // Cancel / abort on the add-key dialog must not open the manager.
+    if (!added) return;
   }
   await openAiKeysManager();
   if (state.file) renderForm();
@@ -2679,7 +2927,7 @@ function renderEmpty() {
         </div>
       </section>
     </div>
-    <input class="sr-only" type="file" id="fileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple />
+    <input class="sr-only" type="file" id="fileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="อัปโหลดไฟล์เทมเพลต Word" />
     <div class="upload-layout upload-layout-secondary">
       <aside class="upload-side">
         <label class="upload-opt" for="showFullContent">
@@ -2819,7 +3067,7 @@ function renderTaggerUpload() {
       <div class="dropzone-title">ลากไฟล์ .docx ตัวอย่างมาวาง</div>
       <div class="dropzone-sub">หรือ <span class="linkish">เลือกไฟล์</span> แล้วไฮไลต์ข้อความเพื่อสร้างตัวแปร</div>
     </button>
-    <input class="sr-only" type="file" id="taggerFileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+    <input class="sr-only" type="file" id="taggerFileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" aria-label="อัปโหลดเอกสารตัวอย่างสำหรับสร้างเทมเพลต" />
     <p class="hint-error" id="taggerUploadError" hidden></p>
   `;
 
@@ -3867,10 +4115,20 @@ function renderTaggerWorkspace() {
   // Escape .sheet backdrop-filter containing block so fixed = viewport.
   portalTaggerDialogsToBody();
 
-  document.getElementById("taggerCancel")?.addEventListener("click", () => {
+  document.getElementById("taggerCancel")?.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
     clearTaggerCancelAllUndo();
+    // Close only the tagger — never open the AI key dialog as a side effect.
+    document.getElementById("appDialog")?.remove();
+    document.getElementById("appConfirmDialog")?.remove();
+    if (taggerSession) {
+      taggerSession.busy = false;
+      taggerSession.aiDrafting = false;
+    }
     taggerSession = null;
     taggerPendingSelection = null;
+    hideBanner();
     renderEmpty();
   });
   document.getElementById("taggerCancelAll")?.addEventListener("click", () => {
@@ -3964,12 +4222,33 @@ function renderTaggerWorkspace() {
  * @param {any[]} layout
  * @param {string} content
  */
+function renderLayoutImageBlock(block) {
+  const alt = String(block?.alt || "").trim();
+  const role = block?.role === "header" || block?.role === "footer" ? block.role : "body";
+  const roleLabel =
+    role === "header" ? "ในส่วนหัว" : role === "footer" ? "ในส่วนท้าย" : "";
+  const caption = alt
+    ? `รูปภาพ${roleLabel ? ` ${roleLabel}` : ""}: ${alt}`
+    : `รูปภาพในเอกสาร${roleLabel ? ` ${roleLabel}` : ""}`;
+  return `<div class="doc-layout-image" data-layout-role="${escapeAttr(role)}" contenteditable="false">
+    <span class="doc-layout-image-mark" aria-hidden="true"></span>
+    <span class="doc-layout-image-label">${escapeHtml(caption)}</span>
+  </div>`;
+}
+
 function renderTaggerPreview(layout, content) {
   if (layout?.length) {
     return layout
       .map((b) => {
-        if (b.type === "text") return renderTaggerPlainBlock(b.text || "");
+        if (b.type === "text") {
+          const roleClass =
+            b.role === "header" || b.role === "footer"
+              ? ` tagger-para-${b.role}`
+              : "";
+          return `<div class="tagger-para${roleClass}">${renderTaggerRichText(b.text || "")}</div>`;
+        }
         if (b.type === "table") return renderTaggerTableBlock(b);
+        if (b.type === "image") return renderLayoutImageBlock(b);
         return "";
       })
       .join("");
@@ -4901,15 +5180,30 @@ function syncTaggerFloatButton(root, floatBtnHint) {
     hideCreateUi();
     return;
   }
-  // Prefer just under the selection; clamp into the visible viewport.
-  const top = Math.min(
-    Math.max(72, rect.bottom + 8),
-    Math.max(72, window.innerHeight - 56),
-  );
-  const preferredLeft = Math.min(
-    window.innerWidth - 360,
-    Math.max(12, rect.left + rect.width / 2 - 170),
-  );
+  // Prefer beside the selection so the next line stays readable; fall back above/below.
+  const floatWidth = 360;
+  const spaceRight = window.innerWidth - rect.right;
+  const spaceLeft = rect.left;
+  let preferredLeft;
+  let top;
+  if (spaceRight >= floatWidth + 16) {
+    preferredLeft = Math.min(window.innerWidth - floatWidth - 12, rect.right + 10);
+    top = Math.min(Math.max(72, rect.top), Math.max(72, window.innerHeight - 56));
+  } else if (spaceLeft >= floatWidth + 16) {
+    preferredLeft = Math.max(12, rect.left - floatWidth - 10);
+    top = Math.min(Math.max(72, rect.top), Math.max(72, window.innerHeight - 56));
+  } else {
+    preferredLeft = Math.min(
+      window.innerWidth - floatWidth - 12,
+      Math.max(12, rect.left + rect.width / 2 - floatWidth / 2),
+    );
+    const below = rect.bottom + 12;
+    const above = rect.top - 52;
+    top =
+      below + 56 < window.innerHeight
+        ? Math.max(72, below)
+        : Math.max(72, Math.min(above, window.innerHeight - 56));
+  }
   placeTaggerFloatRow(
     /** @type {HTMLElement[]} */ ([floatBtn, floatDeleteBtn, floatCopyBtn].filter(Boolean)),
     top,
@@ -9419,11 +9713,12 @@ function renderForm() {
           ${aiStatus.connected ? `AI · ${escapeHtml(getClientAiLabel() || aiStatus.providerLabel || String(aiStatus.model || "พร้อม").replace(/^gemini-/i, ""))}` : "ใส่ AI key"}
         </button>
         <button type="button" class="btn-secondary btn-compact" id="attachSource" ${aiStatus.connected ? "" : "disabled"} title="${aiStatus.connected ? (isMultiMode() ? "แนบต้นทาง — ส่ง Export JSON ให้ AI กรอกค่า แล้วนำ JSON กลับมาใส่จอ" : "แนบ PDF / Word / รูป — ส่งโครง JSON ให้ AI กรอกค่า") : "ต้องใส่ AI key ของคุณก่อน"}">${isMultiMode() ? "ต้นทาง → ให้ AI กรอก JSON" : "แนบเอกสารต้นทาง"}</button>
-        <input class="sr-only" type="file" id="attachSourceInput" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple />
+        <input class="sr-only" type="file" id="attachSourceInput" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple aria-label="แนบเอกสารต้นทางสำหรับ AI กรอกค่า" />
         <button type="button" class="btn-secondary btn-compact" id="exportJson" title="ส่งออกค่าที่กรอกเป็น JSON">Export JSON</button>
         <button type="button" class="btn-secondary btn-compact" id="importJson" title="นำเข้าค่าจากไฟล์ JSON">Import JSON</button>
-        <input class="sr-only" type="file" id="importJsonInput" accept="application/json,.json" />
-        <input class="sr-only" type="file" id="addTemplateInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple />
+        <input class="sr-only" type="file" id="importJsonInput" accept="application/json,.json" aria-label="เลือกไฟล์ JSON เพื่อนำเข้าค่า" />
+        <input class="sr-only" type="file" id="addTemplateInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="เลือกไฟล์เทมเพลต Word เพิ่ม" />
+        <button type="button" class="btn-secondary btn-compact" id="openTaggerFromForm" title="สร้างเทมเพลตใหม่จากเอกสารตัวอย่าง">สร้างเทมเพลต</button>
         <button type="button" class="linkish" id="goHomeBtn" title="กลับไปหน้าอัปโหลดเทมเพลต">← หน้าหลัก</button>
       </div>
     </div>
@@ -9449,6 +9744,23 @@ function renderForm() {
   });
   document.getElementById("loadNamedDraftBtn")?.addEventListener("click", () => {
     void openNamedDraftPicker();
+  });
+
+  document.getElementById("openTaggerFromForm")?.addEventListener("click", () => {
+    void (async () => {
+      const choice = await askDialog({
+        title: "สร้างเทมเพลตจากเอกสาร?",
+        body: "จะเปิดโหมดใส่แท็กจากเอกสารตัวอย่าง — ค่าที่กรอกในเทมเพลตปัจจุบันยังอยู่ในดราฟอัตโนมัติถ้าเคยบันทึกไว้",
+        actions: [
+          { id: "ok", label: "เปิดตัวสร้างเทมเพลต", kind: "primary" },
+          { id: "abort", label: "ยกเลิก", kind: "ghost" },
+        ],
+      });
+      if (choice !== "ok") return;
+      hideBanner();
+      clearFieldErrors();
+      renderTaggerUpload();
+    })();
   });
 
   document.getElementById("goHomeBtn")?.addEventListener("click", async () => {
@@ -9515,6 +9827,9 @@ function renderForm() {
       persistActiveSlot();
       const slot = multiSlots.find((s) => s.id === id);
       if (!slot) return;
+      // Drop validation UI from the previous template so errors do not carry over.
+      hideBanner();
+      clearFieldErrors();
       applySlotToState(slot);
       for (const f of state.fields) {
         if (f.type === "list") ensureListRows(f.name, f.itemFields);
@@ -10496,8 +10811,14 @@ function renderDocumentFromLayout(blocks) {
   if (!blocks?.length) return `<p class="dropzone-hint">ไม่มีข้อความในไฟล์</p>`;
   return blocks
     .map((b) => {
-      if (b.type === "text") return renderDocumentLayout(b.text || "");
+      if (b.type === "text") {
+        const roleClass =
+          b.role === "header" || b.role === "footer" ? ` doc-para-${b.role}` : "";
+        const inner = renderDocumentLayout(b.text || "");
+        return roleClass ? `<div class="${roleClass.trim()}">${inner}</div>` : inner;
+      }
       if (b.type === "table") return renderWordTableBlock(b);
+      if (b.type === "image") return renderLayoutImageBlock(b);
       return "";
     })
     .join("");
@@ -10918,15 +11239,34 @@ function maybeMorphTextControl(el) {
 /** @param {HTMLInputElement | HTMLTextAreaElement} el */
 /** Clear validation highlight on one control when the user fills it. */
 function clearOneFieldError(el) {
-  if (!el || !String(el.value ?? "").trim()) return;
+  if (!el) return;
+  const raw = String(el.value ?? "").trim();
+  if (!raw) return;
+  const fieldName = el.name || el.dataset.docField || el.dataset.item || "";
+  const listName = el.dataset.list;
+  /** @type {any} */
+  let fieldMeta = null;
+  if (listName) {
+    const listField = state.fields.find((f) => f.type === "list" && f.name === listName);
+    fieldMeta =
+      listField?.type === "list"
+        ? listField.itemFields.find((x) => x.name === fieldName)
+        : null;
+  } else {
+    fieldMeta = state.fields.find((f) => f.name === fieldName) || null;
+  }
+  if (isEmailTypedField(fieldName, fieldMeta) && !isValidEmailValue(raw)) return;
   el.removeAttribute("aria-invalid");
   const wrap =
     el.closest(".doc-blank-wrap") ||
+    el.closest(".doc-table-cell-wrap") ||
     el.closest(".field") ||
     el.parentElement;
-  if (!wrap?.classList.contains("has-error")) return;
-  wrap.classList.remove("has-error");
-  wrap.querySelectorAll(".field-error").forEach((n) => n.remove());
+  if (wrap?.classList.contains("has-error")) {
+    wrap.classList.remove("has-error");
+    wrap.querySelectorAll(".field-error").forEach((n) => n.remove());
+  }
+  maybeClearValidationBanner();
 }
 
 function wireOneTextValueControl(el) {
@@ -11528,12 +11868,24 @@ function wireFieldEvents() {
       state.skip[name] = t.checked;
       if (t.checked) {
         const field = state.fields.find((f) => f.name === name);
-        if (field?.type === "text") state.values[name] = "";
+        if (field?.type === "text" || field?.type === "email") state.values[name] = "";
         if (field?.type === "bool") state.values[name] = false;
         if (field?.type === "image") state.images[name] = null;
       }
       // Unchecking ข้าม re-enables the bool/text control via re-render
+      const keepValidation = validationBannerActive;
       renderForm();
+      if (keepValidation) {
+        const still = validateBeforeSubmit();
+        if (!still.length) hideBanner();
+        else {
+          showBanner(
+            `ยังมีช่องที่ไม่ได้กรอก (${still.length}) — กรอกให้ครบ หรือติ๊ก “ข้าม” ก่อนสร้างเอกสาร`,
+            "error",
+            { validation: true },
+          );
+        }
+      }
       scheduleSaveDraft();
     });
   });
@@ -11555,7 +11907,12 @@ function wireFieldEvents() {
           : null;
         state.values[list][row][item] = itemField?.type === "bool" ? false : "";
       }
+      const keepValidation = validationBannerActive;
       renderForm();
+      if (keepValidation) {
+        const still = validateBeforeSubmit();
+        if (!still.length) hideBanner();
+      }
       scheduleSaveDraft();
     });
   });
@@ -11799,6 +12156,8 @@ async function createAllTemplatesZip() {
         : `${missing.slice(0, 8).join(", ")} และอีก ${missing.length - 8} ช่อง`;
     showBanner(
       `ยังมีช่องว่างในบางเทมเพลต (${missing.length}): ${listed} — กรอก/ข้ามให้ครบก่อนสร้างทั้งหมด`,
+      "error",
+      { validation: true },
     );
     // Jump to the first incomplete template and paint empty cells.
     if (firstBad && firstBad.id !== multiActiveId) {
@@ -11907,6 +12266,8 @@ async function onSubmit(e) {
         : `${missing.slice(0, 10).join(", ")} และอีก ${missing.length - 10} ช่อง`;
     showBanner(
       `ยังมีช่องที่ไม่ได้กรอก (${missing.length}): ${listed} — กรอกให้ครบ หรือติ๊ก “ข้าม” ก่อนสร้างเอกสาร`,
+      "error",
+      { validation: true },
     );
     return;
   }

@@ -9,6 +9,10 @@
  * Server validate/enrich still grounds suggestions to exact TAGGER_PLAIN spans.
  */
 
+import {
+  CONTACT_TAGGING_EXAMPLE,
+  LABEL_VALUE_SPLIT_EXAMPLES,
+} from "@/config/ai-tag-draft-prompt-examples";
 import { getGeminiApiKey, getGeminiModel } from "./ai-config";
 import { callCursorAgentJson } from "./ai-cursor-agent";
 import { formatProviderHttpError } from "./ai-http-errors";
@@ -103,7 +107,7 @@ const SAMPLE_MARKER_RE =
   /\s*[\(（]\s*(?:ตัวอย่าง|sample|example|demo)\s*[\)）]\s*$/iu;
 /**
  * Contact-ish stems often glued flush to ANY value (digits OR text):
- * โทร02-023-2599 · โทรสำนักงานใหญ่ · TelACME
+ * โทร + phone/office name · Tel + Latin token
  */
 const GLUED_STEM_RE = /^(โทร\.?|tel\.?|t\.|แฟกซ์\.?|fax\.?)/iu;
 const GLUED_STEM_LABELS = [
@@ -772,17 +776,13 @@ Grounding (must stay true so the app can apply your tags):
 - Max ${MAX_SUGGESTIONS} suggestions. Skip duplicates / unsafe overlaps (fields may nest fully inside a list wrap; fill-empty-tc may share a row anchor with its list-table wrap).
 - occurrence is 0-based among identical plainText matches in document order (omit or 0 if unsure).
 - Cover the document: emit a suggestion for every distinct fill-in VALUE you want tagged (different names/companies/phones/addresses/emails each need their own row). If the exact same VALUE string repeats in several safe places, one row is enough — the system expands it to every matching location. Do not under-suggest unique fields.
-- Letterhead / footer contacts are required when present: after 「โทร」/「Tel」/「เบอร์โทรศัพท์」 tag the phone number or comma-list (e.g. 02-023-2599,096-392-3963); also tag emails like biglegal@…. Never tag a single digit inside a phone number.
+- Letterhead / footer contacts are required when present: after 「โทร」/「Tel」/「เบอร์โทรศัพท์」 tag the phone number or comma-list (${CONTACT_TAGGING_EXAMPLE}. Never tag a single digit inside a phone number.
 
 How to split label vs value (use your judgment on the real text):
 - When a fill-in VALUE follows a short caption/stem, set "label" to that caption exactly as in TAGGER_PLAIN and plainText to the VALUE only. VALUE may be ANY text (names, companies, addresses, amounts, phones, ids) — not only digits.
 - Separators vary: Word tabs (\\t), spaces, NBSP, OR flush with NO separator. Do not assume tabs.
   Examples:
-  ประเภทหนี้\\t\\tกู้ยืม → {"plainText":"กู้ยืม","label":"ประเภทหนี้",...}
-  มอบหมายให้ บริษัท กฎหมาย บีไอจี จำกัด (ตัวอย่าง) → {"plainText":"บริษัท กฎหมาย บีไอจี จำกัด","label":"มอบหมายให้",...}
-  มอบหมายให้บริษัท กฎหมาย บีไอจี จำกัด… (flush) → same split
-  (โทร02-023-2599) / (โทร02-023-2599,02-023-2591) / (โทรสำนักงานใหญ่)
-    → plainText = the value body (digits OR text); label = "โทร"
+  ${LABEL_VALUE_SPLIT_EXAMPLES}
 - Prefer omitting instructional tails like 「(ตัวอย่าง)」 and usually omit wrapping 「()」.
 
 Kinds / modes (schema the app understands — pick what fits the document):
@@ -1141,9 +1141,8 @@ function coerceFieldKindForWrap(
 
 /**
  * Pure-digit needles must be a complete token — not a shard of a phone/id.
- * Rejects: "3" inside "02-023-2599", "2" in "281", "1" in "1โฉนด…".
- * Allows longer digit cells flush to Thai when Word tables omit separators
- * (e.g. "4578ปทุมธานี", "1200หนึ่งพัน…") — only block 1–2 digit row markers.
+ * Rejects short digits mid-phone / mid-id, and 1–2 digit markers flush to Thai.
+ * Allows longer digit cells flush to Thai when Word tables omit separators.
  */
 function plainDigitMatchAllowed(haystack: string, idx: number, needle: string): boolean {
   if (!/^\d+$/.test(needle)) return true;
@@ -1160,9 +1159,9 @@ function plainDigitMatchAllowed(haystack: string, idx: number, needle: string): 
 }
 
 /**
- * Reject only mid-token continuations. A complete phone before a list comma is OK:
- * 「02-023-2599,096-392-396」 may tag the first number alone.
- * Still blocks Latin glue (TelACME) and mid-hyphen digits (handled mainly in plainDigitMatchAllowed).
+ * Reject only mid-token continuations. A complete phone before a list comma is OK
+ * (first number alone). Still blocks Latin glue and mid-hyphen digits
+ * (handled mainly in plainDigitMatchAllowed).
  */
 function plainValueTailOk(haystack: string, idx: number, needle: string): boolean {
   const end = idx + needle.length;

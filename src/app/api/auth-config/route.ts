@@ -1,9 +1,7 @@
 import { NextResponse } from "next/server";
 import { enabledOAuthProviders } from "@/server/auth";
-import {
-  getDefaultDevAuthEmail,
-  isDevAuthEnabled,
-} from "@/lib/dev-auth-flag";
+import { isDevAuthEnabled } from "@/lib/dev-auth-flag";
+import { getDefaultDevAuthEmail } from "@/server/dev-auth-email";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +15,6 @@ export async function GET() {
     /** Local: pick DB user without real OAuth */
     devAuth,
     /** Preferred account for Run Local auto sign-in (only when devAuth). */
-    devAuthDefaultEmail: devAuth ? getDefaultDevAuthEmail() : null,
+    devAuthDefaultEmail: devAuth ? getDefaultDevAuthEmail() ?? null : null,
   });
 }

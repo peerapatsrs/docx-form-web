@@ -1,9 +1,9 @@
-/** @typedef {{ name: string, type: 'text' }} TextField */
-/** @typedef {{ name: string, type: 'image' }} ImageField */
-/** @typedef {{ name: string, type: 'bool', trueText: string, falseText: string, label: string }} BoolField */
-/** @typedef {{ name: string, type: 'auto', label: string }} AutoField */
-/** @typedef {TextField | BoolField | AutoField} ListItemField */
-/** @typedef {{ name: string, type: 'list', itemFields: ListItemField[] }} ListField */
+/** @typedef {{ name: string, type: 'text', aliases?: string[] }} TextField */
+/** @typedef {{ name: string, type: 'image', aliases?: string[] }} ImageField */
+/** @typedef {{ name: string, type: 'bool', trueText: string, falseText: string, label: string, aliases?: string[] }} BoolField */
+/** @typedef {{ name: string, type: 'auto', label: string, aliases?: string[] }} AutoField */
+/** @typedef {{ name: string, type: 'list', itemFields: Array<TextField | BoolField | AutoField | ListField>, aliases?: string[] }} ListField */
+/** @typedef {TextField | BoolField | AutoField | ListField} ListItemField */
 /** @typedef {TextField | ImageField | ListField | BoolField | AutoField} FormField */
 
 /** Shell nodes from React home — refreshed on soft navigate remount. */
@@ -850,6 +850,26 @@ async function openNamedDraftPicker() {
   document.body.appendChild(overlay);
 }
 
+/** Map raw library / JS exceptions to a short Thai file error. */
+function friendlyUploadError(err) {
+  const raw = err instanceof Error ? err.message : String(err || "");
+  const msg = String(raw || "").trim();
+  if (!msg) return "ไฟล์ใช้ไม่ได้ หรืออ่านไม่สำเร็จ";
+  if (/ไฟล์ใหญ่เกินไป|FILE_TOO_LARGE/i.test(msg)) return "ไฟล์ใหญ่เกินไป (สูงสุด 25 MB)";
+  if (/รหัสผ่าน|encrypted|password/i.test(msg)) {
+    return "ไฟล์ถูกป้องกันด้วยรหัสผ่าน — ปลดล็อกใน Word แล้ว Save เป็น .docx ปกติ";
+  }
+  if (/NO_VARIABLES|ไม่พบตัวแปร/i.test(msg)) return msg;
+  if (/cannot read properties|undefined.*trim|is not a function|Unexpected token/i.test(msg)) {
+    return "ไฟล์ใช้ไม่ได้ หรือไม่ใช่เอกสาร .docx ที่รองรับ";
+  }
+  if (/https?:\/\//i.test(msg)) {
+    return msg.replace(/https?:\/\/\S+/gi, "").replace(/\s{2,}/g, " ").trim() ||
+      "อ่านเทมเพลตไม่สำเร็จ";
+  }
+  return msg;
+}
+
 /**
  * Popup when some selected .docx files are skipped (usually no {{vars}}).
  * @param {{
@@ -891,8 +911,20 @@ function explainSkippedTemplates(opts) {
       `เทมเพลตต้องมี {{ชื่อ}} หรือแท็กรูป หรือ {{#รายการ}}` +
       (ok > 0
         ? `\nสลับแท็บด้านบนได้ หรือกด 「+ เพิ่ม」 เพื่อเลือกไฟล์ใหม่`
-        : `\nใส่ตัวแปรใน Word แล้วเลือกใหม่อีกครั้ง`),
-    actions: [{ id: "ok", label: "เข้าใจแล้ว", kind: "primary" }],
+        : `\nเปิดโหมดสร้างเทมเพลตจากเอกสาร หรือใส่ตัวแปรใน Word แล้วเลือกใหม่`),
+    actions: [
+      ...(ok === 0 && failures.length === 1
+        ? [{ id: "tagger", label: "สร้างเทมเพลตจากเอกสาร", kind: "primary" }]
+        : []),
+      { id: "ok", label: ok === 0 && failures.length === 1 ? "ปิด" : "เข้าใจแล้ว", kind: ok === 0 && failures.length === 1 ? "ghost" : "primary" },
+    ],
+  }).then((choice) => {
+    if (choice === "tagger") {
+      const name = failures[0]?.name;
+      // Caller may re-open the same picker; tagger needs the File object — handled by parse catch path.
+      void name;
+    }
+    return choice;
   });
 }
 
@@ -935,6 +967,9 @@ function showBanner(message, kind = "error", opts = {}) {
     banner.classList.add("success");
     banner.removeAttribute("aria-busy");
     banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${actionBtn}${closeBtn}`;
+  } else if (kind === "warn") {
+    banner.removeAttribute("aria-busy");
+    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${noteHtml}${actionBtn}${closeBtn}`;
   } else {
     banner.removeAttribute("aria-busy");
     banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${actionBtn}${closeBtn}`;
@@ -1562,7 +1597,7 @@ function isAiStaffAdmin() {
 }
 
 /**
- * @typedef {{ id: string, provider: string, label: string, apiKey: string, model: string, storeOnServer?: boolean }} AiVaultEntry
+ * @typedef {{ id: string, provider: string, label: string, apiKey: string, model: string, storeOnServer?: boolean, maskedKey?: string }} AiVaultEntry
  * @typedef {{ entries: AiVaultEntry[], activeId: string | null }} AiVault
  */
 
@@ -1648,6 +1683,14 @@ function getActiveAiEntry() {
 
 function getClientAiKey() {
   return String(getActiveAiEntry()?.apiKey || "").trim();
+}
+
+/** True when we can call AI (local plaintext key and/or server vault id). */
+function hasClientAiCredentials() {
+  const e = getActiveAiEntry();
+  if (!e) return false;
+  if (String(e.apiKey || "").trim()) return true;
+  return !!(e.storeOnServer && e.id && aiUserLoggedIn);
 }
 
 function getClientAiModel() {
@@ -1776,14 +1819,17 @@ async function pullServerAiKeys() {
     const vault = readAiVault();
     const byId = new Map(vault.entries.map((e) => [e.id, e]));
     for (const r of remote) {
-      if (!r?.id || !r.apiKey) continue;
+      if (!r?.id) continue;
+      const existing = byId.get(String(r.id));
+      // Server no longer returns plaintext — keep local secret if we already have it.
       const next = {
         id: String(r.id),
-        provider: String(r.provider || "google"),
-        label: String(r.label || providerLabel(r.provider)),
-        apiKey: String(r.apiKey),
-        model: String(r.model || ""),
+        provider: String(r.provider || existing?.provider || "google"),
+        label: String(r.label || existing?.label || providerLabel(r.provider)),
+        apiKey: existing?.apiKey || "",
+        model: String(r.model || existing?.model || ""),
         storeOnServer: true,
+        maskedKey: String(r.maskedKey || existing?.maskedKey || ""),
       };
       byId.set(next.id, next);
     }
@@ -1835,9 +1881,17 @@ async function deleteServerAiKey(id) {
 }
 
 function maskClientKey(key) {
-  const k = String(key || "");
-  if (k.length < 10) return "••••";
-  return `${k.slice(0, 6)}…${k.slice(-4)}`;
+  const k = String(key || "").trim();
+  if (!k) return "••••";
+  if (k.length <= 4) return "••••";
+  return `••••…${k.slice(-4)}`;
+}
+
+/** Display mask for vault rows — prefer server maskedKey when plaintext is absent. */
+function maskAiEntry(entry) {
+  if (!entry) return "••••";
+  if (entry.maskedKey) return String(entry.maskedKey);
+  return maskClientKey(entry.apiKey);
 }
 
 /** Headers so the server uses THIS user's key for the request only (not stored server-side). */
@@ -1849,6 +1903,10 @@ function aiAuthHeaders(extra = {}) {
   const key = String(entry.apiKey || "").trim();
   const model = String(entry.model || "").trim();
   const provider = String(entry.provider || "google").trim();
+  // Prefer vault id so the server can use the encrypted copy (no plaintext round-trip).
+  if (entry.storeOnServer && entry.id && aiUserLoggedIn) {
+    h["X-Ai-Key-Id"] = String(entry.id);
+  }
   if (key) {
     h["X-Ai-Api-Key"] = key;
     h["X-Gemini-Api-Key"] = key; // legacy
@@ -1864,14 +1922,15 @@ function aiAuthHeaders(extra = {}) {
 function applyAiStatus(data) {
   const entry = getActiveAiEntry();
   const clientKey = entry?.apiKey || "";
+  const hasVaultRef = !!(entry?.storeOnServer && entry?.id);
   const clientModel = entry?.model || "";
   const provider = entry?.provider || data.provider || "google";
   if (Array.isArray(data.providers) && data.providers.length) {
     aiProvidersCatalog = data.providers;
   }
   aiStatus = {
-    connected: !!clientKey || !!data.connected,
-    maskedKey: clientKey ? maskClientKey(clientKey) : data.maskedKey || null,
+    connected: !!clientKey || hasVaultRef || !!data.connected,
+    maskedKey: entry ? maskAiEntry(entry) : data.maskedKey || null,
     model:
       clientModel ||
       data.model ||
@@ -2167,12 +2226,18 @@ async function promptAddAiKey() {
         entry.storeOnServer = false;
         writeAiVault(vault);
         showBanner("บันทึกในเบราว์เซอร์แล้ว แต่ซิงก์ขึ้นเซิร์ฟเวอร์ไม่สำเร็จ");
-      } else if (!formOk) {
-        showBanner(
-          `บันทึกแล้ว · ${label} — แต่ยังใช้ดราฟ/กรอกไม่ได้ (ใช้ Gemini / OpenAI / Claude)`,
-        );
       } else {
-        showBanner(`พร้อมใช้ · ${label} · ${model} · ซิงก์เซิร์ฟเวอร์แล้ว`, "success");
+        // Drop plaintext from localStorage once the server vault holds it.
+        entry.maskedKey = maskClientKey(apiKey);
+        entry.apiKey = "";
+        writeAiVault(vault);
+        if (!formOk) {
+          showBanner(
+            `บันทึกแล้ว · ${label} — แต่ยังใช้ดราฟ/กรอกไม่ได้ (ใช้ Gemini / OpenAI / Claude)`,
+          );
+        } else {
+          showBanner(`พร้อมใช้ · ${label} · ${model} · ซิงก์เซิร์ฟเวอร์แล้ว`, "success");
+        }
       }
     } else if (!formOk) {
       showBanner(
@@ -2212,7 +2277,7 @@ async function openAiKeysManager() {
           <input type="radio" name="aiActiveKey" value="${escapeAttr(e.id)}" ${active ? "checked" : ""} />
           <span class="ai-key-meta">
             <strong>${escapeHtml(e.label || providerLabel(e.provider))} <span class="ai-key-badge">${escapeHtml(where)}</span></strong>
-            <small>${escapeHtml(providerLabel(e.provider))} · ${escapeHtml(e.model)} · ${escapeHtml(maskClientKey(e.apiKey))}</small>
+            <small>${escapeHtml(providerLabel(e.provider))} · ${escapeHtml(e.model)} · ${escapeHtml(maskAiEntry(e))}</small>
           </span>
           ${syncBtn}
           <button type="button" class="btn-ghost btn-compact ai-key-del" data-del="${escapeAttr(e.id)}" title="ลบคีย์นี้">ลบ</button>
@@ -2286,7 +2351,7 @@ async function openAiKeysManager() {
           writeAiVault(vaultNow);
         }
         applyAiStatus({
-          connected: !!getClientAiKey(),
+          connected: !!hasClientAiCredentials(),
           byok: true,
           provider: getClientAiProvider(),
           models: providerModels(getClientAiProvider()),
@@ -2333,8 +2398,8 @@ async function openAiKeysManager() {
             title: `โมเดล · ${entry.label}`,
             body:
               live.source === "live"
-                ? `${providerLabel(entry.provider)} · ${maskClientKey(entry.apiKey)} · รายการจาก API`
-                : `${providerLabel(entry.provider)} · ${maskClientKey(entry.apiKey)} · ดึงจาก API ไม่ได้ — ใช้รายการสำรองหรือพิมพ์เอง`,
+                ? `${providerLabel(entry.provider)} · ${maskAiEntry(entry)} · รายการจาก API`
+                : `${providerLabel(entry.provider)} · ${maskAiEntry(entry)} · ดึงจาก API ไม่ได้ — ใช้รายการสำรองหรือพิมพ์เอง`,
             select: {
               label: "โมเดล",
               value: coerceClientAiModel(
@@ -2388,14 +2453,27 @@ async function openAiKeysManager() {
               await deleteServerAiKey(entry.id);
               entry.storeOnServer = false;
               writeAiVault(vaultNow);
-              showBanner(`เลิกซิงก์「${entry.label}」แล้ว — เหลือแค่เครื่องนี้`, "success");
+              if (!String(entry.apiKey || "").trim()) {
+                showBanner(
+                  `เลิกซิงก์「${entry.label}」แล้ว — คีย์ไม่อยู่ในเครื่องแล้ว กรุณาใส่คีย์ใหม่ถ้าจะใช้ต่อ`,
+                  "warn",
+                );
+              } else {
+                showBanner(`เลิกซิงก์「${entry.label}」แล้ว — เหลือแค่เครื่องนี้`, "success");
+              }
             } else {
+              if (!String(entry.apiKey || "").trim()) {
+                showBanner("ไม่มีคีย์ในเครื่องให้ซิงก์ — ใส่คีย์ใหม่ก่อน");
+                return;
+              }
               const ok = await pushServerAiKey(entry);
               if (!ok) {
                 showBanner("ซิงก์ขึ้นเซิร์ฟเวอร์ไม่สำเร็จ");
                 return;
               }
               entry.storeOnServer = true;
+              entry.maskedKey = maskClientKey(entry.apiKey);
+              entry.apiKey = "";
               writeAiVault(vaultNow);
               showBanner(`ซิงก์「${entry.label}」ขึ้นเซิร์ฟเวอร์แล้ว`, "success");
             }
@@ -2419,7 +2497,7 @@ async function openAiKeysManager() {
             }
             writeAiVault(vaultNow);
             applyAiStatus({
-              connected: !!getClientAiKey(),
+              connected: !!hasClientAiCredentials(),
               byok: true,
               provider: getClientAiProvider(),
               models: providerModels(getClientAiProvider()),
@@ -2452,7 +2530,7 @@ async function openAiKeysManager() {
 
 /** @deprecated name kept for call sites — opens multi-provider key manager */
 async function connectGoogleAi() {
-  if (!getClientAiKey()) {
+  if (!hasClientAiCredentials()) {
     const added = await promptAddAiKey();
     if (state.file) renderForm();
     if (taggerSession) renderTaggerWorkspace();
@@ -2550,7 +2628,20 @@ function ensureListRows(name, itemFields) {
       if (row[f.name] === undefined) {
         if (f.type === "bool") row[f.name] = false;
         else if (f.type === "auto") row[f.name] = ""; // filled on submit by row index
+        else if (f.type === "list") row[f.name] = [{}];
         else row[f.name] = "";
+      }
+      if (f.type === "list" && Array.isArray(row[f.name])) {
+        for (const nested of row[f.name]) {
+          for (const nf of f.itemFields || []) {
+            if (nested[nf.name] === undefined) {
+              if (nf.type === "bool") nested[nf.name] = false;
+              else if (nf.type === "auto") nested[nf.name] = "";
+              else if (nf.type === "list") nested[nf.name] = [{}];
+              else nested[nf.name] = "";
+            }
+          }
+        }
       }
     }
   }
@@ -3112,10 +3203,10 @@ async function runTaggerAiDraft() {
   if (!taggerSession?.originalFile) return;
   if (taggerSession.busy || taggerSession.aiDrafting) return;
 
-  if (!aiStatus.connected && !getClientAiKey()) {
+  if (!aiStatus.connected && !hasClientAiCredentials()) {
     showBanner("ต้องใส่ AI API key ของคุณก่อน");
     await connectGoogleAi();
-    if (!aiStatus.connected && !getClientAiKey()) return;
+    if (!aiStatus.connected && !hasClientAiCredentials()) return;
   }
 
   const activeProvider = getClientAiProvider();
@@ -3723,7 +3814,7 @@ function renderTaggerWorkspace() {
     endTaggerChipRepResolve();
   }
 
-  const taggerAiOn = !!(aiStatus.connected || getClientAiKey());
+  const taggerAiOn = !!(aiStatus.connected || hasClientAiCredentials());
   const taggerAiKeyTitle = taggerAiOn
     ? `คีย์「${getClientAiLabel() || aiStatus.entryLabel || "AI"}」· ${aiStatus.providerLabel || providerLabel(getClientAiProvider())} · ${aiStatus.model || getClientAiModel() || ""} — เลือก provider / โมเดล / คีย์`
     : "ใส่ AI API key ของคุณ (หลายเจ้าได้ · เก็บในเบราว์เซอร์)";
@@ -8540,13 +8631,23 @@ async function openTaggedInFillForm() {
  * @param {boolean} preferContent
  */
 async function parseTemplatePayload(file, preferContent) {
+  const MAX_DOCX_BYTES = 25 * 1024 * 1024;
+  if (typeof file.size === "number" && file.size > MAX_DOCX_BYTES) {
+    const err = new Error("ไฟล์ใหญ่เกินไป (สูงสุด 25 MB)");
+    /** @type {any} */ (err).code = "FILE_TOO_LARGE";
+    throw err;
+  }
   const fd = new FormData();
   fd.append("file", file);
   if (preferContent) fd.append("includeContent", "1");
   const res = await fetch("/api/parse", { method: "POST", body: fd });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.error || `อ่านเทมเพลตไม่สำเร็จ: ${file.name}`);
+    const err = new Error(data.error || `อ่านเทมเพลตไม่สำเร็จ: ${file.name}`);
+    /** @type {any} */ (err).code = data.code || "";
+    /** @type {any} */ (err).suggestTagger = !!data.suggestTagger;
+    /** @type {any} */ (err).file = file;
+    throw err;
   }
   /** @type {FormField[]} */
   const fields = data.fields || [];
@@ -8715,10 +8816,22 @@ async function parseFile(file, errorEl) {
       void hydrateTemplateContent(multiSlots[0]);
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "เชื่อมต่อเซิร์ฟเวอร์ไม่ได้";
+    const msg = friendlyUploadError(err);
     if (errorEl) {
       errorEl.hidden = false;
       errorEl.textContent = msg;
+    }
+    if (err && typeof err === "object" && /** @type {any} */ (err).suggestTagger && /** @type {any} */ (err).file) {
+      const file = /** @type {any} */ (err).file;
+      showBanner(msg, "warn", {
+        action: {
+          label: "สร้างเทมเพลตจากเอกสารนี้",
+          onClick: () => {
+            void startTaggerSession(file, errorEl);
+          },
+        },
+      });
+      return;
     }
     showBanner(msg);
   }
@@ -9198,10 +9311,10 @@ async function runBatchFromSource(sourceFiles) {
     await runSourceMap(sourceFiles);
     return;
   }
-  if (!aiStatus.connected && !getClientAiKey()) {
+  if (!aiStatus.connected && !hasClientAiCredentials()) {
     showBanner("ต้องใส่ AI API key ของคุณก่อน");
     await connectGoogleAi();
-    if (!aiStatus.connected && !getClientAiKey()) return;
+    if (!aiStatus.connected && !hasClientAiCredentials()) return;
   }
   if (!providerFormAiSupported(getClientAiProvider())) {
     showBanner(
@@ -9376,11 +9489,56 @@ async function runBatchFromSource(sourceFiles) {
   }
 }
 
-/** Fields covered by inline document preview (text + lists). Images stay in sidebar form. */
+/** Collect {{tag}} names visible in the current layout/content preview. */
+function previewCoveredFieldNames() {
+  /** @type {Set<string>} */
+  const names = new Set();
+  const collect = (text) => {
+    const re = /\{\{([^{}]+)\}\}/g;
+    let m;
+    while ((m = re.exec(String(text || "")))) {
+      const inner = String(m[1] || "").trim();
+      if (!inner || inner.startsWith("#") || inner.startsWith("/")) continue;
+      names.add(inner);
+      // Also identity-ish cores for bool/auto
+      if (inner.startsWith("+")) names.add(inner.slice(1).trim());
+      const bool = /^([^?]+)\?/.exec(inner);
+      if (bool) names.add(bool[1].trim());
+    }
+  };
+  for (const b of state.fileLayout || []) {
+    if (b.type === "text") collect(b.text);
+    else if (b.type === "table") {
+      for (const row of b.headerRows || []) for (const c of row) collect(c?.text || c);
+      for (const c of b.templateCells || []) collect(c?.text || c);
+      for (const row of b.trailingRows || []) for (const c of row) collect(c?.text || c);
+      for (const row of b.staticRows || []) for (const c of row) collect(c?.text || c);
+      if (b.listName) names.add(b.listName);
+    }
+  }
+  collect(state.fileContent || "");
+  return names;
+}
+
+/**
+ * Fields covered by inline document preview (text + lists).
+ * Images always stay in the sidebar; also surface any field whose tag is not
+ * visible in the preview (e.g. header-only before layout includes that part).
+ */
 function fieldsOutsidePreview() {
   if (!state.showFullContent) return state.fields;
   if (!state.fileLayout.length && !state.fileContent) return state.fields;
-  return state.fields.filter((f) => f.type === "image");
+  const covered = previewCoveredFieldNames();
+  return state.fields.filter((f) => {
+    if (f.type === "image") return true;
+    if (covered.has(f.name)) return false;
+    for (const a of f.aliases || []) {
+      if (covered.has(a)) return false;
+    }
+    // List may be referenced only by {{#name}} which we add via listName.
+    if (f.type === "list" && covered.has(f.name)) return false;
+    return true;
+  });
 }
 
 function renderForm() {
@@ -9406,7 +9564,7 @@ function renderForm() {
   const extraFields =
     fieldsHtml &&
     `<div class="extra-fields">
-      ${useDocLayout ? `<h2 class="extra-fields-title">ฟิลด์เพิ่มเติม (รูปภาพ)</h2>` : ""}
+      ${useDocLayout ? `<h2 class="extra-fields-title">ฟิลด์เพิ่มเติม</h2>` : ""}
       ${fieldsHtml}
     </div>`;
 
@@ -9492,7 +9650,7 @@ function renderForm() {
   });
   const attachInput = /** @type {HTMLInputElement | null} */ (document.getElementById("attachSourceInput"));
   document.getElementById("attachSource")?.addEventListener("click", () => {
-    if (!aiStatus.connected && !getClientAiKey()) {
+    if (!aiStatus.connected && !hasClientAiCredentials()) {
       showBanner("ต้องใส่ AI API key ของคุณก่อนถึงจะแนบเอกสารได้");
       void connectGoogleAi();
       return;
@@ -9700,12 +9858,67 @@ function importValuesPayload(data, opts = {}) {
   if (!data || typeof data !== "object") {
     throw new Error("invalid values json");
   }
-  if (data.format && data.format !== "docx-form-values") {
+  if (!data.format || data.format !== "docx-form-values") {
     throw new Error("not docx-form-values");
+  }
+  if (data.version != null && Number(data.version) !== 1) {
+    throw new Error("unsupported values json version");
+  }
+  if (!data.values || typeof data.values !== "object" || Array.isArray(data.values)) {
+    throw new Error("values object required");
+  }
+  const keys = Object.keys(data.values);
+  if (keys.length === 0 && !(data.images && Object.keys(data.images).length)) {
+    throw new Error("empty values");
+  }
+  const typeErrors = validateImportedValueTypes(data);
+  if (typeErrors.length) {
+    throw new Error(`type mismatch: ${typeErrors.slice(0, 3).join("; ")}`);
   }
   applyValuesWithEmptySkip(data, {
     treatMissingImagesAsSkip: opts.treatMissingImagesAsSkip !== false,
   });
+}
+
+/**
+ * Validate imported JSON value types against the open template fields.
+ * @param {any} data
+ * @returns {string[]}
+ */
+function validateImportedValueTypes(data) {
+  /** @type {string[]} */
+  const errors = [];
+  const values =
+    data.values && typeof data.values === "object" && !Array.isArray(data.values)
+      ? data.values
+      : {};
+  for (const f of state.fields) {
+    if (!Object.prototype.hasOwnProperty.call(values, f.name)) continue;
+    const v = values[f.name];
+    if (f.type === "text") {
+      if (v != null && typeof v === "object") {
+        errors.push(`${f.name}: ต้องเป็นข้อความ`);
+      }
+    } else if (f.type === "bool") {
+      if (typeof v !== "boolean" && v !== 0 && v !== 1 && v !== "true" && v !== "false") {
+        errors.push(`${f.name}: ต้องเป็นค่าติ๊ก (true/false)`);
+      }
+    } else if (f.type === "list") {
+      if (!Array.isArray(v)) {
+        errors.push(`${f.name}: ต้องเป็นรายการ (อาร์เรย์)`);
+      } else {
+        for (let i = 0; i < v.length; i += 1) {
+          if (v[i] != null && typeof v[i] !== "object") {
+            errors.push(`${f.name}[${i}]: ต้องเป็นอ็อบเจ็กต์แถว`);
+            break;
+          }
+        }
+      }
+    } else if (f.type === "image") {
+      /* images come from data.images */
+    }
+  }
+  return errors;
 }
 
 /**
@@ -9895,8 +10108,18 @@ async function importValuesJson(file) {
     const text = await file.text();
     const data = JSON.parse(text);
     if (!data || typeof data !== "object") throw new Error("invalid");
-    if (data.format && data.format !== "docx-form-values") {
+    if (!data.format || data.format !== "docx-form-values") {
       showBanner("ไฟล์ JSON นี้ไม่ใช่รูปแบบ docx-form-values");
+      return;
+    }
+    if (
+      !data.values ||
+      typeof data.values !== "object" ||
+      Array.isArray(data.values) ||
+      (Object.keys(data.values).length === 0 &&
+        !(data.images && Object.keys(data.images).length))
+    ) {
+      showBanner("ไฟล์ JSON ไม่มีค่าที่นำเข้าได้");
       return;
     }
 
@@ -9921,7 +10144,14 @@ async function importValuesJson(file) {
     setTimeout(() => showBanner(""), 2400);
   } catch (err) {
     console.warn(err);
-    showBanner("อ่าน JSON ไม่ได้ — ตรวจว่าเป็นไฟล์ที่ Export จาก docx-form");
+    const msg = err instanceof Error ? err.message : "";
+    if (/type mismatch/i.test(msg)) {
+      showBanner(`ชนิดข้อมูลไม่ตรงกับฟิลด์ — ${msg.replace(/^type mismatch:\s*/i, "")}`);
+    } else if (/empty values/i.test(msg)) {
+      showBanner("ไฟล์ JSON ไม่มีค่าที่นำเข้าได้");
+    } else {
+      showBanner("อ่าน JSON ไม่ได้ — ตรวจว่าเป็นไฟล์ที่ Export จาก docx-form");
+    }
   }
 }
 
@@ -10305,10 +10535,10 @@ async function runSourceMap(files) {
     showBanner("อัปโหลดเทมเพลต .docx ก่อน แล้วค่อยแนบเอกสารต้นทาง");
     return;
   }
-  if (!aiStatus.connected && !getClientAiKey()) {
+  if (!aiStatus.connected && !hasClientAiCredentials()) {
     showBanner("ต้องใส่ AI API key ของคุณก่อนถึงจะแนบเอกสารได้");
     await connectGoogleAi();
-    if (!aiStatus.connected && !getClientAiKey()) return;
+    if (!aiStatus.connected && !hasClientAiCredentials()) return;
   }
   if (!providerFormAiSupported(getClientAiProvider())) {
     showBanner(
@@ -10464,6 +10694,20 @@ async function runSourceMap(files) {
 }
 
 function finishSourceMapResult(data) {
+  const aiMeta = data?.ai && typeof data.ai === "object" ? data.ai : {};
+  const fillStats = aiMeta.fillStats || {};
+  const warnings = Array.isArray(aiMeta.warnings) ? aiMeta.warnings : [];
+  const filledCount = Number(fillStats.filled || 0);
+  const relevant = aiMeta.relevant !== false && filledCount > 0;
+
+  if (!relevant || filledCount === 0) {
+    sourceMapSession = null;
+    renderForm();
+    const note = warnings[0] || "ไม่พบค่าที่ใช้ได้จากเอกสารต้นทาง — ค่าที่กรอกไว้ยังคงเดิม";
+    showBanner(note, "warn");
+    return;
+  }
+
   // Prefer AI-filled Export JSON → same Import path as the Import JSON button.
   const payload =
     data.valuesJson && typeof data.valuesJson === "object"
@@ -10481,8 +10725,14 @@ function finishSourceMapResult(data) {
     persistActiveSlot();
     renderForm();
     scheduleSaveDraft();
-    showBanner("Import JSON จาก AI ลงฟอร์มแล้ว — ตรวจทานแล้วค่อยสร้างเอกสาร", "success");
-    setTimeout(() => showBanner(""), 3600);
+    const truncNote = aiMeta.sourceTruncated
+      ? " · ต้นทางถูกตัด — ข้อมูลช่วงท้ายอาจไม่ครบ"
+      : "";
+    showBanner(
+      `Import JSON จาก AI ลงฟอร์มแล้ว (${filledCount} ช่อง)${truncNote} — ตรวจทานแล้วค่อยสร้างเอกสาร`,
+      aiMeta.sourceTruncated ? "warn" : "success",
+    );
+    setTimeout(() => showBanner(""), 4200);
   } catch (err) {
     console.warn(err);
     sourceMapSession = null;
@@ -10494,10 +10744,18 @@ function finishSourceMapResult(data) {
 /** Render structured layout from Word (real tables + paragraph text). */
 function renderDocumentFromLayout(blocks) {
   if (!blocks?.length) return `<p class="dropzone-hint">ไม่มีข้อความในไฟล์</p>`;
+  let lastPart = "";
   return blocks
     .map((b) => {
-      if (b.type === "text") return renderDocumentLayout(b.text || "");
-      if (b.type === "table") return renderWordTableBlock(b);
+      const part = b.part === "header" || b.part === "footer" ? b.part : "";
+      const partLabel =
+        part && part !== lastPart
+          ? `<div class="doc-sheet-label">${part === "header" ? "ส่วนหัวเอกสาร" : "ส่วนท้ายเอกสาร"}</div>`
+          : "";
+      if (part) lastPart = part;
+      else lastPart = "";
+      if (b.type === "text") return partLabel + renderDocumentLayout(b.text || "");
+      if (b.type === "table") return partLabel + renderWordTableBlock(b);
       return "";
     })
     .join("");
@@ -10940,7 +11198,19 @@ function wireOneTextValueControl(el) {
       if (item == null || Number.isNaN(row)) return;
       if (!state.values[list]) state.values[list] = [];
       if (!state.values[list][row]) state.values[list][row] = {};
-      state.values[list][row][item] = el.value;
+      const nestedList = el.dataset.nestedList;
+      const nestedRow = Number(el.dataset.nestedRow);
+      if (nestedList && !Number.isNaN(nestedRow)) {
+        if (!Array.isArray(state.values[list][row][nestedList])) {
+          state.values[list][row][nestedList] = [];
+        }
+        if (!state.values[list][row][nestedList][nestedRow]) {
+          state.values[list][row][nestedList][nestedRow] = {};
+        }
+        state.values[list][row][nestedList][nestedRow][item] = el.value;
+      } else {
+        state.values[list][row][item] = el.value;
+      }
       clearOneFieldError(el);
       scheduleSaveDraft();
       maybeMorphTextControl(el);
@@ -11479,6 +11749,36 @@ function renderField(field) {
                 </label>
               </div>`;
                 }
+                if (item.type === "list") {
+                  const nestedRows = Array.isArray(row[item.name]) ? row[item.name] : [];
+                  const nestedHtml = nestedRows
+                    .map((nrow, nidx) => {
+                      const nestedInputs = (item.itemFields || [])
+                        .map((nitem) => {
+                          if (nitem.type === "list") {
+                            return `<p class="dropzone-hint">ลูปซ้อนลึกเกินที่ฟอร์มรองรับ</p>`;
+                          }
+                          if (nitem.type === "auto") {
+                            return `<div class="field" style="margin:0"><label>${escapeHtml(nitem.label || nitem.name)} <span class="badge">รันเอง</span></label>${renderAutoRunDisplay(nitem.label || nitem.name, nidx)}</div>`;
+                          }
+                          if (nitem.type === "bool") {
+                            const nchecked = !!nrow[nitem.name];
+                            return `<label class="bool-opt"><input type="checkbox" data-kind="bool" data-list="${escapeAttr(field.name)}" data-row="${idx}" data-nested-list="${escapeAttr(item.name)}" data-nested-row="${nidx}" data-item="${escapeAttr(nitem.name)}" ${nchecked ? "checked" : ""} ${skipped ? "disabled" : ""} /><span>${escapeHtml(nitem.label || nitem.name)}</span></label>`;
+                          }
+                          return `<div class="field" style="margin:0"><label>${escapeHtml(nitem.name)}</label><input type="text" data-kind="text" data-list="${escapeAttr(field.name)}" data-row="${idx}" data-nested-list="${escapeAttr(item.name)}" data-nested-row="${nidx}" data-item="${escapeAttr(nitem.name)}" value="${escapeAttr(String(nrow[nitem.name] ?? ""))}" ${skipped ? "disabled" : ""} /></div>`;
+                        })
+                        .join("");
+                      return `<div class="doc-list-row" style="margin:0.35rem 0 0.35rem 0.75rem"><div class="doc-list-row-head"><span>${escapeHtml(item.name)} · แถว ${nidx + 1}</span></div><div class="doc-list-row-body">${nestedInputs}</div></div>`;
+                    })
+                    .join("");
+                  return `
+              <div class="field" style="margin:0">
+                <div class="field-head">
+                  <label>${escapeHtml(item.name)} <span class="badge">ลูปซ้อน</span></label>
+                </div>
+                ${nestedHtml || `<p class="row-empty">ยังไม่มีแถวย่อย</p>`}
+              </div>`;
+                }
                 return `
               <div class="field ${itemSkipped ? "is-skipped" : ""}" style="margin:0">
                 <div class="field-head">
@@ -11584,8 +11884,20 @@ function wireFieldEvents() {
         if (item == null || Number.isNaN(row)) return;
         if (!state.values[list]) state.values[list] = [];
         if (!state.values[list][row]) state.values[list][row] = {};
-        state.values[list][row][item] = t.checked;
-        if (state.rowSkip[list]?.[row]) state.rowSkip[list][row][item] = false;
+        const nestedList = t.dataset.nestedList;
+        const nestedRow = Number(t.dataset.nestedRow);
+        if (nestedList && !Number.isNaN(nestedRow)) {
+          if (!Array.isArray(state.values[list][row][nestedList])) {
+            state.values[list][row][nestedList] = [];
+          }
+          if (!state.values[list][row][nestedList][nestedRow]) {
+            state.values[list][row][nestedList][nestedRow] = {};
+          }
+          state.values[list][row][nestedList][nestedRow][item] = t.checked;
+        } else {
+          state.values[list][row][item] = t.checked;
+          if (state.rowSkip[list]?.[row]) state.rowSkip[list][row][item] = false;
+        }
         scheduleSaveDraft();
         return;
       }
@@ -11609,6 +11921,7 @@ function wireFieldEvents() {
       const blank = {};
       for (const item of field.itemFields) {
         if (item.type === "bool") blank[item.name] = false;
+        else if (item.type === "list") blank[item.name] = [{}];
         else blank[item.name] = "";
       }
       state.values[list].push(blank);
@@ -11704,38 +12017,52 @@ function buildValuesPayloadFrom(snap) {
       values[f.name] = snap.skip[f.name]
         ? ""
         : String(snap.values[f.name] ?? "");
+      for (const a of f.aliases || []) values[a] = values[f.name];
     } else if (f.type === "bool") {
       const on = !snap.skip[f.name] && !!snap.values[f.name];
       values[f.name] = on ? f.trueText : f.falseText;
+      for (const a of f.aliases || []) values[a] = values[f.name];
     } else if (f.type === "auto") {
       values[f.name] = "1";
+      for (const a of f.aliases || []) values[a] = values[f.name];
     } else if (f.type === "image") {
       if (snap.skip[f.name] || !snap.images[f.name]) {
         values[f.name] = "";
+        for (const a of f.aliases || []) values[a] = "";
       }
     } else if (f.type === "list") {
       if (snap.skip[f.name]) {
         values[f.name] = [];
       } else {
-        const rows = (snap.values[f.name] || []).map((row, idx) => {
-          /** @type {Record<string, string>} */
+        const mapRow = (itemFields, row, idx, listName) => {
+          /** @type {Record<string, unknown>} */
           const out = {};
-          for (const item of f.itemFields) {
+          for (const item of itemFields) {
             if (item.type === "auto") {
               out[item.name] = String(idx + 1);
             } else if (item.type === "bool") {
               const on =
-                !snap.rowSkip[f.name]?.[idx]?.[item.name] && !!row[item.name];
+                !snap.rowSkip[listName]?.[idx]?.[item.name] && !!row[item.name];
               out[item.name] = on ? item.trueText : item.falseText;
+            } else if (item.type === "list") {
+              const nested = Array.isArray(row[item.name]) ? row[item.name] : [];
+              out[item.name] = nested.map((nr, nidx) =>
+                mapRow(item.itemFields || [], nr || {}, nidx, item.name),
+              );
             } else {
-              out[item.name] = snap.rowSkip[f.name]?.[idx]?.[item.name]
+              out[item.name] = snap.rowSkip[listName]?.[idx]?.[item.name]
                 ? ""
                 : String(row[item.name] ?? "");
             }
+            for (const a of item.aliases || []) out[a] = out[item.name];
           }
           return out;
-        });
+        };
+        const rows = (snap.values[f.name] || []).map((row, idx) =>
+          mapRow(f.itemFields, row, idx, f.name),
+        );
         values[f.name] = rows;
+        for (const a of f.aliases || []) values[a] = rows;
       }
     }
   }
@@ -12056,8 +12383,8 @@ async function boot() {
       const appEl = document.getElementById("app");
       if (appEl) {
         appEl.innerHTML =
-          `<p class="subhead">โหลดหน้าไม่สำเร็จ — รีเฟรชแรง หรือเปิด Console ดู error</p>` +
-          `<pre class="hint-error">${escapeHtml(String(err?.message || err))}</pre>`;
+          `<p class="subhead">โหลดหน้าไม่สำเร็จ — ลองรีเฟรชใหม่</p>` +
+          `<pre class="hint-error">${escapeHtml(friendlyUploadError(err))}</pre>`;
       }
       showBanner("โหลดหน้าไม่สำเร็จ — ลองรีเฟรชใหม่");
     }

@@ -770,7 +770,7 @@ async function restoreDraft() {
 function defaultNamedDraftTitle() {
   const base = state.filename
     ? String(state.filename).replace(/\.docx$/i, "")
-    : "ดราฟ";
+    : UI_LABELS.draftFallbackTitle;
   return base;
 }
 
@@ -785,7 +785,7 @@ function formatNamedDraftListTitle(d) {
       .replace(/\s*[·•|]\s*\d{1,2}:\d{2}.*$/u, "")
       .trim();
   }
-  if (!title) return filename || "ไม่มีชื่อ";
+  if (!title) return filename || UI_LABELS.draftUntitled;
   if (!filename) return title;
   if (title === filename || title === base) return `${title} — ${filename}`;
   if (title.includes(filename) || (base && title.includes(base))) return title;
@@ -798,7 +798,7 @@ async function promptSaveNamedDraft() {
   if (namedDraftSaveBusy) return;
   if (document.getElementById("appDialog")) return;
   if (!state.file || !state.fields.length) {
-    showBanner("ยังไม่มีเทมเพลตให้บันทึกดราฟ");
+    showBanner(UI_LABELS.draftSaveNoTemplate);
     return;
   }
   namedDraftSaveBusy = true;
@@ -808,17 +808,17 @@ async function promptSaveNamedDraft() {
   if (saveBtn) saveBtn.disabled = true;
   try {
     const result = await askDialog({
-      title: "บันทึกดราฟ",
-      body: "ตั้งชื่อดราฟเพื่อโหลดกลับภายหลัง (ข้ามวัน / สลับงานได้) — เก็บในเบราว์เซอร์นี้ผ่าน IndexedDB",
+      title: UI_LABELS.draftSaveDialogTitle,
+      body: UI_LABELS.draftSaveDialogBody,
       input: {
-        label: "ชื่อดราฟ (ไม่บังคับ)",
+        label: UI_LABELS.draftSaveNameLabel,
         placeholder: defaultNamedDraftTitle(),
         value: defaultNamedDraftTitle(),
         type: "text",
       },
       actions: [
-        { id: "save", label: "บันทึก", kind: "primary" },
-        { id: "abort", label: "ยกเลิก", kind: "ghost" },
+        { id: "save", label: UI_LABELS.dialogSave, kind: "primary" },
+        { id: "abort", label: UI_LABELS.dialogCancel, kind: "ghost" },
       ],
     });
     if (!result || result === "abort" || typeof result !== "object") return;
@@ -830,11 +830,11 @@ async function promptSaveNamedDraft() {
         id: crypto.randomUUID(),
         title,
       });
-      showBanner(`บันทึกดราฟแล้ว: ${title}`, "success");
+      showBanner(UI_LABELS.draftSaveSuccess(title), "success");
       setTimeout(() => showBanner(""), 2800);
     } catch (err) {
       console.warn("named draft save failed", err);
-      showBanner("บันทึกดราฟไม่สำเร็จ");
+      showBanner(UI_LABELS.draftSaveFailed);
     }
   } finally {
     namedDraftSaveBusy = false;
@@ -864,11 +864,14 @@ async function confirmLoadNamedDraft(draft) {
   if (sameFile) return true;
 
   const choice = await askDialog({
-    title: "เทมเพลตต่างจากดราฟ",
-    body: `ดราฟนี้มาจาก «${draft.filename || "ไม่ทราบไฟล์"}» แต่ตอนนี้เปิด «${state.filename || "ยังไม่มีไฟล์"}» อยู่ — โหลดจะแทนที่ฟอร์มและไฟล์ปัจจุบันทั้งหมด`,
+    title: UI_LABELS.draftMismatchTitle,
+    body: UI_LABELS.draftMismatchBody(
+      draft.filename || UI_LABELS.draftMismatchUnknownFile,
+      state.filename || UI_LABELS.draftMismatchNoFile,
+    ),
     actions: [
-      { id: "ok", label: "โหลดแทนที่", kind: "primary" },
-      { id: "abort", label: "ยกเลิก", kind: "ghost" },
+      { id: "ok", label: UI_LABELS.draftMismatchConfirm, kind: "primary" },
+      { id: "abort", label: UI_LABELS.dialogCancel, kind: "ghost" },
     ],
   });
   return choice === "ok";
@@ -878,23 +881,26 @@ async function loadNamedDraftById(id) {
   try {
     const draft = await namedDraftGet(id);
     if (!draft) {
-      showBanner("ไม่พบดราฟที่เลือก");
+      showBanner(UI_LABELS.draftNotFound);
       return false;
     }
     if (!(await confirmLoadNamedDraft(draft))) return false;
     const ok = await applyDraftPayload(draft);
     if (!ok) {
-      showBanner("โหลดดราฟไม่สำเร็จ — ข้อมูลไม่ครบ");
+      showBanner(UI_LABELS.draftLoadIncomplete);
       return false;
     }
     scheduleSaveDraft();
     renderForm();
-    showBanner(`โหลดดราฟแล้ว: ${draft.title || draft.filename || ""}`, "success");
+    showBanner(
+      UI_LABELS.draftLoadSuccess(draft.title || draft.filename || ""),
+      "success",
+    );
     setTimeout(() => showBanner(""), 2800);
     return true;
   } catch (err) {
     console.warn("named draft load failed", err);
-    showBanner("โหลดดราฟไม่สำเร็จ");
+    showBanner(UI_LABELS.draftLoadFailed);
     return false;
   }
 }
@@ -904,9 +910,7 @@ async function loadNamedDraftById(id) {
  * @param {{ emptyHint?: string }} [opts]
  */
 function renderNamedDraftListHtml(drafts, opts = {}) {
-  const emptyHint =
-    opts.emptyHint ||
-    "ยังไม่มีดราฟที่บันทึกไว้ — กด «บันทึกดราฟ» ตอนกรอกฟอร์ม";
+  const emptyHint = opts.emptyHint || UI_LABELS.draftListEmpty;
   if (!drafts.length) {
     return `<p class="draft-list-empty">${escapeHtml(emptyHint)}</p>`;
   }
@@ -919,8 +923,8 @@ function renderNamedDraftListHtml(drafts, opts = {}) {
             <span class="draft-list-meta">${escapeHtml(formatDraftDate(d.savedAt))}</span>
           </div>
           <div class="draft-list-actions">
-            <button type="button" class="btn-secondary btn-compact" data-draft-load="${escapeAttr(d.id)}">โหลด</button>
-            <button type="button" class="btn-ghost btn-compact" data-draft-delete="${escapeAttr(d.id)}">ลบ</button>
+            <button type="button" class="btn-secondary btn-compact" data-draft-load="${escapeAttr(d.id)}">${escapeHtml(UI_LABELS.dialogLoad)}</button>
+            <button type="button" class="btn-ghost btn-compact" data-draft-delete="${escapeAttr(d.id)}">${escapeHtml(UI_LABELS.dialogDelete)}</button>
           </div>
         </li>`,
       )
@@ -947,11 +951,11 @@ function wireNamedDraftListActions(root, opts = {}) {
       const id = btn.getAttribute("data-draft-delete");
       if (!id) return;
       const choice = await askDialog({
-        title: "ลบดราฟนี้?",
-        body: "ลบแล้วกู้คืนไม่ได้ — ดราฟอื่นยังอยู่ครบ",
+        title: UI_LABELS.draftDeleteTitle,
+        body: UI_LABELS.draftDeleteBody,
         actions: [
-          { id: "ok", label: "ลบ", kind: "primary" },
-          { id: "abort", label: "ยกเลิก", kind: "ghost" },
+          { id: "ok", label: UI_LABELS.dialogDelete, kind: "primary" },
+          { id: "abort", label: UI_LABELS.dialogCancel, kind: "ghost" },
         ],
       });
       if (choice !== "ok") return;
@@ -962,12 +966,12 @@ function wireNamedDraftListActions(root, opts = {}) {
         if (list && !list.children.length) {
           list.outerHTML = renderNamedDraftListHtml([]);
         }
-        showBanner("ลบดราฟแล้ว", "success");
+        showBanner(UI_LABELS.draftDeleteSuccess, "success");
         setTimeout(() => showBanner(""), 2000);
         opts.onAfterDelete?.();
       } catch (err) {
         console.warn("named draft delete failed", err);
-        showBanner("ลบดราฟไม่สำเร็จ");
+        showBanner(UI_LABELS.draftDeleteFailed);
       }
     });
   });

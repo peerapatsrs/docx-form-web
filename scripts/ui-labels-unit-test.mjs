@@ -33,8 +33,40 @@ assert.equal(UI_LABELS.placeholderExamplePrefix, "เช่น ");
 assert.equal(UI_LABELS.seededRowTip.includes("1 แถว"), true);
 assert.equal(UI_LABELS.skip, "ข้าม");
 assert.equal(UI_LABELS.draftListLoadFailed, "อ่านรายการดราฟไม่สำเร็จ");
-assert.ok(UI_LABELS.loadDraftDialogBody.includes("IndexedDB") || UI_LABELS.loadDraftDialogBody.includes("เบราว์เซอร์"));
+assert.ok(
+  UI_LABELS.loadDraftDialogBody.includes("IndexedDB") ||
+    UI_LABELS.loadDraftDialogBody.includes("เบราว์เซอร์"),
+);
 assert.equal(UI_LABELS.dialogClose, "ปิด");
+assert.equal(UI_LABELS.dialogCancel, "ยกเลิก");
+assert.equal(UI_LABELS.dialogSave, "บันทึก");
+assert.equal(UI_LABELS.dialogDelete, "ลบ");
+assert.equal(UI_LABELS.dialogLoad, "โหลด");
+assert.equal(UI_LABELS.draftFallbackTitle, "ดราฟ");
+assert.equal(UI_LABELS.draftUntitled, "ไม่มีชื่อ");
+assert.equal(UI_LABELS.draftSaveNoTemplate, "ยังไม่มีเทมเพลตให้บันทึกดราฟ");
+assert.equal(UI_LABELS.draftSaveDialogTitle, "บันทึกดราฟ");
+assert.ok(UI_LABELS.draftSaveDialogBody.includes("IndexedDB"));
+assert.equal(UI_LABELS.draftSaveNameLabel, "ชื่อดราฟ (ไม่บังคับ)");
+assert.equal(UI_LABELS.draftSaveSuccess("ใบเสนอราคา"), "บันทึกดราฟแล้ว: ใบเสนอราคา");
+assert.equal(UI_LABELS.draftSaveFailed, "บันทึกดราฟไม่สำเร็จ");
+assert.equal(UI_LABELS.draftMismatchTitle, "เทมเพลตต่างจากดราฟ");
+assert.equal(UI_LABELS.draftMismatchUnknownFile, "ไม่ทราบไฟล์");
+assert.equal(UI_LABELS.draftMismatchNoFile, "ยังไม่มีไฟล์");
+assert.ok(
+  UI_LABELS.draftMismatchBody("a.docx", "b.docx").includes("a.docx") &&
+    UI_LABELS.draftMismatchBody("a.docx", "b.docx").includes("b.docx"),
+);
+assert.equal(UI_LABELS.draftMismatchConfirm, "โหลดแทนที่");
+assert.equal(UI_LABELS.draftNotFound, "ไม่พบดราฟที่เลือก");
+assert.equal(UI_LABELS.draftLoadIncomplete, "โหลดดราฟไม่สำเร็จ — ข้อมูลไม่ครบ");
+assert.equal(UI_LABELS.draftLoadSuccess("ของฉัน"), "โหลดดราฟแล้ว: ของฉัน");
+assert.equal(UI_LABELS.draftLoadFailed, "โหลดดราฟไม่สำเร็จ");
+assert.ok(UI_LABELS.draftListEmpty.includes("ยังไม่มีดราฟ"));
+assert.equal(UI_LABELS.draftDeleteTitle, "ลบดราฟนี้?");
+assert.ok(UI_LABELS.draftDeleteBody.includes("กู้คืนไม่ได้"));
+assert.equal(UI_LABELS.draftDeleteSuccess, "ลบดราฟแล้ว");
+assert.equal(UI_LABELS.draftDeleteFailed, "ลบดราฟไม่สำเร็จ");
 console.log("✓ UI_LABELS core strings");
 
 assert.equal(

@@ -7858,7 +7858,7 @@ async function confirmTaggerVariable() {
       );
       if (!fieldName || !isValidFieldName(fieldName)) {
         showTaggerDialogError(
-          `ชื่อฟิลด์บรรทัดไม่ถูกต้อง: ${rawField} — ใช้ชื่อปกติ หรือ +ลำดับ สำหรับรันเลข`,
+          `ชื่อฟิลด์บรรทัดไม่ถูกต้อง: ${rawField} — ใช้${fieldNameAllowedHint()} หรือ +ลำดับ สำหรับรันเลข`,
         );
         return;
       }

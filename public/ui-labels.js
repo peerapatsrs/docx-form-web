@@ -88,11 +88,15 @@ export const UI_LABELS = Object.freeze({
   stickyCtaHintMulti:
     " · หลายเทมเพลต: แนบต้นทางเพื่อแมป JSON ลงจอ แล้วกดสร้างเลือกไฟล์เดียวหรือทั้งหมด",
 
-  // Home
-  homeHeadline: "เติมตัวแปรใน Word",
+  // Home (mockup 01 / prototype-screens.html)
+  homeHeadline: "docx-form — กรอกแบบฟอร์มเอกสาร Word จากเทมเพลต .docx",
   homeSubhead:
-    "อัปโหลดเทมเพลตเพื่อเริ่มกรอก — หรือสร้างเทมเพลตจากเอกสารตัวอย่าง",
+    "อัปโหลดเทมเพลตที่มีแท็ก {{ชื่อฟิลด์}} แล้วกรอกบนหน้าเว็บ · รองรับหลายเทมเพลต · JSON · AI (BYOK)",
+  homeAboutSummary: "เกี่ยวกับ docx-form",
+  homeAboutBody:
+    "เว็บแอปสร้างเอกสารจากเทมเพลต Microsoft Word (.docx) อ่านตัวแปรแล้วสร้างฟอร์มให้กรอก รองรับดราฟ นำเข้า/ส่งออก JSON และ AI แมปจากไฟล์ต้นทาง",
   dropzoneDrag: "ลากไฟล์ .docx มาวางที่นี่",
+  dropzoneOrPick: "หรือเลือกไฟล์ · ฟรีสูงสุด 2 ไฟล์ต่อครั้ง",
   dropzonePick: "เลือกไฟล์",
   dropzoneFreeLimit: "ฟรีสูงสุด 2 ไฟล์ต่อครั้ง",
   dropzoneAriaUploadWord: "อัปโหลดไฟล์ Word",

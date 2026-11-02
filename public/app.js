@@ -65,17 +65,39 @@ function readSkipFirstUseSeen() {
   }
 }
 
-function renderSkipFirstUseTipHtml() {
+/** Dark tooltip on the first skip control (mockup item 12) — not a page banner. */
+function renderSkipFirstUseTipBubbleHtml() {
   if (!shouldShowSkipFirstUseTip(readSkipFirstUseSeen())) return "";
-  return `<div class="skip-first-use-tip" role="note" data-skip-first-use-tip>
-    <span class="skip-first-use-tip-icon" aria-hidden="true">💡</span>
-    <span class="skip-first-use-tip-text">${escapeHtml(UI_LABELS.skipFirstUseTip)}</span>
-  </div>`;
+  return `<span class="skip-first-use-tip" role="tooltip" data-skip-first-use-tip>${escapeHtml(UI_LABELS.skipFirstUseTip)}</span>`;
+}
+
+function clearSkipFirstUseTipNodes() {
+  document.querySelectorAll("[data-skip-first-use-tip]").forEach((el) => el.remove());
+  app?.querySelectorAll(".has-skip-tip").forEach((el) => el.classList.remove("has-skip-tip"));
 }
 
 function dismissSkipFirstUseTip() {
   markSkipFirstUseSeen();
-  document.querySelectorAll("[data-skip-first-use-tip]").forEach((el) => el.remove());
+  clearSkipFirstUseTipNodes();
+}
+
+/** Attach the one-time tip to the first visible skip control in the form. */
+function mountSkipFirstUseTip() {
+  clearSkipFirstUseTipNodes();
+  if (!shouldShowSkipFirstUseTip(readSkipFirstUseSeen())) return;
+  const firstSkip = app.querySelector(".doc-skip, .skip-opt");
+  if (!firstSkip) return;
+  firstSkip.classList.add("has-skip-tip");
+  firstSkip.insertAdjacentHTML("beforeend", renderSkipFirstUseTipBubbleHtml());
+  firstSkip.querySelector("[data-skip-first-use-tip]")?.addEventListener(
+    "click",
+    (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      dismissSkipFirstUseTip();
+    },
+    { once: true },
+  );
 }
 
 /**
@@ -3098,68 +3120,28 @@ function portalTaggerDialogsToBody() {
 
 function renderEmpty() {
   removeTaggerDialogPortals();
+  // Home matches prototype mockup 01: about details + primary upload dropzone.
+  // Tagger stays reachable from the form toolbar after upload (and a secondary link).
   app.innerHTML = `
-    <h1 class="headline">${escapeHtml(UI_LABELS.homeHeadline)}</h1>
-    <p class="subhead">${escapeHtml(UI_LABELS.homeSubhead)}</p>
-    <div class="home-entry-grid">
-      <section class="home-upload-card" aria-label="${escapeAttr(UI_LABELS.dropzoneDrag)}">
-        <button type="button" class="dropzone dropzone-primary" id="dropzone" aria-label="${escapeAttr(UI_LABELS.dropzoneAriaUploadWord)}">
-          <div class="dropzone-icon" aria-hidden="true">↑</div>
-          <div class="dropzone-title">${escapeHtml(UI_LABELS.dropzoneDrag)}</div>
-          <span class="btn-primary dropzone-pick">${escapeHtml(UI_LABELS.dropzonePick)}</span>
-          <div class="dropzone-sub home-upload-limit">${escapeHtml(UI_LABELS.dropzoneFreeLimit)}</div>
-        </button>
-        <input class="sr-only" type="file" id="fileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="${escapeAttr(UI_LABELS.dropzoneAriaUploadTemplates)}" />
-        <label class="upload-opt home-upload-opt" for="showFullContent">
-          <input type="checkbox" id="showFullContent" ${state.showFullContent ? "checked" : ""} />
-          <span>
-            <strong>${escapeHtml(UI_LABELS.showFullContentLabel)}</strong>
-            <small>${escapeHtml(multiUploadOptHint())}</small>
-          </span>
-        </label>
-      </section>
-      <section class="tagger-entry-card home-secondary-card" aria-labelledby="taggerEntryTitle">
-        <h2 class="tagger-entry-title" id="taggerEntryTitle">${escapeHtml(UI_LABELS.noTemplateTitle)}</h2>
-        <p class="tagger-entry-sub">${escapeHtml(UI_LABELS.noTemplateDesc)}</p>
-        <button type="button" class="btn-secondary tagger-entry-cta" id="startTaggerMode">${escapeHtml(UI_LABELS.createTemplateFromDoc)}</button>
-        <details class="home-manual-vars">
-          <summary>${escapeHtml(UI_LABELS.manualVarsDetails)}</summary>
-          <div class="upload-tips">
-            <ul>
-              <li><span>${escapeHtml(UI_LABELS.tipKindText)}</span> <code>${escapeHtml(UI_LABELS.tipCodeText)}</code></li>
-              <li>
-                <span>${escapeHtml(UI_LABELS.tipKindBool)}</span>
-                <code>${escapeHtml(UI_LABELS.tipCodeBool)}</code>
-                <small class="tip-note">${escapeHtml(UI_LABELS.tipNoteBoolLead)} <code>?</code> ${escapeHtml(UI_LABELS.tipNoteBoolTrail)}</small>
-              </li>
-              <li>
-                <span>${escapeHtml(UI_LABELS.tipKindAuto)}</span>
-                <code>${escapeHtml(UI_LABELS.tipCodeAuto)}</code>
-                <small class="tip-note">${escapeHtml(UI_LABELS.tipNoteAuto)}</small>
-              </li>
-              <li>
-                <span>${escapeHtml(UI_LABELS.tipKindImage)}</span>
-                <code>${escapeHtml(UI_LABELS.tipCodeImage)}</code>
-                <small class="tip-note">${escapeHtml(UI_LABELS.tipNoteImage)}</small>
-              </li>
-              <li>
-                <span>${escapeHtml(UI_LABELS.tipKindListTable)}</span>
-                <code>${escapeHtml(UI_LABELS.tipCodeList)}</code>
-              </li>
-            </ul>
-          </div>
-        </details>
-      </section>
-    </div>
-    <section class="draft-entry-panel home-draft-collapsed" id="emptyDraftPanel" aria-label="${escapeAttr(UI_LABELS.loadDraftAria)}">
-      <details>
-        <summary>${escapeHtml(UI_LABELS.loadDraft)}</summary>
-        <div class="draft-entry-body" id="emptyDraftList">
-          <p class="draft-list-empty">${escapeHtml(UI_LABELS.loadDraftEmptyLoading)}</p>
-        </div>
+    <div class="home-card">
+      <h1 class="headline">${escapeHtml(UI_LABELS.homeHeadline)}</h1>
+      <p class="subhead">${escapeHtml(UI_LABELS.homeSubhead)}</p>
+      <details class="home-about" open>
+        <summary>${escapeHtml(UI_LABELS.homeAboutSummary)}</summary>
+        <p class="home-about-body">${escapeHtml(UI_LABELS.homeAboutBody)}</p>
       </details>
-    </section>
-    <p class="hint-error" id="uploadError" hidden></p>
+      <button type="button" class="dropzone dropzone-primary" id="dropzone" aria-label="${escapeAttr(UI_LABELS.dropzoneAriaUploadWord)}">
+        <div class="dropzone-title">${escapeHtml(UI_LABELS.dropzoneDrag)}</div>
+        <div class="dropzone-sub home-upload-limit">${escapeHtml(UI_LABELS.dropzoneOrPick)}</div>
+        <span class="btn-primary dropzone-pick">${escapeHtml(UI_LABELS.dropzonePick)}</span>
+      </button>
+      <input class="sr-only" type="file" id="fileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="${escapeAttr(UI_LABELS.dropzoneAriaUploadTemplates)}" />
+      <input class="sr-only" type="checkbox" id="showFullContent" ${state.showFullContent ? "checked" : ""} tabindex="-1" aria-hidden="true" />
+      <section class="draft-entry-panel home-draft-collapsed" id="emptyDraftPanel" aria-label="${escapeAttr(UI_LABELS.loadDraftAria)}" hidden>
+        <div class="draft-entry-body" id="emptyDraftList"></div>
+      </section>
+      <p class="hint-error" id="uploadError" hidden></p>
+    </div>
   `;
 
   const dropzone = document.getElementById("dropzone");
@@ -3168,14 +3150,16 @@ function renderEmpty() {
   const showFull = /** @type {HTMLInputElement} */ (document.getElementById("showFullContent"));
   const startTagger = document.getElementById("startTaggerMode");
 
-  showFull.addEventListener("change", () => {
+  showFull?.addEventListener("change", () => {
     state.showFullContent = showFull.checked;
   });
 
   const onFiles = (files) => {
     const list = files ? [...files] : [];
     if (!list.length) return;
-    state.showFullContent = showFull.checked;
+    // Home mockup has no toggle — always open the document preview sheet.
+    state.showFullContent = true;
+    if (showFull) showFull.checked = true;
     if (list.length === 1) void parseFile(list[0], uploadError);
     else void parseMultipleTemplates(list, uploadError);
   };
@@ -9927,7 +9911,6 @@ function renderForm() {
     ? `
     <div class="doc-sheet" id="docPreview">
       <div class="doc-sheet-label">${escapeHtml(UI_LABELS.docPreviewLabel)}</div>
-      ${renderSkipFirstUseTipHtml()}
       <div class="doc-body">${bodyHtml}</div>
     </div>`
     : state.showFullContent
@@ -9946,7 +9929,6 @@ function renderForm() {
     fieldsHtmlOutside &&
     `<div class="extra-fields">
       ${useDocLayout ? `<h2 class="extra-fields-title">${escapeHtml(extraTitle)}</h2>` : ""}
-      ${!useDocLayout ? renderSkipFirstUseTipHtml() : ""}
       ${fieldsHtmlOutside}
     </div>`;
 
@@ -9997,14 +9979,10 @@ function renderForm() {
       ${contentPanel}
       ${useDocLayout ? extraFields || "" : fieldsHtmlOutside ? extraFields : ""}
       <div class="sticky-bar">
-        <button type="submit" class="btn-primary" id="submitBtn">${isMultiMode() ? escapeHtml(UI_LABELS.createDocMulti) : escapeHtml(UI_LABELS.createDoc)}</button>
-        <div class="sticky-bar-drafts">
-          <button type="button" class="btn-secondary sticky-draft-btn" id="saveNamedDraftBtn">${escapeHtml(UI_LABELS.saveDraft)}</button>
-          <button type="button" class="btn-secondary sticky-draft-btn" id="loadNamedDraftBtn">${escapeHtml(UI_LABELS.loadDraft)}</button>
-        </div>
-        <p class="dropzone-hint" style="margin:0.5rem 0 0;text-align:center">
-          ${escapeHtml(stickyHint)}
-        </p>
+        <button type="submit" class="btn-primary sticky-primary" id="submitBtn">${isMultiMode() ? escapeHtml(UI_LABELS.createDocMulti) : escapeHtml(UI_LABELS.createDoc)}</button>
+        <button type="button" class="btn-secondary sticky-draft-btn" id="saveNamedDraftBtn">${escapeHtml(UI_LABELS.saveDraft)}</button>
+        <button type="button" class="btn-secondary sticky-draft-btn" id="loadNamedDraftBtn">${escapeHtml(UI_LABELS.loadDraft)}</button>
+        <p class="sticky-hint">${escapeHtml(stickyHint)}</p>
       </div>
     </form>
   `;
@@ -10102,11 +10080,7 @@ function renderForm() {
   document.getElementById("goHomeBtnMobile")?.addEventListener("click", () => {
     document.getElementById("goHomeBtn")?.click();
   });
-  document.querySelector("[data-skip-first-use-tip]")?.addEventListener(
-    "click",
-    () => dismissSkipFirstUseTip(),
-    { once: true },
-  );
+  mountSkipFirstUseTip();
   // First interaction with any skip checkbox dismisses the tip for later visits.
   app.querySelector(".doc-skip input, .skip-opt input")?.addEventListener(
     "change",
@@ -11719,24 +11693,22 @@ function renderInlineImageControl(name, opts = {}) {
     String(opts.label || "").trim() ||
     fieldDisplayLabel(field, labelMap, name);
   const file = state.images[name];
-  let preview = "";
+  let body = "";
   if (file && !skipped) {
     const url = URL.createObjectURL(file);
     state.objectUrls.push(url);
-    preview = `<img class="thumb" src="${url}" alt="${escapeAttr(UI_LABELS.imagePreviewAlt(label))}" />`;
+    body = `<img class="thumb" src="${url}" alt="${escapeAttr(UI_LABELS.imagePreviewAlt(label))}" />
+      <button type="button" class="linkish danger clear-image">${escapeHtml(UI_LABELS.imageClear)}</button>`;
   } else {
-    preview = `<div class="thumb thumb-empty" aria-hidden="true" title="${escapeAttr(UI_LABELS.imageEmptyTitle)}"></div>`;
+    body = `<strong class="doc-image-drop-hint">${escapeHtml(UI_LABELS.imageDropHint)}</strong>
+      <span class="doc-image-drop-sub">${escapeHtml(UI_LABELS.imagePickButton)}</span>`;
   }
   const showLabel = opts.showLabel !== false;
   return `<span class="doc-blank-wrap doc-blank-image-wrap ${skipped ? "is-skipped" : ""}" data-image-field="${escapeAttr(name)}">
     ${showLabel ? `<span class="doc-image-inline-label">${escapeHtml(label)}:</span>` : ""}
-    <div class="image-box doc-image-inline" tabindex="0" role="button" aria-label="${escapeAttr(UI_LABELS.imagePickButton + " — " + label)}" ${skipped ? 'aria-disabled="true"' : ""}>
-      ${preview}
-      <div class="image-actions">
-        <p class="doc-image-drop-hint">${escapeHtml(UI_LABELS.imageDropHint)}</p>
-        <button type="button" class="btn-secondary pick-image" ${skipped ? "disabled" : ""}>${escapeHtml(UI_LABELS.imagePickButton)}</button>
-        ${file && !skipped ? `<button type="button" class="linkish danger clear-image">${escapeHtml(UI_LABELS.imageClear)}</button>` : ""}
-      </div>
+    <div class="image-box doc-image-inline image-drop" tabindex="0" role="button" aria-label="${escapeAttr(UI_LABELS.imagePickButton + " — " + label)}" ${skipped ? 'aria-disabled="true"' : ""}>
+      ${body}
+      <button type="button" class="sr-only pick-image" tabindex="-1" ${skipped ? "disabled" : ""}>${escapeHtml(UI_LABELS.imagePickButton)}</button>
       <input class="sr-only image-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp,.png,.jpg,.jpeg,.gif,.webp" ${skipped ? "disabled" : ""} />
     </div>
     <label class="doc-skip" title="${escapeAttr(UI_LABELS.skipTitle)}">
@@ -11840,7 +11812,7 @@ function renderListCellControl(listName, row, idx, item, itemField, displayOverr
       value: cellVal,
       className: "doc-blank doc-table-input",
       attrs: `data-list="${escapeAttr(listName)}" data-row="${idx}" data-item="${escapeAttr(item)}"`,
-      placeholder: cellLabel,
+      placeholder: formatExamplePlaceholder(cellLabel),
       disabled: itemSkipped,
       ariaLabel: cellLabel,
     })}
@@ -11861,14 +11833,18 @@ function renderListToolbarHtml(listName, field, opts = {}) {
   const addBtn = skipped
     ? ""
     : `<button type="button" class="btn-secondary add-row" data-list="${escapeAttr(listName)}">${escapeHtml(UI_LABELS.addRow)}</button>`;
+  const meta = badge
+    ? `<div class="doc-list-meta">${escapeHtml(title)} · ${opts.badge}</div>`
+    : "";
   return `<div class="doc-list-toolbar">
-      <span class="doc-list-name" data-list-key="${escapeAttr(listName)}">${escapeHtml(title)}${badge}</span>
+      <span class="doc-list-name" data-list-key="${escapeAttr(listName)}">${escapeHtml(title)}</span>
+      ${badge}
       <label class="doc-skip" title="${escapeAttr(UI_LABELS.skipTitle)}">
         <input type="checkbox" data-skip-field="${escapeAttr(listName)}" ${skipped ? "checked" : ""} />
         ${escapeHtml(UI_LABELS.skip)}
       </label>
       ${addBtn}
-    </div>`;
+    </div>${meta}`;
 }
 
 function renderSeededListTipHtml(rows) {
@@ -12227,30 +12203,13 @@ function renderField(field) {
   }
 
   if (field.type === "image") {
-    const file = state.images[field.name];
-    let preview = "";
-    if (file && !skipped) {
-      const url = URL.createObjectURL(file);
-      state.objectUrls.push(url);
-      preview = `<img class="thumb" src="${url}" alt="${escapeAttr(UI_LABELS.imagePreviewAlt(label))}" />`;
-    } else {
-      preview = `<div class="thumb thumb-empty" aria-hidden="true" title="${escapeAttr(UI_LABELS.imageEmptyTitle)}"></div>`;
-    }
     return `
       <div class="field ${skipped ? "is-skipped" : ""}" data-image-field="${escapeAttr(field.name)}">
         <div class="field-head">
           <div class="field-label">${escapeHtml(label)} <span class="badge">${escapeHtml(UI_LABELS.imageBadge)}</span></div>
           ${skipCheckbox(field.name, skipped)}
         </div>
-        <div class="image-box" tabindex="0" role="button" aria-label="${escapeAttr(UI_LABELS.imagePickButton + " — " + label)}" ${skipped ? 'aria-disabled="true"' : ""}>
-          ${preview}
-          <div class="image-actions">
-            <p class="doc-image-drop-hint">${escapeHtml(UI_LABELS.imageDropHint)}</p>
-            <button type="button" class="btn-secondary pick-image" ${skipped ? "disabled" : ""}>${escapeHtml(UI_LABELS.imagePickButton)}</button>
-            ${file && !skipped ? `<button type="button" class="linkish danger clear-image">${escapeHtml(UI_LABELS.imageClear)}</button>` : ""}
-          </div>
-          <input class="sr-only image-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp,.png,.jpg,.jpeg,.gif,.webp" ${skipped ? "disabled" : ""} />
-        </div>
+        ${renderInlineImageControl(field.name, { label, showLabel: false })}
       </div>`;
   }
 

@@ -1433,27 +1433,48 @@ body {
   position: sticky;
   bottom: 0;
   z-index: 40;
-  margin: 1.6rem -0.2rem -0.2rem;
-  padding: 0.85rem 0.35rem 0.35rem;
-  border-top: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 -8px 24px rgba(12, 32, 36, 0.06);
+  margin: 1.5rem 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: center;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: var(--shadow-soft);
   backdrop-filter: blur(10px);
 }
 
-.sticky-bar-drafts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.55rem;
-  margin-top: 0.65rem;
+.sticky-bar .sticky-primary.btn-primary {
+  width: auto;
+  height: auto;
+  min-height: 2.75rem;
+  border-radius: 999px;
+  padding: 0.7rem 1.15rem;
+  box-shadow: none;
+  background: var(--accent);
+}
+
+.sticky-bar .sticky-primary.btn-primary:hover:not(:disabled) {
+  background: var(--accent-2);
+  filter: none;
 }
 
 .sticky-draft-btn {
-  flex: 1 1 140px;
+  flex: 0 0 auto;
   justify-content: center;
   text-align: center;
-  border-radius: 12px;
+  border-radius: 999px;
   padding: 0.65rem 0.9rem;
+}
+
+.sticky-hint {
+  flex: 1 1 200px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
 }
 
 .dialog-card-wide {
@@ -5023,28 +5044,40 @@ button.danger:hover {
   opacity: 0.92;
 }
 
-/* —— UX review: skip first-use tip —— */
-.skip-first-use-tip {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.55rem;
-  margin: 0 0 0.85rem;
-  padding: 0.7rem 0.85rem;
-  border-radius: 12px;
-  border: 1px solid rgba(13, 122, 106, 0.28);
-  background: rgba(13, 122, 106, 0.08);
-  color: var(--ink);
-  font-size: 0.88rem;
-  line-height: 1.45;
+/* —— UX review: skip first-use tip (dark bubble on first ข้าม) —— */
+.doc-skip,
+.skip-opt {
+  position: relative;
 }
 
-.skip-first-use-tip-icon {
-  flex: 0 0 auto;
-  line-height: 1.2;
+.skip-first-use-tip {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 8px);
+  z-index: 20;
+  width: min(260px, 70vw);
+  padding: 0.65rem 0.75rem;
+  border-radius: 10px;
+  background: var(--ink);
+  color: #fff;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}
+
+.skip-first-use-tip::before {
+  content: "";
+  position: absolute;
+  top: -6px;
+  left: 18px;
+  border: 6px solid transparent;
+  border-bottom-color: var(--ink);
 }
 
 /* —— UX review: blank layout (label | input | skip) —— */
 .doc-blank-wrap {
+  display: inline-flex;
   flex-direction: row;
   align-items: center;
   flex-wrap: wrap;
@@ -5057,30 +5090,42 @@ button.danger:hover {
 }
 
 .doc-blank {
-  background: #fff;
-  border: 1px solid rgba(28, 52, 58, 0.18);
-  border-radius: 10px;
-  border-bottom: 1px solid rgba(28, 52, 58, 0.18);
-  min-height: 2.25rem;
+  background: #fafdfc;
+  border: 1px dashed rgba(13, 122, 106, 0.45);
+  border-radius: 8px;
+  border-bottom: 1px dashed rgba(13, 122, 106, 0.45);
+  min-height: 2.1rem;
   height: auto;
   padding: 0.35rem 0.65rem;
+  color: var(--ink);
+}
+
+.doc-blank::placeholder {
+  color: var(--muted);
 }
 
 .doc-blank:focus {
   border-color: var(--accent);
   border-bottom-color: var(--accent);
   background: #fff;
+  outline: none;
 }
 
 .doc-skip {
   margin-top: 0;
   flex: 0 0 auto;
+  font-size: 0.75rem;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.25rem 0.65rem;
+  background: #fff;
 }
 
 .doc-list-seed-tip {
-  margin: 0.45rem 0 0;
+  margin: 0.5rem 0 0;
   color: var(--muted);
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   line-height: 1.4;
 }
 
@@ -5091,9 +5136,20 @@ button.danger:hover {
   gap: 0.45rem 0.65rem;
 }
 
+.doc-list-toolbar .add-row {
+  margin-left: auto;
+}
+
 .doc-list-name {
-  font-weight: 650;
+  font-family: var(--font-display);
+  font-weight: 700;
   font-size: 1.02rem;
+}
+
+.doc-list-meta {
+  margin: 0.15rem 0 0.55rem;
+  color: var(--muted);
+  font-size: 0.75rem;
 }
 
 .doc-blank-image-wrap {
@@ -5101,10 +5157,9 @@ button.danger:hover {
   align-items: flex-start;
   gap: 0.65rem;
   max-width: 100%;
-  padding: 0.55rem 0.65rem;
-  border-radius: 14px;
-  background: rgba(20, 36, 40, 0.035);
-  border: 1px solid var(--border);
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
 .doc-image-inline-label {
@@ -5113,32 +5168,85 @@ button.danger:hover {
   padding-top: 0.55rem;
 }
 
-.doc-image-inline {
+.doc-image-inline,
+.image-box.doc-image-inline,
+.image-drop {
   flex: 1 1 12rem;
   min-width: 10rem;
+  max-width: 280px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  text-align: center;
+  padding: 1.1rem;
+  border: 2px dashed rgba(13, 122, 106, 0.4);
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--muted);
+  font-size: 0.82rem;
+  min-height: auto;
 }
 
 .doc-image-drop-hint {
-  margin: 0 0 0.35rem;
+  margin: 0;
+  color: var(--ink);
+  font-weight: 700;
+  font-size: 0.88rem;
+}
+
+.doc-image-drop-sub {
   color: var(--muted);
   font-size: 0.82rem;
 }
 
-.image-box.doc-image-inline {
-  border-style: dashed;
+.image-box.doc-image-inline.dragover {
+  border-color: var(--accent);
+  background: rgba(13, 122, 106, 0.18);
 }
 
-/* —— UX review: home two-card entry —— */
-.home-entry-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
-  gap: 1rem;
-  margin: 1.1rem 0 0.85rem;
+/* —— UX review: home card (mockup 01) —— */
+.home-card {
+  background: var(--sheet-solid);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-soft);
+  padding: 1.5rem;
 }
 
-.home-upload-card,
-.home-secondary-card {
-  min-width: 0;
+.home-card .headline {
+  font-size: clamp(1.45rem, 3.2vw, 1.75rem);
+  margin-bottom: 0.5rem;
+}
+
+.home-card .subhead {
+  color: var(--muted);
+  margin: 0 0 1.15rem;
+  font-size: 0.95rem;
+  line-height: 1.55;
+}
+
+.home-about {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--row);
+  padding: 0.75rem 0.9rem;
+  margin: 0 0 1.1rem;
+}
+
+.home-about summary {
+  font-family: var(--font-display);
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--ink);
+}
+
+.home-about-body {
+  color: var(--muted);
+  font-size: 0.88rem;
+  margin: 0.65rem 0 0;
+  line-height: 1.5;
 }
 
 .dropzone-primary {
@@ -5146,51 +5254,49 @@ button.danger:hover {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.65rem;
-  padding: 1.6rem 1.1rem;
-}
-
-.dropzone-icon {
-  width: 2.4rem;
-  height: 2.4rem;
-  display: grid;
-  place-items: center;
-  border-radius: 999px;
+  gap: 0.4rem;
+  padding: 2.1rem 1.4rem;
+  border: 2px dashed rgba(13, 122, 106, 0.35);
+  border-radius: var(--radius);
   background: var(--accent-soft);
-  color: var(--accent);
-  font-size: 1.25rem;
+  text-align: center;
+}
+
+.dropzone-primary .dropzone-title {
+  font-family: var(--font-display);
+  font-size: 1.1rem;
   font-weight: 700;
+  color: var(--ink);
 }
 
-.dropzone-pick {
-  pointer-events: none;
-  padding: 0.55rem 1.15rem;
-  border-radius: 12px;
-}
-
-.home-upload-limit {
-  color: var(--muted);
-  font-size: 0.82rem;
-}
-
-.home-upload-opt {
-  margin-top: 0.75rem;
-}
-
-.home-manual-vars {
-  margin-top: 0.9rem;
+.dropzone-primary .home-upload-limit {
   color: var(--muted);
   font-size: 0.88rem;
 }
 
-.home-manual-vars summary {
-  cursor: pointer;
-  font-weight: 600;
-  color: var(--ink);
+.dropzone-pick {
+  pointer-events: none;
+  margin-top: 0.75rem;
+  width: auto;
+  height: auto;
+  min-height: 0;
+  padding: 0.6rem 1.15rem;
+  border-radius: 999px;
+  box-shadow: none;
+  background: var(--accent);
+}
+
+.home-upload-opt {
+  margin-top: 0.85rem;
+}
+
+.home-secondary-link-row {
+  margin: 0.85rem 0 0;
+  text-align: center;
 }
 
 .home-draft-collapsed {
-  margin-top: 0.35rem;
+  margin-top: 0.65rem;
 }
 
 .home-draft-collapsed summary {
@@ -5208,8 +5314,15 @@ button.danger:hover {
 .tools-menu-summary {
   list-style: none;
   cursor: pointer;
-  width: 100%;
+  display: inline-block;
+  width: auto;
   text-align: left;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: #fff;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.82rem;
+  font-weight: 600;
 }
 
 .tools-menu-summary::-webkit-details-marker {
@@ -5219,25 +5332,71 @@ button.danger:hover {
 .tools-menu-panel {
   display: flex;
   flex-direction: column;
-  gap: 0.45rem;
-  margin-top: 0.55rem;
-  padding: 0.65rem;
+  gap: 0.15rem;
+  margin-top: 0.5rem;
+  padding: 0.5rem;
   border-radius: 12px;
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.92);
+  background: #fff;
+  box-shadow: var(--shadow-soft);
 }
 
 .tools-menu-panel .btn-secondary,
 .tools-menu-panel .linkish {
   width: 100%;
   justify-content: flex-start;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  border-radius: 8px;
+  padding: 0.65rem 0.75rem;
+  box-shadow: none;
+}
+
+.tools-menu-panel .btn-secondary:hover,
+.tools-menu-panel .linkish:hover {
+  background: var(--row);
+}
+
+/* Validation banner: danger-soft tokens */
+.banner.is-validation {
+  background: var(--danger-soft);
+  color: var(--ink);
+  border-color: rgba(194, 59, 46, 0.25);
+}
+
+.banner-validation-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--danger);
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+.banner-validation-list {
+  margin: 0;
+  padding-left: 1.15rem;
+  color: var(--ink);
+  font-size: 0.88rem;
+}
+
+.banner-validation-list li {
+  margin: 0.15rem 0;
+}
+
+.banner-validation-hint {
+  margin: 0.65rem 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.doc-list-table .doc-table-real thead th {
+  background: var(--row);
+  color: var(--muted);
+  font-weight: 600;
 }
 
 @media (max-width: 560px) {
-  .home-entry-grid {
-    grid-template-columns: 1fr;
-  }
-
   .file-chip-actions-desktop {
     display: none;
   }
@@ -5248,5 +5407,13 @@ button.danger:hover {
 
   .doc-blank-image-wrap {
     flex-direction: column;
+  }
+
+  .sticky-bar .sticky-primary.btn-primary {
+    width: 100%;
+  }
+
+  .sticky-hint {
+    flex-basis: 100%;
   }
 }

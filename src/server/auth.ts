@@ -7,6 +7,7 @@ import { ac, roles } from "@/lib/auth-permissions";
 import { isSuperAdminEmail } from "./auth-superadmin";
 import { isDevAuthEnabled } from "@/lib/dev-auth-flag";
 import { getAppBaseUrl } from "@/lib/app-base-url";
+import { devAuthPlugin } from "./dev-auth-plugin";
 
 function env(name: string): string | undefined {
   const v = String(process.env[name] || "").trim();
@@ -208,14 +209,9 @@ export const auth = betterAuth({
         userVerification: "required",
       },
     }),
-    // Local only: /api/auth/dev/users + /api/auth/dev/login-as (not registered when disabled)
-    ...(() => {
-      if (!isDevAuthEnabled()) return [];
-      // Lazy load so production deployments with DEV_AUTH off never mount the routes.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports -- conditional load
-      const { devAuthPlugin } = require("./dev-auth-plugin") as typeof import("./dev-auth-plugin");
-      return [devAuthPlugin()];
-    })(),
+    // Local only: /api/auth/dev/users + /api/auth/dev/login-as (not registered when disabled).
+    // Static import — Turbopack's require() of this ESM module drops named exports.
+    ...(isDevAuthEnabled() ? [devAuthPlugin()] : []),
   ],
 });
 

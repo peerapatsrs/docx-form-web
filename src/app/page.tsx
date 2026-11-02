@@ -28,7 +28,7 @@ export default function Home() {
     }
     const s = document.createElement("script");
     s.type = "module";
-    s.src = `/app.js?v=web65`;
+    s.src = `/app.js?v=web66`;
     s.dataset.docxFormApp = "1";
     document.body.appendChild(s);
   }, []);
@@ -68,8 +68,12 @@ export default function Home() {
       <main className="shell" id="main-content" tabIndex={-1}>
         {/* Crawlable product summary — UI itself mounts into #app via app.js */}
         <section className="sr-only" aria-label={`เกี่ยวกับ ${SITE_NAME}`}>
-          <p>
+          <h1>
             {SITE_NAME} — กรอกแบบฟอร์มเอกสาร Word จากเทมเพลต .docx
+          </h1>
+          <p>
+            อัปโหลดเทมเพลตที่มีแท็ก {"{{ชื่อฟิลด์}}"} แล้วกรอกบนหน้าเว็บ ·
+            รองรับหลายเทมเพลต · JSON · AI (BYOK)
           </p>
           <p>{SITE_ABOUT}</p>
           <ul>

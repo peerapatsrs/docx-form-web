@@ -4,7 +4,10 @@ import { toNextJsHandler } from "better-auth/next-js";
 
 const { GET: authGet, POST: authPost } = toNextJsHandler(auth);
 
-/** Normalize proxy headers so Better Auth rate limits bind to a real client IP. */
+/**
+ * Normalize proxy headers so Better Auth rate limits bind to a real client IP,
+ * or to the shared unknown sentinel when none can be trusted (fail closed).
+ */
 function withClientIp(handler: (request: Request) => Promise<Response>) {
   return (request: Request) => handler(withResolvedClientIpHeaders(request));
 }

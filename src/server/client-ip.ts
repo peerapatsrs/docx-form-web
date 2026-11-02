@@ -1,33 +1,58 @@
 /**
  * Trustworthy client IP resolution for rate limiting behind reverse proxies.
  *
- * Prefers an edge-set connecting-IP header, then falls back to X-Forwarded-For
- * using a configurable hop count from the right (not the spoofable leftmost
- * value). Unknown / unresolvable addresses must not bypass per-IP limits.
+ * Optionally trusts an edge connecting-IP header when enabled via env, then
+ * falls back to X-Forwarded-For using a configurable hop count from the right
+ * (not the spoofable leftmost value). Unknown addresses map to a shared
+ * sentinel IP so rate limits still apply.
  */
 
-const IPV4 =
-  /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$/;
-
-/** Basic IPv6 check — full RFC validation is unnecessary for header picking. */
-function looksLikeIPv6(ip: string): boolean {
-  if (!ip.includes(":")) return false;
-  if (ip.length < 2 || ip.length > 45) return false;
-  // Reject obvious junk; allow compressed forms and IPv4-mapped.
-  return /^[0-9a-fA-F:.]+$/.test(ip) && (ip.match(/:/g) || []).length >= 2;
-}
+import { isIP } from "node:net";
 
 export function isValidIp(ip: string): boolean {
-  const trimmed = ip.trim();
-  if (!trimmed) return false;
-  if (IPV4.test(trimmed)) return true;
-  return looksLikeIPv6(trimmed);
+  return isIP(ip.trim()) !== 0;
 }
 
-/** Shared bucket key when no client IP can be resolved — fail closed. */
-export const UNKNOWN_CLIENT_IP = "unknown";
+/**
+ * Shared bucket when no client IP can be resolved.
+ * Must be a valid IP so Better Auth accepts it as a rate-limit key.
+ */
+export const UNKNOWN_CLIENT_IP = "0.0.0.0";
 
 const DEFAULT_TRUSTED_PROXY_COUNT = 1;
+const CF_CONNECTING_IP = "cf-connecting-ip";
+
+function envFlagEnabled(value: string | undefined): boolean {
+  const v = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
+/**
+ * Whether to trust cf-connecting-ip.
+ * Env: TRUST_CF_CONNECTING_IP. Default off — only enable when the edge
+ * overwrites this header (e.g. Cloudflare in front); otherwise clients can spoof it.
+ */
+export function trustCfConnectingIp(
+  envValue: string | undefined = process.env.TRUST_CF_CONNECTING_IP,
+): boolean {
+  return envFlagEnabled(envValue);
+}
+
+/** Preferred IP headers before X-Forwarded-For (empty unless CF trust is on). */
+export function getPreferredIpHeaders(
+  trustCf: boolean = trustCfConnectingIp(),
+): string[] {
+  return trustCf ? [CF_CONNECTING_IP] : [];
+}
+
+/** Header list for Better Auth advanced.ipAddress.ipAddressHeaders. */
+export function getIpAddressHeaders(
+  trustCf: boolean = trustCfConnectingIp(),
+): string[] {
+  return [...getPreferredIpHeaders(trustCf), "x-forwarded-for"];
+}
 
 /**
  * Number of trusted reverse-proxy hops to skip from the right of X-Forwarded-For.
@@ -66,7 +91,7 @@ export function clientIpFromXForwardedFor(
     return isValidIp(parts[0]!) ? parts[0]! : null;
   }
 
-  // Express-style: client sits hops entries from the right (rightmost = last proxy's view of the peer when hops=1).
+  // Express-style: client sits hops entries from the right.
   const index = parts.length - hops;
   if (index < 0) return null;
   const ip = parts[index]!;
@@ -75,11 +100,11 @@ export function clientIpFromXForwardedFor(
 
 export type ResolveClientIpOptions = {
   trustedProxyCount?: number;
+  /** When set, overrides env for whether cf-connecting-ip is trusted. */
+  trustCfConnectingIp?: boolean;
   /** Header names checked before X-Forwarded-For (first match wins). */
   preferredHeaders?: string[];
 };
-
-const DEFAULT_PREFERRED = ["cf-connecting-ip"];
 
 /**
  * Resolve the client IP from request headers.
@@ -89,7 +114,10 @@ export function resolveClientIp(
   headers: Headers,
   options: ResolveClientIpOptions = {},
 ): string | null {
-  const preferred = options.preferredHeaders ?? DEFAULT_PREFERRED;
+  const trustCf = options.trustCfConnectingIp ?? trustCfConnectingIp();
+  const preferred =
+    options.preferredHeaders ?? getPreferredIpHeaders(trustCf);
+
   for (const name of preferred) {
     const raw = headers.get(name);
     if (typeof raw !== "string") continue;
@@ -100,8 +128,7 @@ export function resolveClientIp(
 
   const xff = headers.get("x-forwarded-for");
   if (typeof xff === "string" && xff.trim()) {
-    const count =
-      options.trustedProxyCount ?? getTrustedProxyCount();
+    const count = options.trustedProxyCount ?? getTrustedProxyCount();
     return clientIpFromXForwardedFor(xff, count);
   }
 
@@ -118,41 +145,44 @@ export function rateLimitClientIp(ip: string | null | undefined): string {
 
 /**
  * Rewrite forwarded headers so Better Auth sees a single trustworthy IP.
- * Collapses multi-hop X-Forwarded-For to one value; clears headers when
- * resolution fails so limits fall back to a shared bucket (fail closed).
+ * Collapses multi-hop X-Forwarded-For to one value. When resolution fails,
+ * sets X-Forwarded-For to {@link UNKNOWN_CLIENT_IP} so rate limits still bind
+ * to a shared bucket (fail closed) instead of skipping or using a spoofable header.
  */
 export function withResolvedClientIpHeaders(
   request: Request,
   options: ResolveClientIpOptions = {},
 ): Request {
-  const ip = resolveClientIp(request.headers, options);
+  const trustCf = options.trustCfConnectingIp ?? trustCfConnectingIp();
+  const preferred =
+    options.preferredHeaders ?? getPreferredIpHeaders(trustCf);
+  const resolved = resolveClientIp(request.headers, {
+    ...options,
+    trustCfConnectingIp: trustCf,
+    preferredHeaders: preferred,
+  });
+  const ip = rateLimitClientIp(resolved);
   const headers = new Headers(request.headers);
 
-  if (ip) {
-    const preferred = options.preferredHeaders ?? DEFAULT_PREFERRED;
-    let fromPreferred = false;
+  // Drop spoofable edge headers unless we intentionally trusted and used one.
+  for (const name of [CF_CONNECTING_IP, "x-real-ip"]) {
+    headers.delete(name);
+  }
+
+  if (resolved && preferred.length > 0) {
     for (const name of preferred) {
       const raw = request.headers.get(name);
       if (typeof raw !== "string") continue;
       const candidate = raw.split(",")[0]?.trim();
-      if (candidate && isValidIp(candidate)) {
-        headers.set(name, ip);
-        fromPreferred = true;
+      if (candidate && isValidIp(candidate) && candidate === resolved) {
+        headers.set(name, resolved);
         break;
       }
     }
-    // Single-value XFF so Better Auth does not reject multi-hop chains.
-    headers.set("x-forwarded-for", ip);
-    if (!fromPreferred) {
-      for (const name of preferred) headers.delete(name);
-    }
-  } else {
-    for (const name of options.preferredHeaders ?? DEFAULT_PREFERRED) {
-      headers.delete(name);
-    }
-    headers.delete("x-forwarded-for");
-    headers.delete("x-real-ip");
   }
+
+  // Always a single-value XFF Better Auth can trust (real client or sentinel).
+  headers.set("x-forwarded-for", ip);
 
   return new Request(request, { headers });
 }

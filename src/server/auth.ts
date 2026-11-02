@@ -2,6 +2,7 @@ import { betterAuth } from "better-auth";
 import { passkey } from "@better-auth/passkey";
 import { admin } from "better-auth/plugins";
 import { getAuthPool } from "./auth-db";
+import { getIpAddressHeaders } from "./client-ip";
 import { ac, roles } from "@/lib/auth-permissions";
 import { isSuperAdminEmail } from "./auth-superadmin";
 import { devAuthPlugin } from "./dev-auth-plugin";
@@ -165,12 +166,12 @@ export const auth = betterAuth({
       secure: process.env.NODE_ENV === "production",
     },
     /**
-     * Prefer edge connecting-IP, then X-Forwarded-For. The auth route normalizes
-     * multi-hop XFF to a single trusted value (see client-ip.ts) before Better Auth
-     * runs, so per-IP rate limits work behind reverse proxies.
+     * Header order from client-ip.ts (cf-connecting-ip only when
+     * TRUST_CF_CONNECTING_IP is enabled). Auth route normalizes multi-hop XFF
+     * to a single value — or the fail-closed sentinel — before Better Auth runs.
      */
     ipAddress: {
-      ipAddressHeaders: ["cf-connecting-ip", "x-forwarded-for"],
+      ipAddressHeaders: getIpAddressHeaders(),
     },
     database: {
       // Generate IDs server-side

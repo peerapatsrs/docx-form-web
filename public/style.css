@@ -7,7 +7,7 @@
   --border: rgba(28, 52, 58, 0.12);
   --border-strong: rgba(28, 52, 58, 0.2);
   --ink: #142428;
-  --muted: #5f7378;
+  --muted: #3d5055;
   --accent: #0d7a6a;
   --accent-2: #149485;
   --accent-soft: rgba(13, 122, 106, 0.12);
@@ -1428,12 +1428,17 @@ body {
 }
 
 .sticky-bar {
-  /* Stay in document flow at the end of the form — sticky+bottom was pinning
-     mid-viewport over long forms when an ancestor created a containing block. */
-  position: relative;
+  /* Pin to the bottom of the scrollport; blur lives on .sheet::before so this
+     ancestor chain no longer creates a sticky containing-block trap. */
+  position: sticky;
+  bottom: 0;
+  z-index: 40;
   margin: 1.6rem -0.2rem -0.2rem;
-  padding: 1rem 0.2rem 0.2rem;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.92) 30%);
+  padding: 0.85rem 0.35rem 0.35rem;
+  border-top: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 -8px 24px rgba(12, 32, 36, 0.06);
+  backdrop-filter: blur(10px);
 }
 
 .sticky-bar-drafts {
@@ -4985,4 +4990,263 @@ button.danger:hover {
   background: rgba(20, 36, 40, 0.04);
   color: var(--muted);
   font-size: 0.92em;
+}
+
+/* —— UX review: validation banner list —— */
+.banner.is-validation {
+  align-items: flex-start;
+}
+
+.banner-validation {
+  flex: 1;
+  min-width: 0;
+}
+
+.banner-validation-title {
+  margin: 0 0 0.35rem;
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.banner-validation-list {
+  margin: 0 0 0.45rem;
+  padding-left: 1.15rem;
+}
+
+.banner-validation-list li {
+  margin: 0.12rem 0;
+}
+
+.banner-validation-hint {
+  margin: 0;
+  font-size: 0.84rem;
+  opacity: 0.92;
+}
+
+/* —— UX review: skip first-use tip —— */
+.skip-first-use-tip {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  margin: 0 0 0.85rem;
+  padding: 0.7rem 0.85rem;
+  border-radius: 12px;
+  border: 1px solid rgba(13, 122, 106, 0.28);
+  background: rgba(13, 122, 106, 0.08);
+  color: var(--ink);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.skip-first-use-tip-icon {
+  flex: 0 0 auto;
+  line-height: 1.2;
+}
+
+/* —— UX review: blank layout (label | input | skip) —— */
+.doc-blank-wrap {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.55rem;
+}
+
+.doc-blank-wrap.is-multiline {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.doc-blank {
+  background: #fff;
+  border: 1px solid rgba(28, 52, 58, 0.18);
+  border-radius: 10px;
+  border-bottom: 1px solid rgba(28, 52, 58, 0.18);
+  min-height: 2.25rem;
+  height: auto;
+  padding: 0.35rem 0.65rem;
+}
+
+.doc-blank:focus {
+  border-color: var(--accent);
+  border-bottom-color: var(--accent);
+  background: #fff;
+}
+
+.doc-skip {
+  margin-top: 0;
+  flex: 0 0 auto;
+}
+
+.doc-list-seed-tip {
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.doc-list-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.65rem;
+}
+
+.doc-list-name {
+  font-weight: 650;
+  font-size: 1.02rem;
+}
+
+.doc-blank-image-wrap {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  max-width: 100%;
+  padding: 0.55rem 0.65rem;
+  border-radius: 14px;
+  background: rgba(20, 36, 40, 0.035);
+  border: 1px solid var(--border);
+}
+
+.doc-image-inline-label {
+  font-weight: 600;
+  white-space: nowrap;
+  padding-top: 0.55rem;
+}
+
+.doc-image-inline {
+  flex: 1 1 12rem;
+  min-width: 10rem;
+}
+
+.doc-image-drop-hint {
+  margin: 0 0 0.35rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.image-box.doc-image-inline {
+  border-style: dashed;
+}
+
+/* —— UX review: home two-card entry —— */
+.home-entry-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 1rem;
+  margin: 1.1rem 0 0.85rem;
+}
+
+.home-upload-card,
+.home-secondary-card {
+  min-width: 0;
+}
+
+.dropzone-primary {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 1.6rem 1.1rem;
+}
+
+.dropzone-icon {
+  width: 2.4rem;
+  height: 2.4rem;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.dropzone-pick {
+  pointer-events: none;
+  padding: 0.55rem 1.15rem;
+  border-radius: 12px;
+}
+
+.home-upload-limit {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.home-upload-opt {
+  margin-top: 0.75rem;
+}
+
+.home-manual-vars {
+  margin-top: 0.9rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.home-manual-vars summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.home-draft-collapsed {
+  margin-top: 0.35rem;
+}
+
+.home-draft-collapsed summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+/* —— UX review: mobile tools menu —— */
+.file-chip-tools-mobile {
+  display: none;
+  width: 100%;
+}
+
+.tools-menu-summary {
+  list-style: none;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+}
+
+.tools-menu-summary::-webkit-details-marker {
+  display: none;
+}
+
+.tools-menu-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.55rem;
+  padding: 0.65rem;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.tools-menu-panel .btn-secondary,
+.tools-menu-panel .linkish {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+@media (max-width: 560px) {
+  .home-entry-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .file-chip-actions-desktop {
+    display: none;
+  }
+
+  .file-chip-tools-mobile {
+    display: block;
+  }
+
+  .doc-blank-image-wrap {
+    flex-direction: column;
+  }
 }

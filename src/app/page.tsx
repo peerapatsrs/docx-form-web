@@ -27,7 +27,8 @@ export default function Home() {
       return;
     }
     const s = document.createElement("script");
-    s.src = `/app.js?v=web64`;
+    s.type = "module";
+    s.src = `/app.js?v=web65`;
     s.dataset.docxFormApp = "1";
     document.body.appendChild(s);
   }, []);

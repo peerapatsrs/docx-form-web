@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { TagDisposition, TagPlacement } from "easy-template-x";
 import {
   fieldIdentityKey,
@@ -23,6 +24,7 @@ import {
   countFilledValues,
   isFilledValue,
 } from "../src/server/source-map.ts";
+import { extractDocumentLayout } from "../src/server/docx-layout.ts";
 
 console.log("qa-unit-test");
 
@@ -274,5 +276,14 @@ const mixedFill = countFilledValues({
 assert.equal(mixedFill.filled, 2);
 assert.equal(mixedFill.skipped, 1);
 console.log("✓ countFilledValues false/empty");
+
+
+const sampleBuf = readFileSync(new URL("../public/examples/sample-quote.docx", import.meta.url));
+const layout = await extractDocumentLayout(sampleBuf);
+const imageBlock = layout.blocks.find((b) => b.type === "image");
+assert.ok(imageBlock, "sample quote should expose an image layout block");
+assert.equal(imageBlock.fieldName, "logo");
+assert.equal(imageBlock.label, "โลโก้");
+console.log("✓ extractDocumentLayout image field + nearby label");
 
 console.log("\nAll qa unit tests passed");

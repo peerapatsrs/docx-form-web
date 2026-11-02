@@ -1,3 +1,16 @@
+import {
+  UI_LABELS,
+  fieldDisplayLabel,
+  formatExamplePlaceholder,
+  formatMissingFieldLabel,
+  formatValidationBannerModel,
+  seedListRowsIfEmpty,
+  shouldShowSkipFirstUseTip,
+  buildLayoutLabelMap,
+  layoutBlocksToPlainText,
+  listDisplayName,
+} from "./ui-labels.js";
+
 /** @typedef {{ name: string, type: 'text', aliases?: string[] }} TextField */
 /** @typedef {{ name: string, type: 'image', aliases?: string[] }} ImageField */
 /** @typedef {{ name: string, type: 'bool', trueText: string, falseText: string, label: string, aliases?: string[] }} BoolField */
@@ -17,6 +30,48 @@ function refreshShellElements() {
   banner = document.getElementById("banner");
   statusDot = document.getElementById("statusDot");
   statusText = document.getElementById("statusText");
+}
+
+/** Layout/field-derived display labels for the active template (never hardcoded samples). */
+function currentFieldLabelMap() {
+  const plain = layoutBlocksToPlainText(state.fileLayout || [], state.fileContent || "");
+  return buildLayoutLabelMap(plain, state.fields || []);
+}
+
+function displayLabelForName(name, labelMap = currentFieldLabelMap()) {
+  const field = state.fields.find(
+    (f) => f.name === name || (f.aliases || []).includes(name),
+  );
+  return fieldDisplayLabel(field || { name }, labelMap, name);
+}
+
+function markSkipFirstUseSeen() {
+  try {
+    localStorage.setItem(UI_LABELS.skipFirstUseStorageKey, "1");
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
+function readSkipFirstUseSeen() {
+  try {
+    return localStorage.getItem(UI_LABELS.skipFirstUseStorageKey);
+  } catch {
+    return "1";
+  }
+}
+
+function renderSkipFirstUseTipHtml() {
+  if (!shouldShowSkipFirstUseTip(readSkipFirstUseSeen())) return "";
+  return `<div class="skip-first-use-tip" role="note" data-skip-first-use-tip>
+    <span class="skip-first-use-tip-icon" aria-hidden="true">💡</span>
+    <span class="skip-first-use-tip-text">${escapeHtml(UI_LABELS.skipFirstUseTip)}</span>
+  </div>`;
+}
+
+function dismissSkipFirstUseTip() {
+  markSkipFirstUseSeen();
+  document.querySelectorAll("[data-skip-first-use-tip]").forEach((el) => el.remove());
 }
 
 /**
@@ -990,7 +1045,7 @@ function hideBanner() {
 function showBanner(message, kind = "error", opts = {}) {
   if (!banner) return;
   banner.hidden = !message;
-  banner.classList.remove("success", "progress");
+  banner.classList.remove("success", "progress", "is-validation");
   validationBannerActive = !!(message && opts.validation);
   if (!message) {
     hideBanner();
@@ -1006,6 +1061,9 @@ function showBanner(message, kind = "error", opts = {}) {
     opts.note && String(opts.note).trim()
       ? `<span class="banner-note">${escapeHtml(String(opts.note).trim())}</span>`
       : "";
+  const validationItems = Array.isArray(opts.items)
+    ? opts.items.map((s) => String(s || "").trim()).filter(Boolean)
+    : [];
   if (kind === "progress") {
     banner.classList.add("progress");
     banner.setAttribute("aria-busy", "true");
@@ -1017,6 +1075,18 @@ function showBanner(message, kind = "error", opts = {}) {
   } else if (kind === "warn") {
     banner.removeAttribute("aria-busy");
     banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${noteHtml}${actionBtn}${closeBtn}`;
+  } else if (opts.validation && validationItems.length) {
+    banner.classList.add("is-validation");
+    banner.removeAttribute("aria-busy");
+    const model = formatValidationBannerModel(validationItems);
+    const list = model.items
+      .map((item) => `<li>${escapeHtml(item)}</li>`)
+      .join("");
+    banner.innerHTML = `<div class="banner-validation">
+      <p class="banner-validation-title">${escapeHtml(model.title)}</p>
+      <ul class="banner-validation-list">${list}</ul>
+      <p class="banner-validation-hint">${escapeHtml(model.hint)}</p>
+    </div>${actionBtn}${closeBtn}`;
   } else {
     banner.removeAttribute("aria-busy");
     banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${actionBtn}${closeBtn}`;
@@ -1501,17 +1571,19 @@ function validateBeforeSubmit() {
   clearFieldErrors();
   /** @type {string[]} */
   const missing = [];
+  const labelMap = currentFieldLabelMap();
 
   for (const f of state.fields) {
     if (state.skip[f.name]) continue;
+    const fieldLabel = fieldDisplayLabel(f, labelMap, f.name);
 
     if (f.type === "text" || f.type === "email") {
       const raw = String(state.values[f.name] ?? "").trim();
       if (!raw) {
-        missing.push(f.name);
+        missing.push(formatMissingFieldLabel(fieldLabel));
         markFieldError(`#f-${cssId(f.name)}`, f.name);
       } else if (isEmailTypedField(f.name, f) && !isValidEmailValue(raw)) {
-        missing.push(`${f.name} (รูปแบบอีเมลไม่ถูกต้อง)`);
+        missing.push(`${fieldLabel} (รูปแบบอีเมลไม่ถูกต้อง)`);
         markFieldErrorMessage(
           `#f-${cssId(f.name)}`,
           f.name,
@@ -1522,7 +1594,7 @@ function validateBeforeSubmit() {
       // always true/false — no required check
     } else if (f.type === "image") {
       if (!state.images[f.name]) {
-        missing.push(f.name);
+        missing.push(formatMissingFieldLabel(fieldLabel));
         const wrap = app.querySelector(`[data-image-field="${cssAttrSelector(f.name)}"]`);
         if (wrap) {
           wrap.classList.add("has-error");
@@ -1537,7 +1609,9 @@ function validateBeforeSubmit() {
     } else if (f.type === "list") {
       const rows = state.values[f.name] || [];
       if (rows.length === 0) {
-        missing.push(`${f.name} (ต้องมีอย่างน้อย 1 แถว)`);
+        missing.push(
+          formatMissingFieldLabel(fieldLabel, UI_LABELS.validationListMinRows),
+        );
         const rep = app.querySelector(`[data-list-field="${cssAttrSelector(f.name)}"]`);
         if (rep) {
           rep.classList.add("has-error");
@@ -1554,18 +1628,21 @@ function validateBeforeSubmit() {
         for (const item of f.itemFields) {
           if (item.type === "bool" || item.type === "auto") continue;
           if (state.rowSkip[f.name]?.[idx]?.[item.name]) continue;
+          const itemLabel = fieldDisplayLabel(item, labelMap, item.name);
           const raw = String(row[item.name] ?? "").trim();
           if (!raw) {
-            const label = `${f.name} แถว ${idx + 1}.${item.name}`;
-            missing.push(label);
+            missing.push(
+              UI_LABELS.validationRowPrefix(fieldLabel, idx + 1, itemLabel),
+            );
             markFieldError(
               `#l-${cssId(f.name)}-${idx}-${cssId(item.name)}`,
               item.name,
               { list: f.name, row: idx, item: item.name },
             );
           } else if (isEmailTypedField(item.name, item) && !isValidEmailValue(raw)) {
-            const label = `${f.name} แถว ${idx + 1}.${item.name} (รูปแบบอีเมลไม่ถูกต้อง)`;
-            missing.push(label);
+            missing.push(
+              `${UI_LABELS.validationRowPrefix(fieldLabel, idx + 1, itemLabel)} (รูปแบบอีเมลไม่ถูกต้อง)`,
+            );
             markFieldErrorMessage(
               `#l-${cssId(f.name)}-${idx}-${cssId(item.name)}`,
               item.name,
@@ -1725,22 +1802,22 @@ function clearFilledFields() {
 function skipCheckbox(fieldName, checked) {
   const id = `skip-${cssId(fieldName)}`;
   return `
-    <label class="skip-opt" for="${id}">
+    <label class="skip-opt" for="${id}" title="${escapeAttr(UI_LABELS.skipTitle)}">
       <input type="checkbox" id="${id}" data-skip-field="${escapeAttr(fieldName)}" ${checked ? "checked" : ""} />
-      ข้าม
+      ${escapeHtml(UI_LABELS.skip)}
     </label>`;
 }
 
 function rowSkipCheckbox(listName, rowIdx, itemName, checked) {
   const id = `skip-${cssId(listName)}-${rowIdx}-${cssId(itemName)}`;
   return `
-    <label class="skip-opt skip-opt-sm" for="${id}">
+    <label class="skip-opt skip-opt-sm" for="${id}" title="${escapeAttr(UI_LABELS.skipTitle)}">
       <input type="checkbox" id="${id}"
         data-skip-list="${escapeAttr(listName)}"
         data-skip-row="${rowIdx}"
         data-skip-item="${escapeAttr(itemName)}"
         ${checked ? "checked" : ""} />
-      ข้าม
+      ${escapeHtml(UI_LABELS.skip)}
     </label>`;
 }
 
@@ -2889,9 +2966,8 @@ function summaryText(fields) {
 }
 
 function ensureListRows(name, itemFields) {
-  if (!Array.isArray(state.values[name])) {
-    state.values[name] = [{}];
-  }
+  // Always seed one empty row when missing or [] so required ≥1 row is reachable.
+  state.values[name] = seedListRowsIfEmpty(state.values[name]);
   for (const row of state.values[name]) {
     for (const f of itemFields) {
       if (row[f.name] === undefined) {
@@ -2901,6 +2977,7 @@ function ensureListRows(name, itemFields) {
         else row[f.name] = "";
       }
       if (f.type === "list" && Array.isArray(row[f.name])) {
+        row[f.name] = seedListRowsIfEmpty(row[f.name]);
         for (const nested of row[f.name]) {
           for (const nf of f.itemFields || []) {
             if (nested[nf.name] === undefined) {
@@ -3017,104 +3094,66 @@ function portalTaggerDialogsToBody() {
 function renderEmpty() {
   removeTaggerDialogPortals();
   app.innerHTML = `
-    <h1 class="headline">เติมตัวแปรใน Word</h1>
-    <p class="subhead">เริ่มจากอัปโหลดเทมเพลต หรือโหลดดราฟที่เคยบันทึกไว้ — อยู่หน้าเดียวกัน</p>
-    <div class="upload-entry">
-      <button type="button" class="dropzone" id="dropzone" aria-label="อัปโหลดไฟล์ Word">
-        <div class="dropzone-kicker">เทมเพลตใหม่</div>
-        <div class="dropzone-title">ลากไฟล์ .docx มาวางที่นี่</div>
-        <div class="dropzone-sub">${dropzoneMultiSubHtml()}</div>
-      </button>
-      <section class="draft-entry-panel" id="emptyDraftPanel" aria-label="โหลดดราฟ">
-        <div class="draft-entry-head">
-          <span class="draft-entry-mark" aria-hidden="true"></span>
-          <div>
-            <p class="dropzone-kicker">ทำต่อจากเดิม</p>
-            <h2 class="draft-entry-title">โหลดดราฟ</h2>
-            <p class="draft-entry-sub">งานที่บันทึกในเบราว์เซอร์นี้ · กลับมาทำต่อข้ามวันได้</p>
-          </div>
-        </div>
-        <div class="draft-entry-body" id="emptyDraftList">
-          <p class="draft-list-empty">กำลังโหลดรายการดราฟ…</p>
-        </div>
-      </section>
-    </div>
-    <input class="sr-only" type="file" id="fileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="อัปโหลดไฟล์เทมเพลต Word" />
-    <div class="upload-layout upload-layout-secondary">
-      <aside class="upload-side">
-        <label class="upload-opt" for="showFullContent">
+    <h1 class="headline">${escapeHtml(UI_LABELS.homeHeadline)}</h1>
+    <p class="subhead">${escapeHtml(UI_LABELS.homeSubhead)}</p>
+    <div class="home-entry-grid">
+      <section class="home-upload-card" aria-label="${escapeAttr(UI_LABELS.dropzoneDrag)}">
+        <button type="button" class="dropzone dropzone-primary" id="dropzone" aria-label="อัปโหลดไฟล์ Word">
+          <div class="dropzone-icon" aria-hidden="true">↑</div>
+          <div class="dropzone-title">${escapeHtml(UI_LABELS.dropzoneDrag)}</div>
+          <span class="btn-primary dropzone-pick">${escapeHtml(UI_LABELS.dropzonePick)}</span>
+          <div class="dropzone-sub home-upload-limit">${escapeHtml(UI_LABELS.dropzoneFreeLimit)}</div>
+        </button>
+        <input class="sr-only" type="file" id="fileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="อัปโหลดไฟล์เทมเพลต Word" />
+        <label class="upload-opt home-upload-opt" for="showFullContent">
           <input type="checkbox" id="showFullContent" ${state.showFullContent ? "checked" : ""} />
           <span>
             <strong>แสดงรายละเอียดเนื้อหาในไฟล์ทั้งหมด</strong>
             <small>${escapeHtml(multiUploadOptHint())}</small>
           </span>
         </label>
-        <div class="upload-tips">
-          <p class="upload-tips-title">วิธีใส่ตัวแปรในเทมเพลต</p>
-          <ul>
-            <li><span>ข้อความ</span> <code>{{ชื่อ}}</code></li>
-            <li>
-              <span>ติ๊ก</span>
-              <code>{{พบ?√,×}}</code>
-              <small class="tip-note">หลัง <code>?</code> คือข้อความเมื่อจริง,เท็จ — เช่น {{ยินยอม?ใช่,ไม่ใช่}}</small>
-            </li>
-            <li>
-              <span>รันเลข</span>
-              <code>{{+ลำดับ}}</code>
-              <small class="tip-note">ใช้ได้เฉพาะในลูป {{#…}}…{{/}} — ไล่เลขอัตโนมัติแต่ละแถว/รายการ</small>
-            </li>
-            <li>
-              <span>รูป</span>
-              <code>{{logo}}</code>
-              <small class="tip-note">วางรูปใน Word → คลิกขวาที่รูป → View Alt Text / Edit Alt Text → ใส่แท็ก เช่น {{logo}}</small>
-            </li>
-            <li>
-              <span>ลิสต์ (ย่อหน้า)</span>
-              <code>{{#รายการ}}…{{/}}</code>
-              <small class="tip-note">ห่อบล็อกซ้ำนอกตาราง (หน่วยแรกเป็นต้นแบบ เช่น จำเลยที่ 1 — ไม่แท็กหน่วย 2/3 แยก) · ข้างในใส่ {{ชื่อ}} / {{+ลำดับ}} ได้ · AI ดราฟห่อหน่วยแรกเมื่อเจอแพทเทิร์นซ้ำ</small>
-            </li>
-            <li>
-              <span>ตาราง / ลิสต์</span>
-              <code>{{#รายการ}}</code> ต้นแถว · <code>{{/}}</code> ท้ายแถว
-              <small class="tip-note">ห่อแถวต้นแบบ (แถวข้อมูลแรกต่อตาราง) · ในเซลล์ใส่ {{คอลัมน์}} หรือ {{+ลำดับ}} · แถวตัวอย่างถัดไป/ฟุตเตอร์ไม่ถูกลบอัตโนมัติ · AI ดราฟแท็กเฉพาะแถวต้นแบบ</small>
-            </li>
-          </ul>
-          <p class="tip-note tip-tagger-hint">หรือใช้ปุ่ม <strong>สร้างเทมเพลตจากเอกสาร</strong> — ในตารางแต่ละแถวมีกลุ่ม <strong>+ ตัวแปร</strong> / <strong>ลบ</strong> กดได้เลย หรือไฮไลต์ข้อความแล้วใช้ปุ่มลอย</p>
-        </div>
-      </aside>
-      <section class="tagger-entry-card" aria-labelledby="taggerEntryTitle">
-        <div class="tagger-entry-head">
-          <span class="tagger-entry-mark" aria-hidden="true"></span>
-          <div>
-            <p class="dropzone-kicker">ทางลัด</p>
-            <h2 class="tagger-entry-title" id="taggerEntryTitle">สร้างเทมเพลตจากเอกสาร</h2>
+      </section>
+      <section class="tagger-entry-card home-secondary-card" aria-labelledby="taggerEntryTitle">
+        <h2 class="tagger-entry-title" id="taggerEntryTitle">${escapeHtml(UI_LABELS.noTemplateTitle)}</h2>
+        <p class="tagger-entry-sub">${escapeHtml(UI_LABELS.noTemplateDesc)}</p>
+        <button type="button" class="btn-secondary tagger-entry-cta" id="startTaggerMode">${escapeHtml(UI_LABELS.createTemplateFromDoc)}</button>
+        <details class="home-manual-vars">
+          <summary>${escapeHtml(UI_LABELS.manualVarsDetails)}</summary>
+          <div class="upload-tips">
+            <ul>
+              <li><span>ข้อความ</span> <code>{{ชื่อ}}</code></li>
+              <li>
+                <span>ติ๊ก</span>
+                <code>{{พบ?√,×}}</code>
+                <small class="tip-note">หลัง <code>?</code> คือข้อความเมื่อจริง,เท็จ</small>
+              </li>
+              <li>
+                <span>รันเลข</span>
+                <code>{{+ลำดับ}}</code>
+                <small class="tip-note">ใช้ได้เฉพาะในลูป {{#…}}…{{/}}</small>
+              </li>
+              <li>
+                <span>รูป</span>
+                <code>{{logo}}</code>
+                <small class="tip-note">วางรูปใน Word แล้วใส่แท็กใน Alt Text</small>
+              </li>
+              <li>
+                <span>ลิสต์ / ตาราง</span>
+                <code>{{#รายการ}}…{{/}}</code>
+              </li>
+            </ul>
           </div>
-        </div>
-        <p class="tagger-entry-sub">ไฮไลต์ข้อความในไฟล์ตัวอย่าง แล้วแทนด้วย <code>{{ตัวแปร}}</code> — คงเลย์เอาต์ Word เดิม</p>
-        <div class="tagger-entry-demo" aria-hidden="true">
-          <div class="tagger-demo-sheet">
-            <div class="tagger-demo-line muted">เรียน คุณ</div>
-            <div class="tagger-demo-line">
-              <mark>สมชาย ใจดี</mark>
-              <span class="tagger-demo-arrow">→</span>
-              <code>{{ชื่อ}}</code>
-            </div>
-            <div class="tagger-demo-line muted">วันที่ 1 พ.ย. 2569</div>
-            <div class="tagger-demo-line">
-              <mark>กรุงเทพฯ</mark>
-              <span class="tagger-demo-arrow">→</span>
-              <code>{{ที่อยู่}}</code>
-            </div>
-          </div>
-        </div>
-        <ol class="tagger-entry-steps">
-          <li><span class="tagger-step-body"><strong>อัปโหลด</strong> ไฟล์ .docx ตัวอย่าง</span></li>
-          <li><span class="tagger-step-body"><strong>ไฮไลต์</strong> ข้อความที่อยากเป็นช่องกรอก</span></li>
-          <li><span class="tagger-step-body"><strong>ดาวน์โหลด</strong> เทมเพลตพร้อม <code>{{ตัวแปร}}</code></span></li>
-        </ol>
-        <button type="button" class="btn-primary tagger-entry-cta" id="startTaggerMode">เริ่มสร้างเทมเพลต</button>
+        </details>
       </section>
     </div>
+    <section class="draft-entry-panel home-draft-collapsed" id="emptyDraftPanel" aria-label="โหลดดราฟ">
+      <details>
+        <summary>${escapeHtml(UI_LABELS.loadDraft)}</summary>
+        <div class="draft-entry-body" id="emptyDraftList">
+          <p class="draft-list-empty">กำลังโหลดรายการดราฟ…</p>
+        </div>
+      </details>
+    </section>
     <p class="hint-error" id="uploadError" hidden></p>
   `;
 
@@ -4335,6 +4374,16 @@ function renderTaggerWorkspace() {
  * @param {string} content
  */
 function renderLayoutImageBlock(block) {
+  const fieldName = String(block?.fieldName || "").trim();
+  // Fill preview: show inline upload for tagged images.
+  if (fieldName && state.fields.some((f) => f.type === "image" && f.name === fieldName)) {
+    const labelMap = currentFieldLabelMap();
+    const field = state.fields.find((f) => f.name === fieldName);
+    const label =
+      String(block?.label || "").trim() ||
+      fieldDisplayLabel(field, labelMap, fieldName);
+    return renderInlineImageControl(fieldName, { label, showLabel: true });
+  }
   const alt = String(block?.alt || "").trim();
   const part = block?.part === "header" || block?.part === "footer" ? block.part : "body";
   const partLabel =
@@ -9828,7 +9877,10 @@ function previewCoveredFieldNames() {
   };
   for (const b of state.fileLayout || []) {
     if (b.type === "text") collect(b.text);
-    else if (b.type === "table") {
+    else if (b.type === "image") {
+      if (b.fieldName) names.add(String(b.fieldName).trim());
+      collect(b.alt || "");
+    } else if (b.type === "table") {
       for (const row of b.headerRows || []) for (const c of row) collect(c?.text || c);
       for (const c of b.templateCells || []) collect(c?.text || c);
       for (const row of b.trailingRows || []) for (const c of row) collect(c?.text || c);
@@ -9850,13 +9902,10 @@ function fieldsOutsidePreview() {
   if (!state.fileLayout.length && !state.fileContent) return state.fields;
   const covered = previewCoveredFieldNames();
   return state.fields.filter((f) => {
-    if (f.type === "image") return true;
     if (covered.has(f.name)) return false;
     for (const a of f.aliases || []) {
       if (covered.has(a)) return false;
     }
-    // List may be referenced only by {{#name}} which we add via listName.
-    if (f.type === "list" && covered.has(f.name)) return false;
     return true;
   });
 }
@@ -9865,59 +9914,84 @@ function renderForm() {
   removeTaggerDialogPortals();
   const useDocLayout =
     state.showFullContent && (state.fileLayout.length > 0 || !!state.fileContent);
-  const fieldsHtml = fieldsOutsidePreview()
-    .map((f) => renderField(f))
-    .join("");
   const bodyHtml = state.fileLayout.length
     ? renderDocumentFromLayout(state.fileLayout)
     : renderDocumentLayout(state.fileContent);
   const contentPanel = useDocLayout
     ? `
     <div class="doc-sheet" id="docPreview">
-      <div class="doc-sheet-label">ตัวอย่างเนื้อหาในไฟล์ (กรอกในช่องว่างได้)</div>
+      <div class="doc-sheet-label">${escapeHtml(UI_LABELS.docPreviewLabel)}</div>
+      ${renderSkipFirstUseTipHtml()}
       <div class="doc-body">${bodyHtml}</div>
     </div>`
     : state.showFullContent
       ? `<p class="dropzone-hint">เลือกแสดงเนื้อหาแล้ว แต่ไม่พบข้อความในไฟล์</p>`
       : "";
 
+  const outsideFields = fieldsOutsidePreview();
+  const outsideImages = outsideFields.filter((f) => f.type === "image");
+  const outsideOther = outsideFields.filter((f) => f.type !== "image");
+  const extraTitle =
+    useDocLayout && outsideImages.length && !outsideOther.length
+      ? UI_LABELS.extraFieldsImagesTitle
+      : UI_LABELS.extraFieldsTitle;
+  const fieldsHtmlOutside = outsideFields.map((f) => renderField(f)).join("");
   const extraFields =
-    fieldsHtml &&
+    fieldsHtmlOutside &&
     `<div class="extra-fields">
-      ${useDocLayout ? `<h2 class="extra-fields-title">ฟิลด์เพิ่มเติม</h2>` : ""}
-      ${fieldsHtml}
+      ${useDocLayout ? `<h2 class="extra-fields-title">${escapeHtml(extraTitle)}</h2>` : ""}
+      ${!useDocLayout ? renderSkipFirstUseTipHtml() : ""}
+      ${fieldsHtmlOutside}
     </div>`;
+
+  const aiBtnLabel = aiStatus.connected
+    ? `AI · ${escapeHtml(getClientAiLabel() || aiStatus.providerLabel || String(aiStatus.model || "พร้อม").replace(/^gemini-/i, ""))}`
+    : escapeHtml(UI_LABELS.putAiKey);
+  const attachLabel = isMultiMode()
+    ? "ต้นทาง → ให้ AI กรอก JSON"
+    : UI_LABELS.attachSource;
 
   app.innerHTML = `
     ${renderMultiTabs()}
     <div class="file-chip">
       <span class="file-meta">${escapeHtml(summaryText(state.fields))}${isMultiMode() ? " · แนบต้นทาง → ระบบสร้างโครง JSON → AI กรอกค่า → ใส่ลงหน้าจอ" : ""}</span>
-      <div class="file-chip-actions">
+      <div class="file-chip-actions file-chip-actions-desktop">
         <button type="button" class="btn-secondary btn-compact ${aiStatus.connected ? "is-ai-on" : ""}" id="googleAiBtn" title="${aiStatus.connected ? `คีย์「${getClientAiLabel() || aiStatus.entryLabel || "AI"}」· ${aiStatus.providerLabel || providerLabel(getClientAiProvider())} · ${aiStatus.model || ""} — จัดการคีย์` : "ใส่ AI API key ของคุณ (หลายเจ้าได้ · เก็บในเบราว์เซอร์)"}">
-          ${aiStatus.connected ? `AI · ${escapeHtml(getClientAiLabel() || aiStatus.providerLabel || String(aiStatus.model || "พร้อม").replace(/^gemini-/i, ""))}` : "ใส่ AI key"}
+          ${aiBtnLabel}
         </button>
-        <button type="button" class="btn-secondary btn-compact" id="attachSource" ${aiStatus.connected ? "" : "disabled"} title="${aiStatus.connected ? (isMultiMode() ? "แนบต้นทาง — ส่ง Export JSON ให้ AI กรอกค่า แล้วนำ JSON กลับมาใส่จอ" : "แนบ PDF / Word / รูป — ส่งโครง JSON ให้ AI กรอกค่า") : "ต้องใส่ AI key ของคุณก่อน"}">${isMultiMode() ? "ต้นทาง → ให้ AI กรอก JSON" : "แนบเอกสารต้นทาง"}</button>
+        <button type="button" class="btn-secondary btn-compact" id="attachSource" ${aiStatus.connected ? "" : "disabled"} title="${aiStatus.connected ? (isMultiMode() ? "แนบต้นทาง — ส่ง Export JSON ให้ AI กรอกค่า แล้วนำ JSON กลับมาใส่จอ" : "แนบ PDF / Word / รูป — ส่งโครง JSON ให้ AI กรอกค่า") : "ต้องใส่ AI key ของคุณก่อน"}">${escapeHtml(attachLabel)}</button>
         <input class="sr-only" type="file" id="attachSourceInput" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple aria-label="แนบเอกสารต้นทางสำหรับ AI กรอกค่า" />
-        <button type="button" class="btn-secondary btn-compact" id="exportJson" title="ส่งออกค่าที่กรอกเป็น JSON">Export JSON</button>
-        <button type="button" class="btn-secondary btn-compact" id="importJson" title="นำเข้าค่าจากไฟล์ JSON">Import JSON</button>
-        <input class="sr-only" type="file" id="importJsonInput" accept="application/json,.json" aria-label="เลือกไฟล์ JSON เพื่อนำเข้าค่า" />
+        <button type="button" class="btn-secondary btn-compact" id="exportJson" title="${escapeAttr(UI_LABELS.exportJsonTitle)}">${escapeHtml(UI_LABELS.exportJson)}</button>
+        <button type="button" class="btn-secondary btn-compact" id="importJson" title="${escapeAttr(UI_LABELS.importJsonTitle)}">${escapeHtml(UI_LABELS.importJson)}</button>
+        <input class="sr-only" type="file" id="importJsonInput" accept="application/json,.json" aria-label="${escapeAttr(UI_LABELS.importJsonTitle)}" />
         <input class="sr-only" type="file" id="addTemplateInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="เลือกไฟล์เทมเพลต Word เพิ่ม" />
-        <button type="button" class="btn-secondary btn-compact" id="openTaggerFromForm" title="สร้างเทมเพลตใหม่จากเอกสารตัวอย่าง">สร้างเทมเพลต</button>
-        <button type="button" class="linkish" id="goHomeBtn" title="กลับไปหน้าอัปโหลดเทมเพลต">← หน้าหลัก</button>
+        <button type="button" class="btn-secondary btn-compact" id="openTaggerFromForm" title="${escapeAttr(UI_LABELS.createTemplateTitle)}">${escapeHtml(UI_LABELS.createTemplate)}</button>
+        <button type="button" class="linkish" id="goHomeBtn" title="${escapeAttr(UI_LABELS.homeLinkTitle)}">${escapeHtml(UI_LABELS.homeLink)}</button>
       </div>
+      <details class="file-chip-tools-mobile">
+        <summary class="btn-secondary btn-compact tools-menu-summary">${escapeHtml(UI_LABELS.toolsMenu)} ▾</summary>
+        <div class="tools-menu-panel" role="menu">
+          <button type="button" class="btn-secondary btn-compact ${aiStatus.connected ? "is-ai-on" : ""}" id="googleAiBtnMobile" role="menuitem">${aiBtnLabel}</button>
+          <button type="button" class="btn-secondary btn-compact" id="attachSourceMobile" ${aiStatus.connected ? "" : "disabled"} role="menuitem">${escapeHtml(attachLabel)}</button>
+          <button type="button" class="btn-secondary btn-compact" id="exportJsonMobile" role="menuitem">${escapeHtml(UI_LABELS.exportJson)}</button>
+          <button type="button" class="btn-secondary btn-compact" id="importJsonMobile" role="menuitem">${escapeHtml(UI_LABELS.importJson)}</button>
+          <button type="button" class="btn-secondary btn-compact" id="openTaggerFromFormMobile" role="menuitem">${escapeHtml(UI_LABELS.createTemplate)}</button>
+          <button type="button" class="linkish" id="goHomeBtnMobile" role="menuitem">${escapeHtml(UI_LABELS.homeLink)}</button>
+        </div>
+      </details>
     </div>
     ${renderSourceMapPanel()}
     <form id="fillForm">
       ${contentPanel}
-      ${useDocLayout ? extraFields || "" : fieldsHtml}
+      ${useDocLayout ? extraFields || "" : fieldsHtmlOutside ? extraFields : ""}
       <div class="sticky-bar">
-        <button type="submit" class="btn-primary" id="submitBtn">${isMultiMode() ? "สร้างเอกสาร…" : "สร้างเอกสาร"}</button>
+        <button type="submit" class="btn-primary" id="submitBtn">${isMultiMode() ? escapeHtml(UI_LABELS.createDocMulti) : escapeHtml(UI_LABELS.createDoc)}</button>
         <div class="sticky-bar-drafts">
-          <button type="button" class="btn-secondary sticky-draft-btn" id="saveNamedDraftBtn">บันทึกดราฟ</button>
-          <button type="button" class="btn-secondary sticky-draft-btn" id="loadNamedDraftBtn">โหลดดราฟ</button>
+          <button type="button" class="btn-secondary sticky-draft-btn" id="saveNamedDraftBtn">${escapeHtml(UI_LABELS.saveDraft)}</button>
+          <button type="button" class="btn-secondary sticky-draft-btn" id="loadNamedDraftBtn">${escapeHtml(UI_LABELS.loadDraft)}</button>
         </div>
         <p class="dropzone-hint" style="margin:0.5rem 0 0;text-align:center">
-          จะดาวน์โหลดไฟล์ใหม่ โดยไม่แก้ไฟล์ต้นฉบับ · ช่องว่างต้องติ๊ก “ข้าม” · Export/Import JSON ได้ด้านบน · บันทึกดราฟเพื่อกลับมาทำต่อข้ามวัน${isMultiMode() ? " · หลายเทมเพลต: แนบต้นทางเพื่อแมป JSON ลงจอ แล้วกดสร้างเลือกไฟล์เดียวหรือทั้งหมด" : ""}
+          จะดาวน์โหลดไฟล์ใหม่ โดยไม่แก้ไฟล์ต้นฉบับ · ช่องว่างต้องติ๊ก “ข้าม” · ส่งออก/นำเข้า JSON ได้ด้านบน · บันทึกดราฟเพื่อกลับมาทำต่อข้ามวัน${isMultiMode() ? " · หลายเทมเพลต: แนบต้นทางเพื่อแมป JSON ลงจอ แล้วกดสร้างเลือกไฟล์เดียวหรือทั้งหมด" : ""}
         </p>
       </div>
     </form>
@@ -9972,29 +10046,37 @@ function renderForm() {
     if (list.length) void appendTemplateFiles(list);
   });
 
-  document.getElementById("exportJson")?.addEventListener("click", () => {
+  const exportJson = () => {
     void exportValuesJson();
-  });
+  };
+  document.getElementById("exportJson")?.addEventListener("click", exportJson);
+  document.getElementById("exportJsonMobile")?.addEventListener("click", exportJson);
   const importInput = /** @type {HTMLInputElement | null} */ (document.getElementById("importJsonInput"));
-  document.getElementById("importJson")?.addEventListener("click", () => importInput?.click());
+  const openImport = () => importInput?.click();
+  document.getElementById("importJson")?.addEventListener("click", openImport);
+  document.getElementById("importJsonMobile")?.addEventListener("click", openImport);
   importInput?.addEventListener("change", () => {
     const file = importInput.files?.[0];
     importInput.value = "";
     if (file) void importValuesJson(file);
   });
 
-  document.getElementById("googleAiBtn")?.addEventListener("click", () => {
+  const openAiKey = () => {
     void connectGoogleAi();
-  });
+  };
+  document.getElementById("googleAiBtn")?.addEventListener("click", openAiKey);
+  document.getElementById("googleAiBtnMobile")?.addEventListener("click", openAiKey);
   const attachInput = /** @type {HTMLInputElement | null} */ (document.getElementById("attachSourceInput"));
-  document.getElementById("attachSource")?.addEventListener("click", () => {
+  const openAttach = () => {
     if (!aiStatus.connected && !hasClientAiCredentials()) {
       showBanner("ต้องใส่ AI API key ของคุณก่อนถึงจะแนบเอกสารได้");
       void connectGoogleAi();
       return;
     }
     attachInput?.click();
-  });
+  };
+  document.getElementById("attachSource")?.addEventListener("click", openAttach);
+  document.getElementById("attachSourceMobile")?.addEventListener("click", openAttach);
   attachInput?.addEventListener("change", () => {
     const list = attachInput.files ? [...attachInput.files] : [];
     attachInput.value = "";
@@ -10002,6 +10084,23 @@ function renderForm() {
     if (isMultiMode()) void runBatchFromSource(list);
     else void runSourceMap(list);
   });
+  document.getElementById("openTaggerFromFormMobile")?.addEventListener("click", () => {
+    document.getElementById("openTaggerFromForm")?.click();
+  });
+  document.getElementById("goHomeBtnMobile")?.addEventListener("click", () => {
+    document.getElementById("goHomeBtn")?.click();
+  });
+  document.querySelector("[data-skip-first-use-tip]")?.addEventListener(
+    "click",
+    () => dismissSkipFirstUseTip(),
+    { once: true },
+  );
+  // First interaction with any skip checkbox dismisses the tip for later visits.
+  app.querySelector(".doc-skip input, .skip-opt input")?.addEventListener(
+    "change",
+    () => dismissSkipFirstUseTip(),
+    { once: true },
+  );
   wireSourceMapPanelEvents();
 
   document.querySelectorAll("[data-multi-id]").forEach((btn) => {
@@ -11236,31 +11335,37 @@ function renderWordTableBlock(block) {
   ensureListRows(listName, field.itemFields);
   if (skipped) {
     return `<div class="doc-list is-skipped" data-list-field="${escapeAttr(listName)}">
-      <div class="doc-list-toolbar">
-        <span class="doc-list-name">${escapeHtml(listName)} <span class="badge">ตาราง</span></span>
-        <label class="doc-skip">
-          <input type="checkbox" data-skip-field="${escapeAttr(listName)}" checked />
-          ข้าม
-        </label>
-      </div>
-      <p class="row-empty">ไม่แสดงแถวในเอกสาร</p>
+      ${renderListToolbarHtml(listName, field, { badge: UI_LABELS.listBadgeTable })}
+      <p class="row-empty">${escapeHtml(UI_LABELS.listSkippedEmpty)}</p>
     </div>`;
   }
 
   const rows = /** @type {Record<string, any>[]} */ (state.values[listName] || []);
+  const headerRow = (block.headerRows || [])[(block.headerRows || []).length - 1] || [];
+  /** @type {Map<string, string>} */
+  const colHeaderByField = new Map();
+  (block.templateCells || []).forEach((cell, colIdx) => {
+    const tag = /\{\{\s*([^{}#/+?][^{}]*)\s*\}\}/.exec(cellTextOf(cell));
+    if (!tag) return;
+    const header = String(cellTextOf(headerRow[colIdx] || "") || "")
+      .replace(/\s+/g, " ")
+      .replace(/[:：]\s*$/, "")
+      .trim();
+    if (header) colHeaderByField.set(tag[1].trim(), header);
+  });
   const bodyRows = rows
     .map((row, idx) => {
       const cells = (block.templateCells || [])
         .map((cell) => {
           const cellObj = typeof cell === "string" ? { text: cell } : cell;
           const { attrs } = layoutCellAttrs(cellObj);
-          return `<td${attrs}>${renderTableTemplateCell(listName, field, row, idx, cellTextOf(cellObj))}</td>`;
+          return `<td${attrs}>${renderTableTemplateCell(listName, field, row, idx, cellTextOf(cellObj), colHeaderByField)}</td>`;
         })
         .join("");
       return `<tr>
         <td class="doc-table-rownum">
           <span>${idx + 1}</span>
-          <button type="button" class="linkish danger remove-row" data-list="${escapeAttr(listName)}" data-row="${idx}" title="ลบแถว">ลบ</button>
+          <button type="button" class="linkish danger remove-row" data-list="${escapeAttr(listName)}" data-row="${idx}" title="${escapeAttr(UI_LABELS.removeRowTitle)}">${escapeHtml(UI_LABELS.removeRow)}</button>
         </td>
         ${cells}
       </tr>`;
@@ -11269,14 +11374,7 @@ function renderWordTableBlock(block) {
 
   const colCount = (block.templateCells || []).length + 1;
   return `<div class="doc-list doc-list-table" data-list-field="${escapeAttr(listName)}">
-    <div class="doc-list-toolbar">
-      <span class="doc-list-name">${escapeHtml(listName)} <span class="badge">ตารางจากไฟล์</span></span>
-      <label class="doc-skip">
-        <input type="checkbox" data-skip-field="${escapeAttr(listName)}" />
-        ข้าม
-      </label>
-      <button type="button" class="btn-secondary add-row" data-list="${escapeAttr(listName)}">+ เพิ่มแถว</button>
-    </div>
+    ${renderListToolbarHtml(listName, field, { badge: UI_LABELS.listBadgeFromFile })}
     <div class="doc-table-scroll doc-table-real">
       <table class="doc-table doc-table-stretch">
         ${renderColgroup(block, true)}
@@ -11284,14 +11382,15 @@ function renderWordTableBlock(block) {
           ${renderHeaderRows(true) || `<tr><th class="doc-table-rownum">#</th>${(block.templateCells || []).map(() => "<th></th>").join("")}</tr>`}
         </thead>
         <tbody>
-          ${bodyRows || `<tr><td colspan="${colCount}" class="row-empty">ยังไม่มีแถว</td></tr>`}
+          ${bodyRows || `<tr><td colspan="${colCount}" class="row-empty">${escapeHtml(UI_LABELS.emptyRows)}</td></tr>`}
         </tbody>
       </table>
     </div>
+    ${renderSeededListTipHtml(rows)}
   </div>`;
 }
 
-function renderTableTemplateCell(listName, field, row, idx, cellText) {
+function renderTableTemplateCell(listName, field, row, idx, cellText, colHeaderByField) {
   const tokens = tokenizeTemplate(cellText || "");
   if (!tokens.length) return "";
   return tokens
@@ -11303,7 +11402,16 @@ function renderTableTemplateCell(listName, field, row, idx, cellText) {
       if (t.type === "self") {
         const item = t.name || "";
         const itemField = field.itemFields.find((x) => x.name === item);
-        return renderListCellControl(listName, row, idx, item, itemField);
+        const headerLabel =
+          colHeaderByField instanceof Map ? colHeaderByField.get(item) : "";
+        return renderListCellControl(
+          listName,
+          row,
+          idx,
+          item,
+          itemField,
+          headerLabel,
+        );
       }
       return "";
     })
@@ -11591,12 +11699,49 @@ function wireOneTextValueControl(el) {
   });
 }
 
+function renderInlineImageControl(name, opts = {}) {
+  const field = state.fields.find((f) => f.name === name) || { name, type: "image" };
+  const skipped = !!state.skip[name];
+  const labelMap = currentFieldLabelMap();
+  const label =
+    String(opts.label || "").trim() ||
+    fieldDisplayLabel(field, labelMap, name);
+  const file = state.images[name];
+  let preview = "";
+  if (file && !skipped) {
+    const url = URL.createObjectURL(file);
+    state.objectUrls.push(url);
+    preview = `<img class="thumb" src="${url}" alt="${escapeAttr(UI_LABELS.imagePreviewAlt(label))}" />`;
+  } else {
+    preview = `<div class="thumb thumb-empty" aria-hidden="true" title="${escapeAttr(UI_LABELS.imageEmptyTitle)}"></div>`;
+  }
+  const showLabel = opts.showLabel !== false;
+  return `<span class="doc-blank-wrap doc-blank-image-wrap ${skipped ? "is-skipped" : ""}" data-image-field="${escapeAttr(name)}">
+    ${showLabel ? `<span class="doc-image-inline-label">${escapeHtml(label)}:</span>` : ""}
+    <div class="image-box doc-image-inline" tabindex="0" role="button" aria-label="${escapeAttr(UI_LABELS.imagePickButton + " — " + label)}" ${skipped ? 'aria-disabled="true"' : ""}>
+      ${preview}
+      <div class="image-actions">
+        <p class="doc-image-drop-hint">${escapeHtml(UI_LABELS.imageDropHint)}</p>
+        <button type="button" class="btn-secondary pick-image" ${skipped ? "disabled" : ""}>${escapeHtml(UI_LABELS.imagePickButton)}</button>
+        ${file && !skipped ? `<button type="button" class="linkish danger clear-image">${escapeHtml(UI_LABELS.imageClear)}</button>` : ""}
+      </div>
+      <input class="sr-only image-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp,.png,.jpg,.jpeg,.gif,.webp" ${skipped ? "disabled" : ""} />
+    </div>
+    <label class="doc-skip" title="${escapeAttr(UI_LABELS.skipTitle)}">
+      <input type="checkbox" data-skip-field="${escapeAttr(name)}" ${skipped ? "checked" : ""} />
+      ${escapeHtml(UI_LABELS.skip)}
+    </label>
+  </span>`;
+}
+
 function renderInlineBlank(name) {
   const field = state.fields.find((f) => f.name === name);
   const skipped = !!state.skip[name];
+  const labelMap = currentFieldLabelMap();
+  const label = fieldDisplayLabel(field || { name }, labelMap, name);
 
   if (field?.type === "image") {
-    return `<span class="doc-blank doc-blank-image" title="${escapeAttr(name)}">[รูป: ${escapeHtml(name)}]</span>`;
+    return renderInlineImageControl(name, { label, showLabel: false });
   }
 
   if (field?.type === "bool") {
@@ -11606,14 +11751,14 @@ function renderInlineBlank(name) {
       skipped,
       trueText: field.trueText,
       falseText: field.falseText,
-      label: field.label,
+      label: field.label || label,
       inputAttrs: `data-kind="bool" data-bool-field="${escapeAttr(name)}"`,
       skipAttrs: `data-skip-field="${escapeAttr(name)}"`,
     });
   }
 
   if (field?.type === "auto") {
-    return renderAutoRunDisplay(field.label, 0);
+    return renderAutoRunDisplay(field.label || label, 0);
   }
 
   const val = state.values[name] ?? "";
@@ -11622,13 +11767,13 @@ function renderInlineBlank(name) {
       value: val,
       className: "doc-blank",
       attrs: `data-doc-field="${escapeAttr(name)}" name="${escapeAttr(name)}"`,
-      placeholder: name,
+      placeholder: formatExamplePlaceholder(label),
       disabled: skipped,
-      ariaLabel: name,
+      ariaLabel: label,
     })}
-    <label class="doc-skip">
+    <label class="doc-skip" title="${escapeAttr(UI_LABELS.skipTitle)}">
       <input type="checkbox" data-skip-field="${escapeAttr(name)}" ${skipped ? "checked" : ""} />
-      ข้าม
+      ${escapeHtml(UI_LABELS.skip)}
     </label>
   </span>`;
 }
@@ -11647,10 +11792,8 @@ function isTabularList(innerTokens, itemFields) {
 
 function itemFieldLabel(itemField) {
   if (!itemField) return "";
-  if (itemField.type === "bool" || itemField.type === "auto") {
-    return itemField.label || itemField.name;
-  }
-  return itemField.name;
+  const labelMap = currentFieldLabelMap();
+  return fieldDisplayLabel(itemField, labelMap, itemField.name);
 }
 
 function renderAutoRunDisplay(label, rowIdx) {
@@ -11661,10 +11804,10 @@ function renderAutoRunDisplay(label, rowIdx) {
   </span>`;
 }
 
-function renderListCellControl(listName, row, idx, item, itemField) {
+function renderListCellControl(listName, row, idx, item, itemField, displayOverride) {
   const itemSkipped = !!state.rowSkip[listName]?.[idx]?.[item];
   if (itemField?.type === "auto") {
-    return renderAutoRunDisplay(itemField.label, idx);
+    return renderAutoRunDisplay(itemField.label || displayOverride || item, idx);
   }
   if (itemField?.type === "bool") {
     const checked = coerceBoolValue(row[item]);
@@ -11673,26 +11816,55 @@ function renderListCellControl(listName, row, idx, item, itemField) {
       skipped: itemSkipped,
       trueText: itemField.trueText,
       falseText: itemField.falseText,
-      label: itemField.label,
+      label: itemField.label || displayOverride || item,
       inputAttrs: `data-kind="bool" data-list="${escapeAttr(listName)}" data-row="${idx}" data-item="${escapeAttr(item)}"`,
       skipAttrs: `data-skip-list="${escapeAttr(listName)}" data-skip-row="${idx}" data-skip-item="${escapeAttr(item)}"`,
     });
   }
   const cellVal = row[item] ?? "";
+  const cellLabel = String(displayOverride || "").trim() || itemFieldLabel(itemField) || item;
   return `<span class="doc-blank-wrap doc-table-cell-wrap ${itemSkipped ? "is-skipped" : ""} ${shouldUseTextarea(cellVal) ? "is-multiline" : ""}">
     ${renderTextValueControl({
       value: cellVal,
       className: "doc-blank doc-table-input",
       attrs: `data-list="${escapeAttr(listName)}" data-row="${idx}" data-item="${escapeAttr(item)}"`,
-      placeholder: item,
+      placeholder: cellLabel,
       disabled: itemSkipped,
-      ariaLabel: item,
+      ariaLabel: cellLabel,
     })}
-    <label class="doc-skip doc-skip-compact" title="ข้าม">
+    <label class="doc-skip doc-skip-compact" title="${escapeAttr(UI_LABELS.skipTitle)}">
       <input type="checkbox" data-skip-list="${escapeAttr(listName)}" data-skip-row="${idx}" data-skip-item="${escapeAttr(item)}" ${itemSkipped ? "checked" : ""} />
-      <span>ข้าม</span>
+      <span>${escapeHtml(UI_LABELS.skip)}</span>
     </label>
   </span>`;
+}
+
+function renderListToolbarHtml(listName, field, opts = {}) {
+  const labelMap = currentFieldLabelMap();
+  const title = listDisplayName(listName, field, labelMap);
+  const skipped = !!state.skip[listName];
+  const badge = opts.badge
+    ? ` <span class="badge">${escapeHtml(opts.badge)}</span>`
+    : "";
+  const addBtn = skipped
+    ? ""
+    : `<button type="button" class="btn-secondary add-row" data-list="${escapeAttr(listName)}">${escapeHtml(UI_LABELS.addRow)}</button>`;
+  return `<div class="doc-list-toolbar">
+      <span class="doc-list-name" data-list-key="${escapeAttr(listName)}">${escapeHtml(title)}${badge}</span>
+      <label class="doc-skip" title="${escapeAttr(UI_LABELS.skipTitle)}">
+        <input type="checkbox" data-skip-field="${escapeAttr(listName)}" ${skipped ? "checked" : ""} />
+        ${escapeHtml(UI_LABELS.skip)}
+      </label>
+      ${addBtn}
+    </div>`;
+}
+
+function renderSeededListTipHtml(rows) {
+  if (!Array.isArray(rows) || rows.length !== 1) return "";
+  const only = rows[0] || {};
+  const vals = Object.values(only).filter((v) => String(v ?? "").trim() !== "");
+  if (vals.length) return "";
+  return `<p class="doc-list-seed-tip">${escapeHtml(UI_LABELS.seededRowTip)}</p>`;
 }
 
 function renderListAsTable(listName, field, rows) {
@@ -11726,7 +11898,7 @@ function renderListAsTable(listName, field, rows) {
         </tr>
       </thead>
       <tbody>
-        ${body || `<tr><td colspan="${field.itemFields.length + 1}" class="row-empty">ยังไม่มีแถว</td></tr>`}
+        ${body || `<tr><td colspan="${field.itemFields.length + 1}" class="row-empty">${escapeHtml(UI_LABELS.emptyRows)}</td></tr>`}
       </tbody>
     </table>
   </div>`;
@@ -11772,15 +11944,9 @@ function renderListBlock(listName, innerTokens) {
 
   ensureListRows(listName, field.itemFields);
   if (skipped) {
-    return `<div class="doc-list is-skipped">
-      <div class="doc-list-toolbar">
-        <span class="doc-list-name">${escapeHtml(listName)}</span>
-        <label class="doc-skip">
-          <input type="checkbox" data-skip-field="${escapeAttr(listName)}" checked />
-          ข้าม
-        </label>
-      </div>
-      <p class="row-empty">ไม่แสดงแถวในเอกสาร</p>
+    return `<div class="doc-list is-skipped" data-list-field="${escapeAttr(listName)}">
+      ${renderListToolbarHtml(listName, field, {})}
+      <p class="row-empty">${escapeHtml(UI_LABELS.listSkippedEmpty)}</p>
     </div>`;
   }
 
@@ -11789,18 +11955,12 @@ function renderListBlock(listName, innerTokens) {
   const bodyHtml = asTable
     ? renderListAsTable(listName, field, rows)
     : renderListAsCards(listName, field, innerTokens, rows) ||
-      `<p class="row-empty">ยังไม่มีแถว</p>`;
+      `<p class="row-empty">${escapeHtml(UI_LABELS.emptyRows)}</p>`;
 
   return `<div class="doc-list ${asTable ? "doc-list-table" : ""}" data-list-field="${escapeAttr(listName)}">
-    <div class="doc-list-toolbar">
-      <span class="doc-list-name">${escapeHtml(listName)}${asTable ? ` <span class="badge">ตาราง</span>` : ""}</span>
-      <label class="doc-skip">
-        <input type="checkbox" data-skip-field="${escapeAttr(listName)}" />
-        ข้าม
-      </label>
-      <button type="button" class="btn-secondary add-row" data-list="${escapeAttr(listName)}">+ เพิ่มแถว</button>
-    </div>
+    ${renderListToolbarHtml(listName, field, { badge: asTable ? UI_LABELS.listBadgeTable : "" })}
     ${bodyHtml}
+    ${renderSeededListTipHtml(rows)}
   </div>`;
 }
 
@@ -12003,13 +12163,15 @@ function wireTableColResize(table) {
 /** @param {FormField} field */
 function renderField(field) {
   const skipped = !!state.skip[field.name];
+  const labelMap = currentFieldLabelMap();
+  const label = fieldDisplayLabel(field, labelMap, field.name);
 
-  if (field.type === "text") {
+  if (field.type === "text" || field.type === "email") {
     const val = state.values[field.name] ?? "";
     return `
       <div class="field ${skipped ? "is-skipped" : ""}">
         <div class="field-head">
-          <label for="f-${cssId(field.name)}">${escapeHtml(field.name)}</label>
+          <label for="f-${cssId(field.name)}">${escapeHtml(label)}</label>
           ${skipCheckbox(field.name, skipped)}
         </div>
         ${renderTextValueControl({
@@ -12017,8 +12179,9 @@ function renderField(field) {
           id: `f-${cssId(field.name)}`,
           className: "field-text-control",
           attrs: `name="${escapeAttr(field.name)}"`,
-          placeholder: `กรอก ${field.name}`,
+          placeholder: formatExamplePlaceholder(label),
           disabled: skipped,
+          ariaLabel: label,
         })}
       </div>`;
   }
@@ -12057,21 +12220,22 @@ function renderField(field) {
     if (file && !skipped) {
       const url = URL.createObjectURL(file);
       state.objectUrls.push(url);
-      preview = `<img class="thumb" src="${url}" alt="พรีวิว ${escapeAttr(field.name)}" />`;
+      preview = `<img class="thumb" src="${url}" alt="${escapeAttr(UI_LABELS.imagePreviewAlt(label))}" />`;
     } else {
-      preview = `<div class="thumb thumb-empty" aria-hidden="true" title="ยังไม่มีรูป"></div>`;
+      preview = `<div class="thumb thumb-empty" aria-hidden="true" title="${escapeAttr(UI_LABELS.imageEmptyTitle)}"></div>`;
     }
     return `
       <div class="field ${skipped ? "is-skipped" : ""}" data-image-field="${escapeAttr(field.name)}">
         <div class="field-head">
-          <div class="field-label">${escapeHtml(field.name)} <span class="badge">รูปภาพ</span></div>
+          <div class="field-label">${escapeHtml(label)} <span class="badge">${escapeHtml(UI_LABELS.imageBadge)}</span></div>
           ${skipCheckbox(field.name, skipped)}
         </div>
-        <div class="image-box" tabindex="0" role="button" aria-label="อัปโหลดรูป ${escapeAttr(field.name)}" ${skipped ? 'aria-disabled="true"' : ""}>
+        <div class="image-box" tabindex="0" role="button" aria-label="${escapeAttr(UI_LABELS.imagePickButton + " — " + label)}" ${skipped ? 'aria-disabled="true"' : ""}>
           ${preview}
           <div class="image-actions">
-            <button type="button" class="btn-secondary pick-image" ${skipped ? "disabled" : ""}>เลือกหรือลากรูป PNG/JPEG</button>
-            ${file && !skipped ? `<button type="button" class="linkish danger clear-image">ลบรูป</button>` : ""}
+            <p class="doc-image-drop-hint">${escapeHtml(UI_LABELS.imageDropHint)}</p>
+            <button type="button" class="btn-secondary pick-image" ${skipped ? "disabled" : ""}>${escapeHtml(UI_LABELS.imagePickButton)}</button>
+            ${file && !skipped ? `<button type="button" class="linkish danger clear-image">${escapeHtml(UI_LABELS.imageClear)}</button>` : ""}
           </div>
           <input class="sr-only image-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp,.png,.jpg,.jpeg,.gif,.webp" ${skipped ? "disabled" : ""} />
         </div>
@@ -12082,9 +12246,9 @@ function renderField(field) {
   ensureListRows(field.name, field.itemFields);
   const rows = /** @type {Record<string, string>[]} */ (state.values[field.name]);
   const rowsHtml = skipped
-    ? `<p class="row-empty">ข้ามรายการนี้ — จะไม่แสดงแถวในเอกสาร</p>`
+    ? `<p class="row-empty">${escapeHtml(UI_LABELS.listSkippedForm)}</p>`
     : rows.length === 0
-      ? `<p class="row-empty">ยังไม่มีแถว — กดเพิ่มแถว หรือติ๊กข้าม</p>`
+      ? `<p class="row-empty">${escapeHtml(UI_LABELS.emptyRowsHint)}</p>`
       : rows
           .map((row, idx) => {
             const inputs = field.itemFields
@@ -12175,13 +12339,14 @@ function renderField(field) {
   return `
     <div class="repeater ${skipped ? "is-skipped" : ""}" data-list-field="${escapeAttr(field.name)}">
       <div class="repeater-head">
-        <h3>${escapeHtml(field.name)} <span class="badge">รายการ</span></h3>
+        <h3>${escapeHtml(label)} <span class="badge">รายการ</span></h3>
         <div class="repeater-actions">
           ${skipCheckbox(field.name, skipped)}
-          <button type="button" class="btn-secondary add-row" data-list="${escapeAttr(field.name)}" ${skipped ? "disabled" : ""}>+ เพิ่มแถว</button>
+          <button type="button" class="btn-secondary add-row" data-list="${escapeAttr(field.name)}" ${skipped ? "disabled" : ""}>${escapeHtml(UI_LABELS.addRow)}</button>
         </div>
       </div>
       ${rowsHtml}
+      ${skipped ? "" : renderSeededListTipHtml(rows)}
     </div>`;
 }
 
@@ -12205,11 +12370,14 @@ function wireFieldEvents() {
         const still = validateBeforeSubmit();
         if (!still.length) hideBanner();
         else {
-          showBanner(
-            `ยังมีช่องที่ไม่ได้กรอก (${still.length}) — กรอกให้ครบ หรือติ๊ก “ข้าม” ก่อนสร้างเอกสาร`,
-            "error",
-            { validation: true },
-          );
+          const items =
+            still.length <= 12
+              ? still
+              : [...still.slice(0, 12), `และอีก ${still.length - 12} ช่อง`];
+          showBanner(UI_LABELS.validationTitle(still.length), "error", {
+            validation: true,
+            items,
+          });
         }
       }
       scheduleSaveDraft();
@@ -12338,7 +12506,7 @@ function wireFieldEvents() {
     const assign = (file) => {
       if (!file) return;
       if (file.size > 8 * 1024 * 1024) {
-        showBanner(`รูป ${name} ใหญ่เกิน 8 MB`);
+        showBanner(UI_LABELS.imageTooLarge(displayLabelForName(name)));
         return;
       }
       state.images[name] = file;
@@ -12465,16 +12633,23 @@ function buildValuesPayload() {
 function missingFieldsForSlot(slot) {
   /** @type {string[]} */
   const missing = [];
+  const plain = layoutBlocksToPlainText(slot.fileLayout || [], slot.fileContent || "");
+  const labelMap = buildLayoutLabelMap(plain, slot.fields || []);
   for (const f of slot.fields) {
     if (slot.skip[f.name]) continue;
-    if (f.type === "text") {
-      if (!String(slot.values[f.name] ?? "").trim()) missing.push(`${slot.filename}: ${f.name}`);
+    const fieldLabel = fieldDisplayLabel(f, labelMap, f.name);
+    if (f.type === "text" || f.type === "email") {
+      if (!String(slot.values[f.name] ?? "").trim()) {
+        missing.push(`${slot.filename}: ${fieldLabel}`);
+      }
     } else if (f.type === "image") {
-      if (!slot.images[f.name]) missing.push(`${slot.filename}: ${f.name}`);
+      if (!slot.images[f.name]) missing.push(`${slot.filename}: ${fieldLabel}`);
     } else if (f.type === "list") {
       const rows = slot.values[f.name] || [];
       if (rows.length === 0) {
-        missing.push(`${slot.filename}: ${f.name} (ต้องมีอย่างน้อย 1 แถว)`);
+        missing.push(
+          `${slot.filename}: ${formatMissingFieldLabel(fieldLabel, UI_LABELS.validationListMinRows)}`,
+        );
         continue;
       }
       rows.forEach((row, idx) => {
@@ -12482,7 +12657,10 @@ function missingFieldsForSlot(slot) {
           if (item.type === "bool" || item.type === "auto") continue;
           if (slot.rowSkip[f.name]?.[idx]?.[item.name]) continue;
           if (!String(row[item.name] ?? "").trim()) {
-            missing.push(`${slot.filename}: ${f.name} แถว ${idx + 1}.${item.name}`);
+            const itemLabel = fieldDisplayLabel(item, labelMap, item.name);
+            missing.push(
+              `${slot.filename}: ${UI_LABELS.validationRowPrefix(fieldLabel, idx + 1, itemLabel)}`,
+            );
           }
         }
       });
@@ -12503,15 +12681,14 @@ async function createAllTemplatesZip() {
     missing.push(...slotMissing);
   }
   if (missing.length) {
-    const listed =
-      missing.length <= 8
-        ? missing.join(", ")
-        : `${missing.slice(0, 8).join(", ")} และอีก ${missing.length - 8} ช่อง`;
-    showBanner(
-      `ยังมีช่องว่างในบางเทมเพลต (${missing.length}): ${listed} — กรอก/ข้ามให้ครบก่อนสร้างทั้งหมด`,
-      "error",
-      { validation: true },
-    );
+    const items =
+      missing.length <= 12
+        ? missing
+        : [...missing.slice(0, 12), `และอีก ${missing.length - 12} ช่อง`];
+    showBanner(UI_LABELS.validationTitle(missing.length), "error", {
+      validation: true,
+      items,
+    });
     // Jump to the first incomplete template and paint empty cells.
     if (firstBad && firstBad.id !== multiActiveId) {
       persistActiveSlot();
@@ -12613,15 +12790,12 @@ async function onSubmit(e) {
 
   const missing = validateBeforeSubmit();
   if (missing.length) {
-    const listed =
-      missing.length <= 10
-        ? missing.join(", ")
-        : `${missing.slice(0, 10).join(", ")} และอีก ${missing.length - 10} ช่อง`;
-    showBanner(
-      `ยังมีช่องที่ไม่ได้กรอก (${missing.length}): ${listed} — กรอกให้ครบ หรือติ๊ก “ข้าม” ก่อนสร้างเอกสาร`,
-      "error",
-      { validation: true },
-    );
+    const items =
+      missing.length <= 12 ? missing : [...missing.slice(0, 12), `และอีก ${missing.length - 12} ช่อง`];
+    showBanner(UI_LABELS.validationTitle(missing.length), "error", {
+      validation: true,
+      items,
+    });
     return;
   }
 

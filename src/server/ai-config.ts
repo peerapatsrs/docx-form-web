@@ -21,27 +21,16 @@ export type RequestAiCredentials = {
   model?: string;
 };
 
-/**
- * Prefer a cwd-scoped directory so Turbopack can bound filesystem tracing.
- * DOCX_FORM_CONFIG_DIR still wins when set (Docker / ephemeral hosts).
- */
 function resolveConfigDir(): string {
   const fromEnv = String(process.env.DOCX_FORM_CONFIG_DIR || "").trim();
   if (fromEnv) return fromEnv;
-
-  const localDir = join(process.cwd(), ".docx-form");
-  try {
-    accessSync(process.cwd(), constants.W_OK);
-    return localDir;
-  } catch {
-    /* fall through */
-  }
 
   const home = homedir();
   if (
     home &&
     home !== "/nonexistent" &&
     !home.startsWith("/nonexistent") &&
+    // Dynamic home path — do not let Turbopack trace the whole project.
     existsSync(/* turbopackIgnore: true */ home)
   ) {
     try {
@@ -57,9 +46,11 @@ function resolveConfigDir(): string {
 const CONFIG_DIR = resolveConfigDir();
 const CONFIG_PATH = join(CONFIG_DIR, "config.json");
 
-/** mkdir is enough — no existsSync on a dynamic dir (avoids whole-project tracing). */
+/** Same path as main; turbopackIgnore avoids whole-project FS tracing. */
 function ensureConfigDir(): void {
-  mkdirSync(/* turbopackIgnore: true */ CONFIG_DIR, { recursive: true });
+  if (!existsSync(/* turbopackIgnore: true */ CONFIG_DIR)) {
+    mkdirSync(/* turbopackIgnore: true */ CONFIG_DIR, { recursive: true });
+  }
 }
 
 export const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";

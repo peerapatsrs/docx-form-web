@@ -1,14 +1,21 @@
 /**
  * Shared variable naming: normalize, identity, and validation used by
  * parse / tagger / AI draft so create and upload agree.
+ *
+ * Keep VAR_NAME_RE_SOURCE in sync with public/field-names.js (see qa-unit-test).
  */
 
 /**
- * Letters (incl. Thai), digits, underscore, dot, hyphen, slash.
- * Slash is allowed inside names (e.g. ที่อยู่/เบอร์). Loop close remains
- * `{{/}}` / `{{/name}}` because those start with `/` after `{{`.
+ * One or more segments of letters (incl. Thai), digits, `_`, `.`, `-`,
+ * joined by a single `/`. Rejects leading/trailing/consecutive slashes so
+ * names never collide with loop-close `{{/…}}`.
  */
-export const VAR_NAME_RE = /^[\w\u0E00-\u0E7F./-]+$/u;
+export const VAR_NAME_RE_SOURCE =
+  String.raw`^[\w\u0E00-\u0E7F.-]+(?:/[\w\u0E00-\u0E7F.-]+)*$`;
+
+export const VAR_NAME_RE = new RegExp(VAR_NAME_RE_SOURCE, "u");
+
+export const VAR_NAME_ALLOWED_HINT = "ตัวอักษร ตัวเลข _ . - /";
 
 /**
  * Trim, NFC (not NFKC — Thai ำ must stay U+0E33), strip zero-width,
@@ -20,6 +27,12 @@ export function normalizeVarName(raw: string): string {
     .replace(/[\u200B-\u200D\uFEFF]/g, "")
     .trim()
     .replace(/\s+/g, " ");
+}
+
+/** True when the normalized name is a legal field / list / auto label. */
+export function isValidVarName(raw: string): boolean {
+  const n = normalizeVarName(raw);
+  return n.length > 0 && VAR_NAME_RE.test(n);
 }
 
 /**
@@ -51,7 +64,7 @@ export function validateVarName(
   const n = normalizeVarName(name);
   if (!n) return `${kind}ว่างไม่ได้`;
   if (!VAR_NAME_RE.test(n)) {
-    return `${kind}ใช้ได้เฉพาะตัวอักษร ตัวเลข _ . - /`;
+    return `${kind}ใช้ได้เฉพาะ${VAR_NAME_ALLOWED_HINT}`;
   }
   return null;
 }
@@ -65,7 +78,10 @@ export function validateUploadedTagName(raw: string): string | null {
   const bool = /^([^?#{}]+)\?([^,{}]*),(.*)$/.exec(n);
   if (bool) return validateVarName(bool[1], "ชื่อตัวแปรติ๊ก");
   if (n.startsWith("#") || n.startsWith("/")) {
-    return validateVarName(n.slice(1) || n, "ชื่อลิสต์");
+    // Strip the loop marker; empty after `/` is the bare `{{/}}` close (OK).
+    const inner = n.slice(1);
+    if (n.startsWith("/") && !inner) return null;
+    return validateVarName(inner, "ชื่อลิสต์");
   }
   return validateVarName(n, "ชื่อตัวแปร");
 }

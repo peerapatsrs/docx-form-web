@@ -20,6 +20,37 @@ function refreshShellElements() {
 }
 
 /**
+ * Field-name helpers from /public/field-names.js (loaded before this script).
+ * Single client source of truth — mirrors src/server/field-names.ts.
+ * @returns {{
+ *   normalizeFieldName: (raw: unknown) => string,
+ *   isValidFieldName: (raw: unknown) => boolean,
+ *   FIELD_NAME_ALLOWED_HINT: string,
+ * }}
+ */
+function docxFieldNames() {
+  const api = /** @type {any} */ (globalThis).DocxFieldNames;
+  if (!api?.isValidFieldName || !api?.normalizeFieldName) {
+    throw new Error("field-names.js is not loaded");
+  }
+  return api;
+}
+
+/** @param {unknown} raw */
+function normalizeFieldName(raw) {
+  return docxFieldNames().normalizeFieldName(raw);
+}
+
+/** @param {unknown} raw */
+function isValidFieldName(raw) {
+  return docxFieldNames().isValidFieldName(raw);
+}
+
+function fieldNameAllowedHint() {
+  return docxFieldNames().FIELD_NAME_ALLOWED_HINT || "ตัวอักษร ตัวเลข _ . - /";
+}
+
+/**
  * @type {{
  *   file: File | null,
  *   filename: string,
@@ -3621,8 +3652,8 @@ async function runTaggerAiDraft() {
     for (const s of sortedRaw) {
       const plain = String(s.plainText || "").trim();
       if (!plain) continue;
-      let name = String(s.name || "").trim().replace(/^#+/, "");
-      if (!name || !/^[\w\u0E00-\u0E7F./-]+$/u.test(name)) continue;
+      let name = normalizeFieldName(String(s.name || "").replace(/^#+/, ""));
+      if (!name || !isValidFieldName(name)) continue;
       // Same name at multiple spans is OK (one form field, many locations).
       // Only rename when this name is already used by a different plainText in-session.
       if (usedNames.has(name)) {
@@ -6067,7 +6098,7 @@ function suggestFieldNameFromHeader(headerText, used) {
     base = suggestTaggerName(raw.replace(/[/\\|·•]+/g, " "));
   }
   if (!base || base === "field") return "";
-  if (!/^[\w\u0E00-\u0E7F./-]+$/u.test(base)) return "";
+  if (!isValidFieldName(base)) return "";
   let name = base;
   let n = 2;
   while (used.has(name)) name = `${base}_${n++}`;
@@ -7414,17 +7445,18 @@ async function commitTaggerOps(ops) {
 }
 
 function suggestTaggerName(plain) {
-  const cleaned = String(plain)
-    .normalize("NFC")
-    .trim()
+  const cleaned = normalizeFieldName(plain)
     .replace(/\s*\/\s*/g, "/")
     .replace(/[\\|]+/g, "_")
     .replace(/\s+/g, "_")
     .replace(/[^\w\u0E00-\u0E7F./-]/gu, "")
+    .replace(/\/{2,}/g, "/")
+    .replace(/^\/+|\/+$/g, "")
     .replace(/_+/g, "_")
     .replace(/^_+|_+$/g, "")
     .slice(0, 40);
-  return cleaned || "field";
+  if (!cleaned) return "field";
+  return isValidFieldName(cleaned) ? cleaned : "field";
 }
 
 /**
@@ -7515,7 +7547,8 @@ async function confirmTaggerVariable() {
     /** @type {HTMLInputElement} */ (document.getElementById("taggerTrueText"))?.value ?? "";
   const falseText =
     /** @type {HTMLInputElement} */ (document.getElementById("taggerFalseText"))?.value ?? "";
-  const name = nameInput?.value?.trim() || "";
+  const name = normalizeFieldName(nameInput?.value || "");
+  if (nameInput && nameInput.value !== name) nameInput.value = name;
   if (!name) {
     showTaggerDialogError(
       kind === "list" || kind === "list-table"
@@ -7530,8 +7563,8 @@ async function confirmTaggerVariable() {
     showTaggerDialogError('ไม่ต้องใส่เครื่องหมาย + นำหน้า — ระบบจะสร้างเป็น {{+ชื่อ}} ให้');
     return;
   }
-  if (!/^[\w\u0E00-\u0E7F./-]+$/u.test(name)) {
-    showTaggerDialogError("ชื่อใช้ได้เฉพาะตัวอักษร ตัวเลข _ . - /");
+  if (!isValidFieldName(name)) {
+    showTaggerDialogError(`ชื่อใช้ได้เฉพาะ${fieldNameAllowedHint()}`);
     return;
   }
 
@@ -7624,11 +7657,12 @@ async function confirmTaggerVariable() {
       if (!fieldName && cellIsEmpty) {
         fieldName = suggestFieldNameFromHeader(headers[idx] || "", usedAtConfirm);
       }
+      fieldName = normalizeFieldName(fieldName);
       if (!fieldName) continue;
       usedAtConfirm.add(fieldName);
-      if (!/^[\w\u0E00-\u0E7F./-]+$/u.test(fieldName)) {
+      if (!isValidFieldName(fieldName)) {
         showTaggerDialogError(
-          `ชื่อฟิลด์เซลล์ไม่ถูกต้อง: ${fieldName} — ใช้ตัวอักษร ตัวเลข _ . -`,
+          `ชื่อฟิลด์เซลล์ไม่ถูกต้อง: ${fieldName} — ใช้${fieldNameAllowedHint()}`,
         );
         return;
       }
@@ -7761,11 +7795,13 @@ async function confirmTaggerVariable() {
       document.querySelectorAll(".tagger-line-field")
     );
     for (const input of lineInputs) {
-      const rawField = input.value.trim();
+      const rawField = normalizeFieldName(input.value);
       if (!rawField) continue;
       const isAutoField = rawField.startsWith("+");
-      const fieldName = isAutoField ? rawField.slice(1).trim() : rawField;
-      if (!fieldName || !/^[\w\u0E00-\u0E7F./-]+$/u.test(fieldName)) {
+      const fieldName = normalizeFieldName(
+        isAutoField ? rawField.slice(1) : rawField,
+      );
+      if (!fieldName || !isValidFieldName(fieldName)) {
         showTaggerDialogError(
           `ชื่อฟิลด์บรรทัดไม่ถูกต้อง: ${rawField} — ใช้ชื่อปกติ หรือ +ลำดับ สำหรับรันเลข`,
         );
@@ -8040,11 +8076,13 @@ async function saveTaggerEdit() {
   if (!id) return;
   const r = taggerSession.replacements.find((x) => x.id === id);
   if (!r || isTaggerDeleteOp(r)) return;
-  const name = String(
-    /** @type {HTMLInputElement | null} */ (document.getElementById("taggerEditName"))?.value || "",
-  ).trim();
-  if (!name || !/^[\w\u0E00-\u0E7F./-]+$/u.test(name)) {
-    showErr("ชื่อตัวแปรไม่ถูกต้อง — ใช้ตัวอักษร ตัวเลข ไทย . - _");
+  const nameEl = /** @type {HTMLInputElement | null} */ (
+    document.getElementById("taggerEditName")
+  );
+  const name = normalizeFieldName(nameEl?.value || "");
+  if (nameEl && nameEl.value !== name) nameEl.value = name;
+  if (!name || !isValidFieldName(name)) {
+    showErr(`ชื่อตัวแปรไม่ถูกต้อง — ใช้${fieldNameAllowedHint()}`);
     return;
   }
   const editKindRaw =

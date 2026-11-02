@@ -26,10 +26,16 @@ export default function Home() {
       requestAnimationFrame(() => requestAnimationFrame(runBoot));
       return;
     }
-    const s = document.createElement("script");
-    s.src = `/app.js?v=web64`;
-    s.dataset.docxFormApp = "1";
-    document.body.appendChild(s);
+    const names = document.createElement("script");
+    names.src = `/field-names.js?v=web1`;
+    names.dataset.docxFieldNames = "1";
+    names.onload = () => {
+      const s = document.createElement("script");
+      s.src = `/app.js?v=web65`;
+      s.dataset.docxFormApp = "1";
+      document.body.appendChild(s);
+    };
+    document.body.appendChild(names);
   }, []);
 
   return (

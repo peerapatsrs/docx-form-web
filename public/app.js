@@ -4382,7 +4382,8 @@ function renderLayoutImageBlock(block) {
     const label =
       String(block?.label || "").trim() ||
       fieldDisplayLabel(field, labelMap, fieldName);
-    return renderInlineImageControl(fieldName, { label, showLabel: true });
+    // Nearby prose in the sheet already shows the Thai label (e.g. "โลโก้:").
+    return renderInlineImageControl(fieldName, { label, showLabel: false });
   }
   const alt = String(block?.alt || "").trim();
   const part = block?.part === "header" || block?.part === "footer" ? block.part : "body";

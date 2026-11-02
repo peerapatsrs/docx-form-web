@@ -177,12 +177,15 @@ export function buildLayoutLabelMap(content, fields = []) {
   const text = String(content || "");
   if (!text) return map;
 
-  // "ลูกค้า: {{customer_name}}" or "ลูกค้า {{customer_name}}"
+  // Same-line only: "ลูกค้า: {{customer_name}}" (do not cross newlines into table headers).
   const tagged =
-    /([^\n\{\}]{1,80}?)[:：]?\s*\{\{\s*([^{}#/+][^{}]*)\s*\}\}/g;
+    /([^\n\{\}]{1,80}?)[:：]?[ \t]*\{\{\s*([^{}#/+][^{}]*)\s*\}\}/g;
   let m;
   while ((m = tagged.exec(text))) {
-    const rawLabel = cleanLayoutLabel(m[1]);
+    const rawCapture = String(m[1] || "");
+    // Ignore tab-separated header leftovers before a cell tag.
+    if (/\t/.test(rawCapture)) continue;
+    const rawLabel = cleanLayoutLabel(rawCapture);
     const fieldName = String(m[2] || "").trim();
     if (!rawLabel || !fieldName) continue;
     if (fieldName.startsWith("?") || fieldName.startsWith("+")) continue;
@@ -228,20 +231,37 @@ export function buildLayoutLabelMap(content, fields = []) {
     }
   }
 
-  // Image label: short "โลโก้:" line followed within a few lines by {{logo}} in plain or as sole content
-  for (let i = 0; i < lines.length; i++) {
-    const labelLine = cleanLayoutLabel(lines[i]);
-    if (!labelLine || labelLine.length > 30) continue;
-    if (!/[:：]?$/.test(lines[i].trim()) && !/^[\w\u0E00-\u0E7F]{1,20}$/u.test(labelLine)) {
-      // allow bare short labels too
+  // Pair a tab-separated header row with the following template-tag row.
+  for (let i = 0; i < lines.length - 1; i++) {
+    const headerLine = String(lines[i] || "");
+    const tagLine = String(lines[i + 1] || "");
+    if (!/\t/.test(headerLine) || !/\{\{/.test(tagLine)) continue;
+    const headers = headerLine.split(/\t+/).map((h) => cleanLayoutLabel(h));
+    const tagCells = tagLine.split(/\t+/);
+    if (headers.length < 2 || tagCells.length < 2) continue;
+    const n = Math.min(headers.length, tagCells.length);
+    for (let c = 0; c < n; c++) {
+      const tag = /\{\{\s*([^{}#/+?][^{}]*)\s*\}\}/.exec(tagCells[c] || "");
+      if (!tag || !headers[c]) continue;
+      const key = tag[1].trim();
+      if (!map.has(key)) map.set(key, headers[c]);
     }
-    for (let j = i; j <= Math.min(lines.length - 1, i + 3); j++) {
-      const img = /\{\{\s*([^{}#/+?][^{}]*)\s*\}\}/.exec(lines[j]);
-      if (!img) continue;
-      const key = img[1].trim();
-      // Only treat as image-ish when the label line has little/no tag of its own
-      if (j === i && lines[i].includes("{{")) continue;
-      if (!map.has(key) && labelLine) map.set(key, labelLine);
+  }
+
+  // Image-style lines that are mostly just {{field}} — use nearest prior short label.
+  for (let i = 0; i < lines.length; i++) {
+    const line = String(lines[i] || "").trim();
+    const onlyTag = /^\{\{\s*([^{}#/+?][^{}]*)\s*\}\}$/.exec(line);
+    if (!onlyTag) continue;
+    const key = onlyTag[1].trim();
+    if (map.has(key)) continue;
+    for (let j = i - 1; j >= Math.max(0, i - 3); j--) {
+      const raw = String(lines[j] || "");
+      if (/\{\{/.test(raw)) continue;
+      if (/\t/.test(raw)) continue;
+      const labelLine = cleanLayoutLabel(raw);
+      if (!labelLine || labelLine.length > 30) continue;
+      map.set(key, labelLine);
       break;
     }
   }

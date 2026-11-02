@@ -82,7 +82,8 @@ const samplePlain = `ใบเสนอราคาตัวอย่าง
 {{logo}}
 รายการสินค้า
 สินค้า\tจำนวน\tราคา
-{{#items}}{{name}} {{qty}} {{price}}{{/}}
+{{name}}\t{{qty}}\t{{price}}
+{{#items}}
 หมายเหตุ: {{note}}`;
 
 const map = buildLayoutLabelMap(samplePlain, [
@@ -94,6 +95,9 @@ assert.equal(map.get("date"), "วันที่");
 assert.equal(map.get("note"), "หมายเหตุ");
 assert.equal(map.get("items"), "รายการสินค้า");
 assert.equal(map.get("logo"), "โลโก้");
+assert.equal(map.get("name"), "สินค้า");
+assert.equal(map.get("qty"), "จำนวน");
+assert.equal(map.get("price"), "ราคา");
 assert.equal(listDisplayName("items", { name: "items" }, map), "รายการสินค้า");
 console.log("✓ buildLayoutLabelMap + listDisplayName");
 

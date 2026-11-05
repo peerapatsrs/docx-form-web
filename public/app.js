@@ -153,6 +153,58 @@ function projectFlatOntoFields(fields, bag) {
 }
 
 /**
+ * Field-name helpers from /public/field-names.js (loaded before this script).
+ * Single client source of truth — mirrors src/server/field-names.ts.
+ * @returns {{
+ *   normalizeFieldName: (raw: unknown) => string,
+ *   isValidFieldName: (raw: unknown) => boolean,
+ *   FIELD_NAME_ALLOWED_HINT: string,
+ * }}
+ */
+function docxFieldNames() {
+  const api = /** @type {any} */ (globalThis).DocxFieldNames;
+  if (!api?.isValidFieldName || !api?.normalizeFieldName) {
+    throw new Error("field-names.js is not loaded");
+  }
+  return api;
+}
+
+/** @param {unknown} raw */
+function normalizeFieldName(raw) {
+  return docxFieldNames().normalizeFieldName(raw);
+}
+
+/** @param {unknown} raw */
+function isValidFieldName(raw) {
+  return docxFieldNames().isValidFieldName(raw);
+}
+
+function fieldNameAllowedHint() {
+  return docxFieldNames().FIELD_NAME_ALLOWED_HINT || "ตัวอักษร ตัวเลข _ . - /";
+}
+
+/** @param {Record<string, unknown> | null | undefined} bag @param {string} fieldName */
+function lookupCompatValue(bag, fieldName) {
+  return docxFieldNames().lookupCompatValue(bag, fieldName);
+}
+
+/**
+ * @param {Array<{ name: string, type?: string, aliases?: string[], itemFields?: any[] }>} fields
+ * @param {Record<string, unknown> | null | undefined} values
+ */
+function projectValuesOntoFields(fields, values) {
+  return docxFieldNames().projectValuesOntoFields(fields, values);
+}
+
+/**
+ * @param {Array<{ name: string, aliases?: string[] }>} fields
+ * @param {Record<string, unknown> | null | undefined} bag
+ */
+function projectFlatOntoFields(fields, bag) {
+  return docxFieldNames().projectFlatOntoFields(fields, bag);
+}
+
+/**
  * @type {{
  *   file: File | null,
  *   filename: string,

@@ -25,8 +25,8 @@ export type CallCursorAgentJsonOpts = {
   apiKey: string;
   model: string;
   images?: CursorAgentImage[];
-  /** Override default / CURSOR_AGENT_TIMEOUT_MS */
-  timeoutMs?: number;
+  /** Optional cancel — no processing-time cap on Cloud Agent waits. */
+  signal?: AbortSignal;
 };
 
 /** Live model ids for the API key (empty on failure). */
@@ -63,8 +63,6 @@ export async function resolveCursorModelForCall(
   );
 }
 
-const DEFAULT_TIMEOUT_MS = 180_000;
-
 function parseJsonObject(text: string): Record<string, unknown> | null {
   const raw = String(text || "").trim();
   if (!raw) return null;
@@ -90,29 +88,26 @@ function parseJsonObject(text: string): Record<string, unknown> | null {
   return null;
 }
 
-function resolveTimeoutMs(override?: number): number {
-  if (typeof override === "number" && Number.isFinite(override) && override > 0) {
-    return override;
-  }
-  const fromEnv = Number(String(process.env.CURSOR_AGENT_TIMEOUT_MS || "").trim());
-  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
-  return DEFAULT_TIMEOUT_MS;
-}
-
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error("CURSOR_AGENT_TIMEOUT"));
-        }, timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+async function waitWithOptionalAbort<T>(
+  promise: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) throw new Error("CURSOR_AGENT_CANCELLED");
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new Error("CURSOR_AGENT_CANCELLED"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
 }
 
 function haystackFromUnknown(err: unknown): string {
@@ -141,11 +136,10 @@ export function formatCursorAgentError(err: unknown): Error {
 
   if (
     err instanceof Error &&
-    (err.message === "CURSOR_AGENT_TIMEOUT" || /CURSOR_AGENT_TIMEOUT/i.test(hay))
+    (err.message === "CURSOR_AGENT_CANCELLED" ||
+      /CURSOR_AGENT_CANCELLED/i.test(hay))
   ) {
-    return new Error(
-      "Cursor: Cloud Agent หมดเวลา — ลองเอกสารสั้นลง หรือใช้ Gemini / OpenAI",
-    );
+    return new Error("Cursor: ยกเลิกแล้ว");
   }
 
   if (
@@ -246,7 +240,6 @@ export async function callCursorAgentJson(
   const message = String(prompt || "").trim();
   if (!message) throw new Error("ไม่มีข้อความให้ส่งไป Cursor Agent");
 
-  const timeoutMs = resolveTimeoutMs(opts.timeoutMs);
   const images = (opts.images || [])
     .filter((img) => img?.base64 && img?.mimeType)
     .slice(0, 12);
@@ -270,7 +263,7 @@ export async function callCursorAgentJson(
             mimeType: img.mimeType,
           })),
         });
-        const waited = await withTimeout(run.wait(), timeoutMs);
+        const waited = await waitWithOptionalAbort(run.wait(), opts.signal);
         if (waited.status === "error" || waited.status === "cancelled") {
           const code = waited.error?.code ? ` (${waited.error.code})` : "";
           const msg = waited.error?.message || waited.status;
@@ -285,7 +278,10 @@ export async function callCursorAgentJson(
         }
       }
     } else {
-      const waited = await withTimeout(Agent.prompt(message, agentOpts), timeoutMs);
+      const waited = await waitWithOptionalAbort(
+        Agent.prompt(message, agentOpts),
+        opts.signal,
+      );
       if (waited.status === "error" || waited.status === "cancelled") {
         const code = waited.error?.code ? ` (${waited.error.code})` : "";
         const msg = waited.error?.message || waited.status;

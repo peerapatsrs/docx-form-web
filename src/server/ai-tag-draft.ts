@@ -77,6 +77,7 @@ export type AiTagDraftOpts = {
   filename?: string | null;
   /** Prefer Thai (`ลำดับ`) or English snake_case (`defendant_no`) names. Default th. */
   nameLanguage?: AiTagNameLanguage | string | null;
+  signal?: AbortSignal;
 };
 
 export function parseAiTagNameLanguage(raw: unknown): AiTagNameLanguage {
@@ -2073,6 +2074,7 @@ export async function suggestTemplateTags(
     const parsed = await callCursorAgentJson(prompt, {
       apiKey: cursorKey,
       model,
+      signal: opts?.signal,
     });
     callResult = {
       parsed,

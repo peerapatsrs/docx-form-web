@@ -22,6 +22,7 @@ import {
 } from "./admin-store";
 import {
   clearGeminiKey,
+  adminDefaultProviderFromSettings,
   geminiStatus,
   getGeminiApiKey,
   getRequestAiCredentials,
@@ -30,6 +31,8 @@ import {
   hasRequestAiKey,
   isByokOnly,
   maskGeminiKey,
+  requestHasExplicitAiProvider,
+  resolveEffectiveAiProvider,
   resolveProviderApiKey,
   normalizeGeminiModel,
   writeAiConfig,
@@ -434,9 +437,13 @@ export function createApi(options: {
     const gate = await requireSuperAdmin(c.req.raw);
     if (!gate.ok) return c.json({ error: gate.error }, gate.status);
     const aiAdmin = await getAiAdminSettings();
+    const adminDefaultProvider = adminDefaultProviderFromSettings(aiAdmin);
     return c.json({
       settings: aiAdmin,
-      status: geminiStatus({ adminDefaultModel: aiAdmin.defaultModel }),
+      status: geminiStatus({
+        adminDefaultModel: aiAdmin.defaultModel,
+        adminDefaultProvider,
+      }),
     });
   });
 
@@ -458,10 +465,14 @@ export function createApi(options: {
       action: "ai.settings",
       detail: settings,
     });
+    const adminDefaultProvider = adminDefaultProviderFromSettings(settings);
     return c.json({
       ok: true,
       settings,
-      status: geminiStatus({ adminDefaultModel: settings.defaultModel }),
+      status: geminiStatus({
+        adminDefaultModel: settings.defaultModel,
+        adminDefaultProvider,
+      }),
     });
   });
 
@@ -473,11 +484,45 @@ export function createApi(options: {
     return c.json({ rows });
   });
 
-  api.get("/ai/providers", (c) => {
+  api.get("/ai/providers", async (c) => {
+    const aiAdmin = await getAiAdminSettings().catch(() => ({
+      defaultModel: "gemini-3.8-flash",
+    }));
+    const adminDefaultProvider = adminDefaultProviderFromSettings(aiAdmin);
+    const defaultProvider = resolveEffectiveAiProvider({
+      requestProvider: getRequestAiProvider(c.req.raw),
+      explicitProvider: requestHasExplicitAiProvider(c.req.raw),
+      requestKey: getRequestGeminiKey(c.req.raw),
+      adminDefaultProvider,
+    });
     return c.json({
       providers: listAiProvidersPublic(),
-      defaultProvider: "google",
+      defaultProvider,
+      adminDefaultProvider,
     });
+  });
+
+  api.get("/ai/jobs/:id", async (c) => {
+    const { getAiJob } = await import("./ai-jobs");
+    const job = getAiJob(c.req.param("id"));
+    if (!job) return c.json({ error: "ไม่พบงาน" }, 404);
+    const gate = await requireSessionUserId(c.req.raw);
+    if (
+      job.ownerUserId &&
+      (!gate.ok || gate.userId !== job.ownerUserId)
+    ) {
+      return c.json({ error: "ไม่มีสิทธิ์" }, 403);
+    }
+    return c.json(job);
+  });
+
+  api.delete("/ai/jobs/:id", async (c) => {
+    const { cancelAiJob } = await import("./ai-jobs");
+    const gate = await requireSessionUserId(c.req.raw);
+    const ownerUserId = gate.ok ? gate.userId : null;
+    const ok = cancelAiJob(c.req.param("id"), ownerUserId);
+    if (!ok) return c.json({ error: "ไม่พบงานหรือไม่มีสิทธิ์" }, 404);
+    return c.json({ ok: true });
   });
 
   /** Live model list for a provider (needs the user's API key). */
@@ -533,12 +578,15 @@ export function createApi(options: {
       c.req.raw,
       sessionUserId,
     );
+    const adminDefaultProvider = adminDefaultProviderFromSettings(aiAdmin);
     return c.json(
       geminiStatus({
         requestKey: creds.apiKey,
         requestModel: creds.model,
         requestProvider: creds.provider,
+        explicitProvider: requestHasExplicitAiProvider(c.req.raw),
         adminDefaultModel: aiAdmin.defaultModel,
+        adminDefaultProvider,
       }),
     );
   });
@@ -836,9 +884,20 @@ export function createApi(options: {
       c.req.raw,
       sessionUserId,
     );
-    const clientProvider = aiCreds.provider;
+    const aiAdmin = await getAiAdminSettings().catch(() => ({
+      defaultModel: "gemini-3.8-flash",
+    }));
+    const adminDefaultProvider = adminDefaultProviderFromSettings(aiAdmin);
+    const clientProvider = resolveEffectiveAiProvider({
+      requestProvider: aiCreds.provider,
+      explicitProvider: requestHasExplicitAiProvider(c.req.raw),
+      requestKey: aiCreds.apiKey,
+      adminDefaultProvider,
+    });
     const clientKey = resolveProviderApiKey(clientProvider, aiCreds.apiKey);
-    const clientModel = aiCreds.model;
+    const clientModel =
+      normalizeProviderModel(clientProvider, aiCreds.model) ||
+      defaultModelForProvider(clientProvider);
     if (!hasRequestAiKey(clientProvider, clientKey)) {
       return c.json(
         {
@@ -1022,6 +1081,7 @@ export function createApi(options: {
           apiKey: clientKey,
           model: clientModel,
           fields,
+          signal: c.req.raw.signal,
         });
         const { countFilledValues } = await import("./source-map");
         const fillStats = countFilledValues(valuesJson);
@@ -1262,8 +1322,20 @@ export function createApi(options: {
         c.req.raw,
         sessionUserId,
       );
-      const clientProvider =
+      const aiAdmin = await getAiAdminSettings().catch(() => ({
+        defaultModel: "gemini-3.8-flash",
+      }));
+      const adminDefaultProvider = adminDefaultProviderFromSettings(aiAdmin);
+      const explicitProvider =
+        requestHasExplicitAiProvider(c.req.raw) || Boolean(formProvider);
+      const requestedProvider =
         getAiProvider(formProvider)?.id || resolved.provider;
+      const clientProvider = resolveEffectiveAiProvider({
+        requestProvider: requestedProvider,
+        explicitProvider,
+        requestKey: resolved.apiKey || formKey || undefined,
+        adminDefaultProvider,
+      });
       const clientKey = resolveProviderApiKey(
         clientProvider,
         resolved.apiKey || formKey || undefined,
@@ -1289,15 +1361,7 @@ export function createApi(options: {
         "./ai-tag-draft"
       );
       const nameLanguage = parseAiTagNameLanguage(formNameLanguage);
-      const result = await suggestTemplateTags(buffer, {
-        provider: clientProvider,
-        apiKey: clientKey,
-        model: clientModel,
-        filename: file.name,
-        nameLanguage,
-      });
 
-      /** Raw model JSON is staff-only (admin / superadmin). */
       let staffRaw = false;
       try {
         const { auth } = await import("./auth");
@@ -1311,23 +1375,62 @@ export function createApi(options: {
         staffRaw = false;
       }
 
-      const warnings: string[] = [];
-      if (result.plainText.length > 0 && result.suggestions.length === 0) {
-        warnings.push("AI ไม่เสนอแท็กที่ผ่านการตรวจสอบ — ลองตรวจเอกสารหรือใส่แท็กเอง");
+      const runSuggest = async (signal?: AbortSignal) => {
+        const result = await suggestTemplateTags(buffer, {
+          provider: clientProvider,
+          apiKey: clientKey,
+          model: clientModel,
+          filename: file.name,
+          nameLanguage,
+          signal,
+        });
+        const warnings: string[] = [];
+        if (result.plainText.length > 0 && result.suggestions.length === 0) {
+          warnings.push(
+            "AI ไม่เสนอแท็กที่ผ่านการตรวจสอบ — ลองตรวจเอกสารหรือใส่แท็กเอง",
+          );
+        }
+        return {
+          suggestions: result.suggestions,
+          count: result.suggestions.length,
+          plainText: result.plainText,
+          ...(warnings.length ? { warnings } : {}),
+          ...(staffRaw
+            ? { rawAi: result.rawAi, rawText: result.rawText }
+            : {}),
+          provider: clientProvider,
+          model: clientModel,
+          nameLanguage,
+        };
+      };
+
+      const wantAsync =
+        c.req.query("async") === "1" ||
+        String(form.get("async") || "").trim() === "1";
+
+      if (wantAsync) {
+        const { startAiJob } = await import("./ai-jobs");
+        const job = startAiJob({
+          kind: "suggest-tags",
+          ownerUserId: sessionUserId,
+          run: async (emit, signal) => {
+            emit({
+              step: 1,
+              total: 2,
+              message: "กำลังส่งเอกสารให้ AI อ่าน…",
+            });
+            const payload = await runSuggest(signal);
+            emit({ step: 2, total: 2, message: "เสร็จแล้ว" });
+            return payload;
+          },
+        });
+        return c.json(
+          { ok: true, jobId: job.id, status: job.status, pollUrl: `/api/ai/jobs/${job.id}` },
+          202,
+        );
       }
 
-      return c.json({
-        suggestions: result.suggestions,
-        count: result.suggestions.length,
-        plainText: result.plainText,
-        ...(warnings.length ? { warnings } : {}),
-        ...(staffRaw
-          ? { rawAi: result.rawAi, rawText: result.rawText }
-          : {}),
-        provider: clientProvider,
-        model: clientModel,
-        nameLanguage,
-      });
+      return c.json(await runSuggest(c.req.raw.signal));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return c.json({ error: `AI ดราฟตัวแปรไม่สำเร็จ: ${message}` }, 400);
@@ -1361,8 +1464,19 @@ export function createApi(options: {
           ? String(form.get("aiProvider") || "").trim()
           : "";
       const headerCreds = getRequestAiCredentials(c.req.raw);
-      const clientProvider =
+      const aiAdmin = await getAiAdminSettings().catch(() => ({
+        defaultModel: "gemini-3.8-flash",
+      }));
+      const adminDefaultProvider = adminDefaultProviderFromSettings(aiAdmin);
+      const requestedProvider =
         getAiProvider(formProvider)?.id || headerCreds.provider;
+      const clientProvider = resolveEffectiveAiProvider({
+        requestProvider: requestedProvider,
+        explicitProvider:
+          requestHasExplicitAiProvider(c.req.raw) || Boolean(formProvider),
+        requestKey: headerCreds.apiKey || formKey || undefined,
+        adminDefaultProvider,
+      });
       const clientKey = resolveProviderApiKey(
         clientProvider,
         headerCreds.apiKey || formKey || undefined,
@@ -1636,6 +1750,7 @@ export function createApi(options: {
                 provider: clientProvider,
                 apiKey: clientKey,
                 model: clientModel,
+                signal: abortSignal,
               },
             );
             for (const item of filled) {

@@ -43,6 +43,7 @@ await withEnv(
       geminiStatus,
       hasRequestAiKey,
       resolveProviderApiKey,
+      resolveEffectiveAiProvider,
     } = await loadAiConfig();
 
     assert.equal(getCursorApiKey(BYOK_USER), BYOK_USER);
@@ -57,6 +58,25 @@ await withEnv(
     const status = geminiStatus({ requestProvider: "cursor" });
     assert.equal(status.hasServerEnvCursorKey, true);
     assert.equal(status.connected, true);
+
+    assert.equal(
+      resolveEffectiveAiProvider({
+        requestProvider: "google",
+        explicitProvider: false,
+        requestKey: undefined,
+        adminDefaultProvider: "google",
+      }),
+      "cursor",
+    );
+    assert.equal(
+      resolveEffectiveAiProvider({
+        requestProvider: "cursor",
+        explicitProvider: true,
+        requestKey: BYOK_USER,
+        adminDefaultProvider: "google",
+      }),
+      "cursor",
+    );
   },
 );
 

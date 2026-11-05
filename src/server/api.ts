@@ -30,6 +30,7 @@ import {
   hasRequestAiKey,
   isByokOnly,
   maskGeminiKey,
+  resolveProviderApiKey,
   normalizeGeminiModel,
   writeAiConfig,
 } from "./ai-config";
@@ -835,9 +836,9 @@ export function createApi(options: {
       c.req.raw,
       sessionUserId,
     );
-    const clientKey = aiCreds.apiKey;
-    const clientModel = aiCreds.model;
     const clientProvider = aiCreds.provider;
+    const clientKey = resolveProviderApiKey(clientProvider, aiCreds.apiKey);
+    const clientModel = aiCreds.model;
     if (!hasRequestAiKey(clientProvider, clientKey)) {
       return c.json(
         {
@@ -1263,7 +1264,10 @@ export function createApi(options: {
       );
       const clientProvider =
         getAiProvider(formProvider)?.id || resolved.provider;
-      const clientKey = resolved.apiKey || formKey || undefined;
+      const clientKey = resolveProviderApiKey(
+        clientProvider,
+        resolved.apiKey || formKey || undefined,
+      );
       const clientModel =
         normalizeProviderModel(clientProvider, formModel || resolved.model) ||
         defaultModelForProvider(clientProvider);
@@ -1359,7 +1363,10 @@ export function createApi(options: {
       const headerCreds = getRequestAiCredentials(c.req.raw);
       const clientProvider =
         getAiProvider(formProvider)?.id || headerCreds.provider;
-      const clientKey = headerCreds.apiKey || formKey || undefined;
+      const clientKey = resolveProviderApiKey(
+        clientProvider,
+        headerCreds.apiKey || formKey || undefined,
+      );
       const clientModel =
         normalizeProviderModel(clientProvider, formModel) ||
         headerCreds.model ||

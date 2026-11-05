@@ -9,6 +9,8 @@ import {
   type AiProviderId,
 } from "./ai-providers";
 
+const CURSOR_SERVER_KEY_ENV = "DOCX_FORM_CURSOR_API_KEY";
+
 export type AiConfig = {
   /** Google AI Studio / Gemini API key — only used when BYOK is off (legacy/local) */
   geminiApiKey?: string;
@@ -218,6 +220,31 @@ export function getGeminiApiKey(override?: string | null): string | undefined {
   return cfg && String(cfg).trim() ? String(cfg).trim() : undefined;
 }
 
+/** Shared Cursor key (DOCX_FORM_CURSOR_API_KEY) when BYOK-only is off; BYOK override wins. */
+export function getCursorApiKey(override?: string | null): string | undefined {
+  if (override && String(override).trim()) return String(override).trim();
+  if (isByokOnly()) return undefined;
+  const fromEnv = process.env[CURSOR_SERVER_KEY_ENV];
+  if (fromEnv && String(fromEnv).trim()) return String(fromEnv).trim();
+  return undefined;
+}
+
+export function hasServerEnvCursorKey(): boolean {
+  return Boolean(String(process.env[CURSOR_SERVER_KEY_ENV] || "").trim());
+}
+
+/** Effective API key: per-request BYOK → (when not BYOK-only) server env for Gemini/Cursor. */
+export function resolveProviderApiKey(
+  provider: string | null | undefined,
+  override?: string | null,
+): string | undefined {
+  const p = getAiProvider(provider) || getAiProvider("google");
+  if (p?.apiFamily === "gemini") return getGeminiApiKey(override);
+  if (p?.apiFamily === "cursor") return getCursorApiKey(override);
+  const key = String(override || "").trim();
+  return key || undefined;
+}
+
 export function normalizeGeminiModel(raw: unknown): string | null {
   const id = String(raw || "")
     .trim()
@@ -268,9 +295,11 @@ export function geminiStatus(opts?: {
   const key =
     provider.apiFamily === "gemini"
       ? getGeminiApiKey(opts?.requestKey)
-      : opts?.requestKey && String(opts.requestKey).trim()
-        ? String(opts.requestKey).trim()
-        : undefined;
+      : provider.apiFamily === "cursor"
+        ? getCursorApiKey(opts?.requestKey)
+        : opts?.requestKey && String(opts.requestKey).trim()
+          ? String(opts.requestKey).trim()
+          : undefined;
   const model =
     normalizeProviderModel(providerId, opts?.requestModel) ||
     (provider.apiFamily === "gemini"
@@ -297,6 +326,7 @@ export function geminiStatus(opts?: {
       process.env.GOOGLE_API_KEY ||
       process.env.GOOGLE_GENERATIVE_AI_API_KEY
     ),
+    hasServerEnvCursorKey: hasServerEnvCursorKey(),
     premiumEnforce:
       String(process.env.PREMIUM_ENFORCE || "").trim() === "1" ||
       String(process.env.PREMIUM_ENFORCE || "")
@@ -315,8 +345,9 @@ export function hasRequestAiKey(
   apiKey?: string | null,
 ): boolean {
   const p = getAiProvider(provider) || getAiProvider("google");
+  if (p?.apiFamily === "gemini" || p?.apiFamily === "cursor") {
+    return Boolean(resolveProviderApiKey(provider, apiKey));
+  }
   const key = String(apiKey || "").trim();
-  if (!key) return false;
-  if (p?.apiFamily === "gemini") return !!getGeminiApiKey(key);
   return key.length >= 8;
 }

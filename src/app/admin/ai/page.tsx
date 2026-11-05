@@ -9,6 +9,7 @@ type AiStatus = {
   models?: { id: string; label: string }[];
   adminDefaultModel?: string | null;
   hasServerEnvKey?: boolean;
+  hasServerEnvCursorKey?: boolean;
   premiumEnforce?: boolean;
   maskedKey?: string | null;
   configPath?: string;
@@ -94,8 +95,12 @@ export default function AdminAiPage() {
             <strong>{status?.byok ? "BYOK (คีย์อยู่ที่เบราว์เซอร์)" : "เซิร์ฟเวอร์เก็บคีย์ได้"}</strong>
           </li>
           <li>
-            <span>คีย์จาก env</span>
+            <span>คีย์ Gemini จาก env</span>
             <strong>{status?.hasServerEnvKey ? "มี" : "ไม่มี"}</strong>
+          </li>
+          <li>
+            <span>คีย์ Cursor จาก env (DOCX_FORM_CURSOR_API_KEY)</span>
+            <strong>{status?.hasServerEnvCursorKey ? "มี" : "ไม่มี"}</strong>
           </li>
           <li>
             <span>PREMIUM_ENFORCE</span>

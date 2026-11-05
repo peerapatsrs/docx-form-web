@@ -6,6 +6,7 @@
 
 import type { FormField } from "./docx-engine";
 import { callCursorAgentJson } from "./ai-cursor-agent";
+import { getCursorApiKey } from "./ai-config";
 import { formatProviderHttpError } from "./ai-http-errors";
 import {
   assertFormAiSupported,
@@ -492,12 +493,22 @@ async function callCompatJson(
   return callOpenAiJson(providerId, prompt, opts);
 }
 
+function resolveCompatApiKey(
+  apiFamily: CompatApiFamily,
+  override?: string | null,
+): string {
+  if (apiFamily === "cursor") {
+    return getCursorApiKey(override) || "";
+  }
+  return String(override || "").trim();
+}
+
 async function fillViaCompat(
   skeleton: DocxFormValuesJson,
   sourceFiles: AiSourceFile[],
   opts: AiFillOpts & { providerId: string; apiFamily: CompatApiFamily },
 ): Promise<DocxFormValuesJson> {
-  const apiKey = String(opts.apiKey || "").trim();
+  const apiKey = resolveCompatApiKey(opts.apiFamily, opts.apiKey);
   if (!apiKey) throw new Error("ยังไม่ได้ใส่ API key");
   const model = String(opts.model || "").trim();
   if (!model) throw new Error("ยังไม่ได้เลือกโมเดล");
@@ -531,7 +542,7 @@ async function fillBatchViaCompat(
     });
     return [{ id: only.id, filename: only.filename, valuesJson }];
   }
-  const apiKey = String(opts.apiKey || "").trim();
+  const apiKey = resolveCompatApiKey(opts.apiFamily, opts.apiKey);
   const model = String(opts.model || "").trim();
   if (!apiKey) throw new Error("ยังไม่ได้ใส่ API key");
   if (!model) throw new Error("ยังไม่ได้เลือกโมเดล");

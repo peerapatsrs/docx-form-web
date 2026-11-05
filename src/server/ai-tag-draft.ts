@@ -13,7 +13,7 @@ import {
   CONTACT_TAGGING_EXAMPLE,
   LABEL_VALUE_SPLIT_EXAMPLES,
 } from "@/config/ai-tag-draft-prompt-examples";
-import { getGeminiApiKey, getGeminiModel } from "./ai-config";
+import { getCursorApiKey, getGeminiApiKey, getGeminiModel } from "./ai-config";
 import { callCursorAgentJson } from "./ai-cursor-agent";
 import { formatProviderHttpError } from "./ai-http-errors";
 import {
@@ -2066,7 +2066,14 @@ export async function suggestTemplateTags(
       filename,
     });
   } else if (provider.apiFamily === "cursor") {
-    const parsed = await callCursorAgentJson(prompt, { apiKey, model });
+    const cursorKey = getCursorApiKey(apiKey);
+    if (!cursorKey) {
+      throw new Error("ยังไม่ได้เชื่อมต่อ Cursor — ใส่ Cursor API key ก่อน");
+    }
+    const parsed = await callCursorAgentJson(prompt, {
+      apiKey: cursorKey,
+      model,
+    });
     callResult = {
       parsed,
       rawText: parsed ? JSON.stringify(parsed, null, 2) : "",

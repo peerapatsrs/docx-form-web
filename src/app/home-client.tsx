@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { AuthBar } from "@/components/AuthBar";
 import { BrandLockup } from "@/components/BrandLogo";
+import { SiteFooter } from "@/components/SiteFooter";
 import {
   SITE_ABOUT,
   SITE_FEATURE_BULLETS,
@@ -71,7 +72,7 @@ export function HomeClient({
   return (
     <>
       <a className="skip-link" href="#main-content">
-        ข้ามไปยังเนื้อหาหลัก
+        ข้ามไปยังเนื้อหาหลัก (ลัด)
       </a>
       <div className="ambient" aria-hidden="true">
         <span className="orb orb-a" />
@@ -120,19 +121,7 @@ export function HomeClient({
         <div className="sheet" id="app" />
       </main>
 
-      <footer className="credits" id="credits">
-        <div className="credits-identity">
-          <p className="credits-name">Peerapat Surasing</p>
-          <a className="credits-email" href="mailto:peerapat.srs@gmail.com">
-            peerapat.srs@gmail.com
-          </a>
-        </div>
-        <div className="credits-meta">
-          <span className="credits-ver" id="creditsVersion">
-            {versionLabel}
-          </span>
-        </div>
-      </footer>
+      <SiteFooter versionLabel={versionLabel} />
     </>
   );
 }

@@ -9,6 +9,7 @@ import {
   seedListRowsIfEmpty,
   isListRowEmpty,
   collectMissingListValidation,
+  countEmptyRequiredFields,
   shouldShowSkipFirstUseTip,
   buildLayoutLabelMap,
   layoutBlocksToPlainText,
@@ -85,7 +86,7 @@ function dismissSkipFirstUseTip() {
 function mountSkipFirstUseTip() {
   clearSkipFirstUseTipNodes();
   if (!shouldShowSkipFirstUseTip(readSkipFirstUseSeen())) return;
-  const firstSkip = app.querySelector(".doc-skip, .skip-opt");
+  const firstSkip = app.querySelector(".field-obj .skip, .doc-skip, .skip-opt");
   if (!firstSkip) return;
   firstSkip.classList.add("has-skip-tip");
   firstSkip.insertAdjacentHTML("beforeend", renderSkipFirstUseTipBubbleHtml());
@@ -203,7 +204,18 @@ let sourceMapSession = null;
 /** @type {AbortController | null} */
 let sourceMapAbort = null;
 /** @type {{ connected: boolean, maskedKey?: string|null, model?: string, models?: {id:string,label:string}[], defaultModel?: string, studioUrl?: string }} */
-let aiStatus = { connected: false, models: [], defaultModel: "gemini-3.8-flash" };
+let aiStatus = {
+  connected: false,
+  models: [],
+  defaultModel: "gemini-3.8-flash",
+  effectiveProvider: "",
+  effectiveModel: "",
+  keySource: "",
+  readinessState: "",
+  jobState: "idle",
+};
+/** @type {{ generating: boolean, errorMessage: string | null }} */
+let clientStatusPill = { generating: false, errorMessage: null };
 
 /**
  * Entitlement for multi-template caps (from /api/health).
@@ -1247,7 +1259,7 @@ function wireMobileToolsMenuBanner() {
 /**
  * @param {string} message
  * @param {'error'|'success'|'progress'|'warn'} [kind]
- * @param {{ action?: { label: string, onClick: () => void }, note?: string, validation?: boolean, items?: string[] }} [opts]
+ * @param {{ action?: { label: string, onClick: () => void }, secondaryAction?: { label: string, onClick: () => void }, note?: string, validation?: boolean, items?: string[] }} [opts]
  */
 function showBanner(message, kind = "error", opts = {}) {
   if (!banner) return;
@@ -1264,6 +1276,10 @@ function showBanner(message, kind = "error", opts = {}) {
     opts.action?.label
       ? `<button type="button" class="banner-action" data-banner-action>${escapeHtml(opts.action.label)}</button>`
       : "";
+  const secondaryActionBtn =
+    opts.secondaryAction?.label
+      ? `<button type="button" class="banner-action banner-action-secondary" data-banner-action-secondary>${escapeHtml(opts.secondaryAction.label)}</button>`
+      : "";
   const noteHtml =
     opts.note && String(opts.note).trim()
       ? `<span class="banner-note">${escapeHtml(String(opts.note).trim())}</span>`
@@ -1278,10 +1294,10 @@ function showBanner(message, kind = "error", opts = {}) {
   } else if (kind === "success") {
     banner.classList.add("success");
     banner.removeAttribute("aria-busy");
-    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${actionBtn}${closeBtn}`;
+    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${actionBtn}${secondaryActionBtn}${closeBtn}`;
   } else if (kind === "warn") {
     banner.removeAttribute("aria-busy");
-    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${noteHtml}${actionBtn}${closeBtn}`;
+    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${noteHtml}${actionBtn}${secondaryActionBtn}${closeBtn}`;
   } else if (opts.validation && validationItems.length) {
     banner.classList.add("is-validation");
     banner.removeAttribute("aria-busy");
@@ -1293,10 +1309,10 @@ function showBanner(message, kind = "error", opts = {}) {
       <p class="banner-validation-title">${escapeHtml(model.title)}</p>
       <ul class="banner-validation-list">${list}</ul>
       <p class="banner-validation-hint">${escapeHtml(model.hint)}</p>
-    </div>${actionBtn}${closeBtn}`;
+    </div>${actionBtn}${secondaryActionBtn}${closeBtn}`;
   } else {
     banner.removeAttribute("aria-busy");
-    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${actionBtn}${closeBtn}`;
+    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${actionBtn}${secondaryActionBtn}${closeBtn}`;
   }
   banner.querySelector("[data-banner-close]")?.addEventListener("click", (ev) => {
     ev.preventDefault();
@@ -1306,6 +1322,11 @@ function showBanner(message, kind = "error", opts = {}) {
     ev.preventDefault();
     opts.action?.onClick?.();
   });
+  banner.querySelector("[data-banner-action-secondary]")?.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    opts.secondaryAction?.onClick?.();
+  });
+  syncStatusPill();
   // Only scroll for errors — success/progress must not jump the viewport.
   if (kind === "error") {
     banner.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -1611,16 +1632,20 @@ function askDialog(opts) {
   });
 }
 
-/** @returns {Promise<'clear' | 'keep' | 'abort'>} */
-function askClearAfterCreate() {
-  return askDialog({
-    title: "ล้างช่องหลังสร้างเอกสารไหม?",
-    body: "จะสร้างและดาวน์โหลดไฟล์ก่อน จากนั้นเลือกได้ว่าจะล้างช่องที่กรอกไว้หรือเก็บค่าไว้กรอกต่อ (เทมเพลตยังอยู่)",
-    actions: [
-      { id: "clear", label: "สร้างและล้างช่อง", kind: "primary" },
-      { id: "keep", label: "สร้างแต่เก็บค่าไว้", kind: "secondary" },
-      { id: "abort", label: "ยกเลิก", kind: "ghost" },
-    ],
+/** Toast after download — does not block the file save. */
+function offerClearFieldsAfterDownload(onClear) {
+  showBanner(UI_LABELS.postCreateToast, "success", {
+    action: {
+      label: UI_LABELS.postCreateClear,
+      onClick: () => {
+        onClear();
+        hideBanner();
+      },
+    },
+    secondaryAction: {
+      label: UI_LABELS.postCreateKeep,
+      onClick: () => hideBanner(),
+    },
   });
 }
 
@@ -1715,6 +1740,7 @@ function markFieldError(inputSelector, name, listRef = null) {
   input.setAttribute("aria-invalid", "true");
   const field =
     input.closest(".field") ||
+    input.closest(".field-obj") ||
     input.closest(".doc-blank-wrap") ||
     input.closest(".doc-list") ||
     input.parentElement;
@@ -1761,6 +1787,7 @@ function markFieldErrorMessage(inputSelector, name, message, listRef = null) {
   if (!input) return;
   const field =
     input.closest(".field") ||
+    input.closest(".field-obj") ||
     input.closest(".doc-blank-wrap") ||
     input.closest(".doc-list") ||
     input.parentElement;
@@ -1815,6 +1842,7 @@ function validateBeforeSubmit() {
         }
       }
     } else if (f.type === "list") {
+      if (state.skip[f.name]) continue;
       const rows = state.values[f.name] || [];
       const listResult = collectMissingListValidation({
         fieldLabel,
@@ -1822,6 +1850,7 @@ function validateBeforeSubmit() {
         rows,
         rowSkip: state.rowSkip[f.name],
         labelMap,
+        listSkipped: !!state.skip[f.name],
         isEmailField: isEmailTypedField,
         emailInvalid: (raw) => !isValidEmailValue(raw),
       });
@@ -1865,6 +1894,7 @@ function validateBeforeSubmit() {
   }
 
   if (missing.length) scrollToFirstFieldError();
+  syncStatusPill();
   return missing;
 }
 
@@ -2011,10 +2041,22 @@ function clearFilledFields() {
 function skipCheckbox(fieldName, checked) {
   const id = `skip-${cssId(fieldName)}`;
   return `
-    <label class="skip-opt" for="${id}" title="${escapeAttr(UI_LABELS.skipTitle)}">
-      <input type="checkbox" id="${id}" data-skip-field="${escapeAttr(fieldName)}" ${checked ? "checked" : ""} />
-      ${escapeHtml(UI_LABELS.skip)}
+    <label class="skip skip-opt" for="${id}" title="${escapeAttr(UI_LABELS.skipTitle)}">
+      <input type="checkbox" id="${id}" data-skip-field="${escapeAttr(fieldName)}" ${checked ? "checked" : ""} aria-label="${escapeAttr(UI_LABELS.skipFieldAria)}" />
+      <span class="full">${escapeHtml(UI_LABELS.skip)}</span>
     </label>`;
+}
+
+/**
+ * Merged field-object skip control (design-form-v2).
+ * @param {string} skipAttrs raw attributes for the checkbox (data-skip-*)
+ * @param {boolean} checked
+ */
+function renderDocFieldSkipHtml(skipAttrs, checked) {
+  return `<label class="skip" title="${escapeAttr(UI_LABELS.skipTitle)}">
+    <input type="checkbox" ${skipAttrs} ${checked ? "checked" : ""} aria-label="${escapeAttr(UI_LABELS.skipFieldAria)}" />
+    <span class="full">${escapeHtml(UI_LABELS.skip)}</span>
+  </label>`;
 }
 
 function rowSkipCheckbox(listName, rowIdx, itemName, checked) {
@@ -2462,13 +2504,117 @@ function applyAiStatus(data) {
     byok: data.byok !== false,
     provider,
     effectiveProvider: data.effectiveProvider || provider,
+    effectiveModel:
+      data.effectiveModel ||
+      clientModel ||
+      data.model ||
+      data.defaultModel ||
+      "",
+    keySource: typeof data.keySource === "string" ? data.keySource : "",
+    readinessState:
+      typeof data.readinessState === "string" ? data.readinessState : "",
+    jobState: typeof data.jobState === "string" ? data.jobState : "idle",
     providerLabel:
       data.effectiveProviderLabel ||
       data.providerLabel ||
-      providerLabel(provider),
+      providerLabel(data.effectiveProvider || provider),
     entryLabel: entry?.label || "",
     providers: aiProvidersCatalog,
   };
+  syncStatusPill();
+}
+
+function normalizeStatusToken(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+function isReadinessErrorState(readinessState) {
+  const s = normalizeStatusToken(readinessState);
+  return s === "error" || s === "failed" || s === "unavailable";
+}
+
+function isReadinessReadyState(readinessState) {
+  return normalizeStatusToken(readinessState) === "ready";
+}
+
+function isJobRunningState(jobState) {
+  const s = normalizeStatusToken(jobState);
+  return s === "running" || s === "active" || s === "busy";
+}
+
+/** Provider / model suffix for the header pill (from /api/ai/status). */
+function aiStatusDetailSuffix() {
+  const prov =
+    aiStatus.providerLabel ||
+    providerLabel(aiStatus.effectiveProvider || aiStatus.provider || "");
+  const model = String(
+    aiStatus.effectiveModel || aiStatus.model || "",
+  ).trim();
+  const parts = [prov, model].filter(Boolean);
+  return parts.length ? ` · ${parts.join(" · ")}` : "";
+}
+
+function emptyFieldCountForActiveForm() {
+  if (!state.file || !state.fields?.length) return 0;
+  return countEmptyRequiredFields({
+    fields: state.fields,
+    values: state.values,
+    images: state.images,
+    skip: state.skip,
+    rowSkip: state.rowSkip,
+    labelMap: currentFieldLabelMap(),
+    isEmailField: isEmailTypedField,
+    emailInvalid: (raw) => !isValidEmailValue(raw),
+  });
+}
+
+function syncStatusPill() {
+  if (!statusText) return;
+  let base = UI_LABELS.statusReady;
+  let ok = true;
+  let bad = false;
+  let withDetail = true;
+
+  const readiness = aiStatus.readinessState;
+  const job = aiStatus.jobState;
+
+  if (clientStatusPill.errorMessage || isReadinessErrorState(readiness)) {
+    base = UI_LABELS.statusError;
+    ok = false;
+    bad = true;
+    withDetail = false;
+  } else if (isJobRunningState(job) || clientStatusPill.generating) {
+    base = UI_LABELS.statusGenerating;
+    withDetail = true;
+  } else {
+    const empty = emptyFieldCountForActiveForm();
+    if (empty > 0) {
+      base = UI_LABELS.statusEmptyFields(empty);
+      withDetail = false;
+    } else if (
+      isReadinessReadyState(readiness) &&
+      !isJobRunningState(job) &&
+      (aiStatus.connected || normalizeStatusToken(readiness) === "ready")
+    ) {
+      base = UI_LABELS.statusReady;
+      withDetail = true;
+    } else if (normalizeStatusToken(readiness) === "needs_key") {
+      base = UI_LABELS.statusNeedsKey;
+      withDetail = true;
+    } else if (!aiStatus.connected && !hasClientAiCredentials()) {
+      base = UI_LABELS.statusNeedsKey;
+      withDetail = false;
+    }
+  }
+
+  statusText.textContent =
+    withDetail && !bad ? `${base}${aiStatusDetailSuffix()}` : base;
+  if (statusDot) {
+    statusDot.classList.toggle("ok", ok);
+    statusDot.classList.toggle("bad", bad);
+  }
 }
 
 /** @type {AbortController|null} */
@@ -3209,21 +3355,11 @@ async function checkHealth() {
       await refreshAiStatus();
     }
 
-    if (statusDot) {
-      statusDot.classList.add("ok");
-      statusDot.classList.remove("bad");
-    }
-    if (statusText) {
-      statusText.textContent = aiStatus.connected
-        ? `พร้อมใช้ · ${aiStatus.providerLabel || "AI"} · ${aiStatus.model || ""}`
-        : "พร้อมใช้";
-    }
+    clientStatusPill.errorMessage = null;
+    syncStatusPill();
   } catch {
-    if (statusDot) {
-      statusDot.classList.remove("ok");
-      statusDot.classList.add("bad");
-    }
-    if (statusText) statusText.textContent = "เชื่อมต่อไม่ได้";
+    clientStatusPill.errorMessage = UI_LABELS.statusOffline;
+    syncStatusPill();
     showBanner("เซิร์ฟเวอร์ไม่ตอบสนอง — ลองรีเฟรชหน้า หรือรัน docx-form ใหม่");
   }
 }
@@ -3382,12 +3518,6 @@ function renderEmpty() {
   // Tagger entry card restored for no-template path (also reachable from form toolbar).
   app.innerHTML = `
     <div class="home-card">
-      <h1 class="headline">${escapeHtml(UI_LABELS.homeHeadline)}</h1>
-      <p class="subhead">${escapeHtml(UI_LABELS.homeSubhead)}</p>
-      <details class="home-about" open>
-        <summary>${escapeHtml(UI_LABELS.homeAboutSummary)}</summary>
-        <p class="home-about-body">${escapeHtml(UI_LABELS.homeAboutBody)}</p>
-      </details>
       <button type="button" class="dropzone dropzone-primary" id="dropzone" aria-label="${escapeAttr(UI_LABELS.dropzoneAriaUploadWord)}">
         <div class="dropzone-title">${escapeHtml(UI_LABELS.dropzoneDrag)}</div>
         <div class="dropzone-sub home-upload-limit">${escapeHtml(UI_LABELS.dropzoneOrPick)}</div>
@@ -3395,6 +3525,12 @@ function renderEmpty() {
       </button>
       <input class="sr-only" type="file" id="fileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="${escapeAttr(UI_LABELS.dropzoneAriaUploadTemplates)}" />
       <input class="sr-only" type="checkbox" id="showFullContent" ${state.showFullContent ? "checked" : ""} tabindex="-1" aria-hidden="true" />
+      <h1 class="headline home-headline-compact">${escapeHtml(UI_LABELS.homeHeadline)}</h1>
+      <p class="subhead home-subhead-compact">${escapeHtml(UI_LABELS.homeSubhead)}</p>
+      <details class="home-about">
+        <summary>${escapeHtml(UI_LABELS.homeReadMore)} — ${escapeHtml(UI_LABELS.homeAboutSummary)}</summary>
+        <p class="home-about-body">${escapeHtml(UI_LABELS.homeAboutBody)}</p>
+      </details>
       <section class="tagger-entry-card home-secondary-card" aria-labelledby="taggerEntryTitle">
         <h2 class="tagger-entry-title" id="taggerEntryTitle">${escapeHtml(UI_LABELS.noTemplateTitle)}</h2>
         <p class="tagger-entry-sub">${escapeHtml(UI_LABELS.noTemplateDesc)}</p>
@@ -4410,13 +4546,13 @@ function renderTaggerWorkspace() {
     ? `คีย์「${getClientAiLabel() || aiStatus.entryLabel || "AI"}」· ${aiStatus.providerLabel || providerLabel(getClientAiProvider())} · ${aiStatus.model || getClientAiModel() || ""} — เลือก provider / โมเดล / คีย์`
     : "ใส่ AI API key ของคุณ (หลายเจ้าได้ · เก็บในเบราว์เซอร์)";
   const taggerAiKeyLabel = taggerAiOn
-    ? `AI · ${escapeHtml(getClientAiLabel() || aiStatus.providerLabel || String(aiStatus.model || getClientAiModel() || "พร้อม").replace(/^gemini-/i, ""))}`
-    : "เลือก model";
+    ? escapeHtml(UI_LABELS.manageAiKeys)
+    : escapeHtml(UI_LABELS.putAiKey);
   const taggerAiDrafting = !!s.aiDrafting;
   const taggerAiKeyDisabled = s.busy || taggerAiDrafting ? "disabled" : "";
   const taggerAiDraftLabel = taggerAiDrafting
     ? `<span class="btn-spinner" aria-hidden="true"></span><span>AI กำลังอ่านเอกสาร…</span>`
-    : "AI ช่วยดราฟ";
+    : escapeHtml(UI_LABELS.aiSuggestTags);
   const taggerAiDraftTitle = taggerAiDrafting
     ? "กำลังรอโมเดลอ่านทั้งไฟล์และเสนอจุดแท็ก — อาจใช้เวลาสักครู่"
     : "ส่งเอกสารเต็มให้ AI อ่านแล้วตัดสินใจจุดที่เป็นตัวแปรเอง — ระบบจับคู่ label/ค่ากับข้อความจริง · ใช้คีย์/โมเดลที่เลือกไว้";
@@ -10259,7 +10395,7 @@ function renderForm() {
     </div>`;
 
   const aiBtnLabel = aiStatus.connected
-    ? `${escapeHtml(UI_LABELS.aiConnectedPrefix)}${escapeHtml(getClientAiLabel() || aiStatus.providerLabel || String(aiStatus.model || UI_LABELS.aiReadyFallback).replace(/^gemini-/i, ""))}`
+    ? escapeHtml(UI_LABELS.manageAiKeys)
     : escapeHtml(UI_LABELS.putAiKey);
   const attachLabel = isMultiMode()
     ? UI_LABELS.attachSourceMulti
@@ -10276,13 +10412,13 @@ function renderForm() {
     <div class="file-chip">
       <span class="file-meta">${escapeHtml(summaryText(state.fields))}${isMultiMode() ? escapeHtml(UI_LABELS.multiMetaHint) : ""}</span>
       <div class="file-chip-actions file-chip-actions-desktop">
-        <button type="button" class="btn-secondary btn-compact ${aiStatus.connected ? "is-ai-on" : ""}" id="googleAiBtn" title="${aiStatus.connected ? `คีย์「${getClientAiLabel() || aiStatus.entryLabel || "AI"}」· ${aiStatus.providerLabel || providerLabel(getClientAiProvider())} · ${aiStatus.model || ""} — จัดการคีย์` : "ใส่ AI API key ของคุณ (หลายเจ้าได้ · เก็บในเบราว์เซอร์)"}">
+        <button type="button" class="btn-secondary btn-compact ${aiStatus.connected ? "is-ai-on" : ""}" id="googleAiBtn" title="${aiStatus.connected ? `คีย์「${getClientAiLabel() || aiStatus.entryLabel || "AI"}」· ${aiStatus.providerLabel || providerLabel(getClientAiProvider())} · ${aiStatus.model || ""} — ${escapeAttr(UI_LABELS.manageAiKeys)}` : escapeAttr(UI_LABELS.putAiKey)}">
           ${aiBtnLabel}
         </button>
         <button type="button" class="btn-secondary btn-compact" id="attachSource" ${aiStatus.connected ? "" : "disabled"} title="${escapeAttr(attachTitle)}">${escapeHtml(attachLabel)}</button>
         <input class="sr-only" type="file" id="attachSourceInput" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple aria-label="${escapeAttr(UI_LABELS.attachSourceInputAria)}" />
-        <button type="button" class="btn-secondary btn-compact" id="exportJson" title="${escapeAttr(UI_LABELS.exportJsonTitle)}">${escapeHtml(UI_LABELS.exportJson)}</button>
         <button type="button" class="btn-secondary btn-compact" id="importJson" title="${escapeAttr(UI_LABELS.importJsonTitle)}">${escapeHtml(UI_LABELS.importJson)}</button>
+        <button type="button" class="btn-secondary btn-compact btn-export-json" id="exportJson" title="${escapeAttr(UI_LABELS.exportJsonTitle)}">${escapeHtml(UI_LABELS.exportJson)}</button>
         <input class="sr-only" type="file" id="importJsonInput" accept="application/json,.json" aria-label="${escapeAttr(UI_LABELS.importJsonTitle)}" />
         <input class="sr-only" type="file" id="addTemplateInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="${escapeAttr(UI_LABELS.addTemplateInputAria)}" />
         <button type="button" class="btn-secondary btn-compact" id="openTaggerFromForm" title="${escapeAttr(UI_LABELS.createTemplateTitle)}">${escapeHtml(UI_LABELS.createTemplate)}</button>
@@ -10407,8 +10543,9 @@ function renderForm() {
     document.getElementById("goHomeBtn")?.click();
   });
   mountSkipFirstUseTip();
+  syncStatusPill();
   // First interaction with any skip checkbox dismisses the tip for later visits.
-  app.querySelector(".doc-skip input, .skip-opt input")?.addEventListener(
+  app.querySelector(".field-obj .skip input, .doc-skip input, .skip-opt input")?.addEventListener(
     "change",
     () => dismissSkipFirstUseTip(),
     { once: true },
@@ -11876,14 +12013,9 @@ function renderDocBoolControl({
     chipsHtml = `<span class="bool-chip bool-chip-single ${active ? "is-active" : ""} ${only === "·" ? "is-empty" : ""}" aria-hidden="true">${escapeHtml(only)}</span>`;
   }
 
-  const skipHtml = skipAttrs
-    ? `<label class="doc-skip doc-skip-compact" title="ข้าม — ติ๊กออกเพื่อแก้ค่า">
-        <input type="checkbox" ${skipAttrs} ${skipped ? "checked" : ""} />
-        <span>ข้าม</span>
-      </label>`
-    : "";
+  const skipHtml = skipAttrs ? renderDocFieldSkipHtml(skipAttrs, skipped) : "";
 
-  return `<span class="doc-blank-wrap doc-bool-wrap ${skipped ? "is-skipped" : ""} ${checked ? "is-on" : "is-off"}">
+  return `<span class="field-obj doc-field-obj doc-bool-wrap ${skipped ? "skipped is-skipped" : ""} ${checked ? "is-on" : "is-off"}">
     <label class="bool-opt doc-bool-opt" title="${escapeAttr(tip)}">
       <input type="checkbox" ${inputAttrs}
         ${checked ? "checked" : ""} ${skipped ? "disabled" : ""}
@@ -12058,17 +12190,14 @@ function renderInlineImageControl(name, opts = {}) {
       <span class="doc-image-drop-sub">${escapeHtml(UI_LABELS.imagePickButton)}</span>`;
   }
   const showLabel = opts.showLabel !== false;
-  return `<span class="doc-blank-wrap doc-blank-image-wrap ${skipped ? "is-skipped" : ""}" data-image-field="${escapeAttr(name)}">
+  return `<span class="field-obj doc-field-obj doc-blank-image-wrap ${skipped ? "skipped is-skipped" : ""}" data-image-field="${escapeAttr(name)}">
     ${showLabel ? `<span class="doc-image-inline-label">${escapeHtml(label)}:</span>` : ""}
     <div class="image-box doc-image-inline image-drop" tabindex="0" role="button" aria-label="${escapeAttr(UI_LABELS.imagePickButton + " — " + label)}" ${skipped ? 'aria-disabled="true"' : ""}>
       ${body}
       <button type="button" class="sr-only pick-image" tabindex="-1" ${skipped ? "disabled" : ""}>${escapeHtml(UI_LABELS.imagePickButton)}</button>
       <input class="sr-only image-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp,.png,.jpg,.jpeg,.gif,.webp" ${skipped ? "disabled" : ""} />
     </div>
-    <label class="doc-skip" title="${escapeAttr(UI_LABELS.skipTitle)}">
-      <input type="checkbox" data-skip-field="${escapeAttr(name)}" ${skipped ? "checked" : ""} />
-      ${escapeHtml(UI_LABELS.skip)}
-    </label>
+    ${renderDocFieldSkipHtml(`data-skip-field="${escapeAttr(name)}"`, skipped)}
   </span>`;
 }
 
@@ -12100,19 +12229,16 @@ function renderInlineBlank(name) {
   }
 
   const val = state.values[name] ?? "";
-  return `<span class="doc-blank-wrap ${skipped ? "is-skipped" : ""} ${shouldUseTextarea(val) ? "is-multiline" : ""}">
+  return `<span class="field-obj doc-field-obj ${skipped ? "skipped is-skipped" : ""} ${shouldUseTextarea(val) ? "is-multiline" : ""}">
     ${renderTextValueControl({
       value: val,
-      className: "doc-blank",
+      className: "fi doc-blank",
       attrs: `data-doc-field="${escapeAttr(name)}" name="${escapeAttr(name)}"`,
       placeholder: formatExamplePlaceholder(label),
       disabled: skipped,
       ariaLabel: label,
     })}
-    <label class="doc-skip" title="${escapeAttr(UI_LABELS.skipTitle)}">
-      <input type="checkbox" data-skip-field="${escapeAttr(name)}" ${skipped ? "checked" : ""} />
-      ${escapeHtml(UI_LABELS.skip)}
-    </label>
+    ${renderDocFieldSkipHtml(`data-skip-field="${escapeAttr(name)}"`, skipped)}
   </span>`;
 }
 
@@ -12161,19 +12287,17 @@ function renderListCellControl(listName, row, idx, item, itemField, displayOverr
   }
   const cellVal = row[item] ?? "";
   const cellLabel = String(displayOverride || "").trim() || itemFieldLabel(itemField) || item;
-  return `<span class="doc-blank-wrap doc-table-cell-wrap ${itemSkipped ? "is-skipped" : ""} ${shouldUseTextarea(cellVal) ? "is-multiline" : ""}">
+  const skipAttrs = `data-skip-list="${escapeAttr(listName)}" data-skip-row="${idx}" data-skip-item="${escapeAttr(item)}"`;
+  return `<span class="field-obj doc-field-obj doc-table-cell-wrap ${itemSkipped ? "skipped is-skipped" : ""} ${shouldUseTextarea(cellVal) ? "is-multiline" : ""}">
     ${renderTextValueControl({
       value: cellVal,
-      className: "doc-blank doc-table-input",
+      className: "fi doc-blank doc-table-input",
       attrs: `data-list="${escapeAttr(listName)}" data-row="${idx}" data-item="${escapeAttr(item)}"`,
       placeholder: formatExamplePlaceholder(cellLabel),
       disabled: itemSkipped,
       ariaLabel: cellLabel,
     })}
-    <label class="doc-skip doc-skip-compact" title="${escapeAttr(UI_LABELS.skipTitle)}">
-      <input type="checkbox" data-skip-list="${escapeAttr(listName)}" data-skip-row="${idx}" data-skip-item="${escapeAttr(item)}" ${itemSkipped ? "checked" : ""} />
-      <span>${escapeHtml(UI_LABELS.skip)}</span>
-    </label>
+    ${renderDocFieldSkipHtml(skipAttrs, itemSkipped)}
   </span>`;
 }
 
@@ -12702,6 +12826,7 @@ function wireFieldEvents() {
         }
       }
       scheduleSaveDraft();
+      syncStatusPill();
     });
   });
 
@@ -12729,6 +12854,7 @@ function wireFieldEvents() {
         if (!still.length) hideBanner();
       }
       scheduleSaveDraft();
+      syncStatusPill();
     });
   });
 
@@ -12966,6 +13092,7 @@ function missingFieldsForSlot(slot) {
     } else if (f.type === "image") {
       if (!slot.images[f.name]) missing.push(`${slot.filename}: ${fieldLabel}`);
     } else if (f.type === "list") {
+      if (slot.skip[f.name]) continue;
       const rows = slot.values[f.name] || [];
       const listResult = collectMissingListValidation({
         fieldLabel,
@@ -12973,6 +13100,7 @@ function missingFieldsForSlot(slot) {
         rows,
         rowSkip: slot.rowSkip[f.name],
         labelMap,
+        listSkipped: !!slot.skip[f.name],
       });
       for (const label of listResult.missing) {
         missing.push(`${slot.filename}: ${label}`);
@@ -13009,14 +13137,13 @@ async function createAllTemplatesZip() {
     return;
   }
 
-  const choice = await askClearAfterCreate();
-  if (choice === "abort") return;
-
   const btn = /** @type {HTMLButtonElement | null} */ (document.getElementById("submitBtn"));
   if (btn) {
     btn.disabled = true;
     btn.textContent = "กำลังสร้างทั้งหมด…";
   }
+  clientStatusPill.generating = true;
+  syncStatusPill();
   showBanner(`กำลังสร้าง ${multiSlots.length} เอกสารจากค่าบนหน้าจอ…`, "progress");
   app.setAttribute("aria-busy", "true");
 
@@ -13060,24 +13187,39 @@ async function createAllTemplatesZip() {
       URL.revokeObjectURL(url);
     }
     const okN = (data.results || []).filter((r) => r.ok).length;
-    if (choice === "clear") {
-      for (const slot of multiSlots) {
-        applySlotToState(slot);
-        clearFilledFields();
-        persistActiveSlot();
-      }
-      const active = multiSlots.find((s) => s.id === multiActiveId) || multiSlots[0];
-      if (active) applySlotToState(active);
-      renderForm();
-      showBanner(`ดาวน์โหลด ZIP แล้ว · สำเร็จ ${okN}/${multiSlots.length} และล้างช่องแล้ว`, "success");
-    } else {
-      scheduleSaveDraft();
-      showBanner(`ดาวน์โหลด ZIP แล้ว · สำเร็จ ${okN}/${multiSlots.length}`, "success");
-    }
-    setTimeout(() => showBanner(""), 3200);
+    scheduleSaveDraft();
+    showBanner(
+      `${UI_LABELS.postCreateToast} · สำเร็จ ${okN}/${multiSlots.length}`,
+      "success",
+      {
+        secondaryAction: {
+          label: UI_LABELS.postCreateKeep,
+          onClick: () => hideBanner(),
+        },
+        action: {
+          label: UI_LABELS.postCreateClear,
+          onClick: () => {
+            for (const slot of multiSlots) {
+              applySlotToState(slot);
+              clearFilledFields();
+              persistActiveSlot();
+            }
+            const active =
+              multiSlots.find((s) => s.id === multiActiveId) || multiSlots[0];
+            if (active) applySlotToState(active);
+            renderForm();
+            hideBanner();
+          },
+        },
+      },
+    );
   } catch {
+    clientStatusPill.errorMessage = UI_LABELS.statusError;
     showBanner("เชื่อมต่อเซิร์ฟเวอร์ไม่ได้");
   } finally {
+    clientStatusPill.generating = false;
+    clientStatusPill.errorMessage = null;
+    syncStatusPill();
     app.removeAttribute("aria-busy");
     if (btn) {
       btn.disabled = false;
@@ -13106,14 +13248,14 @@ async function onSubmit(e) {
     return;
   }
 
-  const choice = await askClearAfterCreate();
-  if (choice === "abort") return;
-
   const btn = /** @type {HTMLButtonElement | null} */ (document.getElementById("submitBtn"));
   if (btn) {
     btn.disabled = true;
     btn.textContent = "กำลังสร้าง…";
   }
+  clientStatusPill.errorMessage = null;
+  clientStatusPill.generating = true;
+  syncStatusPill();
   showBanner("");
 
   const values = buildValuesPayload();
@@ -13136,6 +13278,8 @@ async function onSubmit(e) {
       } catch {
         /* ignore */
       }
+      clientStatusPill.errorMessage = UI_LABELS.statusError;
+      syncStatusPill();
       showBanner(msg);
       return;
     }
@@ -13155,20 +13299,19 @@ async function onSubmit(e) {
     a.remove();
     URL.revokeObjectURL(url);
 
-    if (choice === "clear") {
+    persistActiveSlot();
+    scheduleSaveDraft();
+    offerClearFieldsAfterDownload(() => {
       clearFilledFields();
       persistActiveSlot();
       renderForm();
-      showBanner("ดาวน์โหลดแล้ว และล้างช่องเรียบร้อย", "success");
-    } else {
-      persistActiveSlot();
-      scheduleSaveDraft();
-      showBanner("ดาวน์โหลดเอกสารแล้ว — เก็บค่าที่กรอกไว้", "success");
-    }
-    setTimeout(() => showBanner(""), 2800);
+    });
   } catch {
+    clientStatusPill.errorMessage = UI_LABELS.statusError;
     showBanner("เชื่อมต่อเซิร์ฟเวอร์ไม่ได้");
   } finally {
+    clientStatusPill.generating = false;
+    syncStatusPill();
     if (btn) {
       btn.disabled = false;
       btn.textContent = isMultiMode() ? "สร้างเอกสาร…" : "สร้างเอกสาร";

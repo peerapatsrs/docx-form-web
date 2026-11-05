@@ -380,15 +380,27 @@ export default function AccountPage() {
           </div>
         </header>
 
-        {error ? (
-          <p className="auth-error" role="alert">
-            {error}
-          </p>
-        ) : null}
-        {ok ? (
-          <p className="auth-ok" role="status">
-            {ok}
-          </p>
+        {error || ok ? (
+          <div
+            className="account-flash"
+            role={error ? "alert" : "status"}
+            aria-live="polite"
+          >
+            <p className={error ? "auth-error account-flash-msg" : "auth-ok account-flash-msg"}>
+              {error || ok}
+            </p>
+            <button
+              type="button"
+              className="account-flash-dismiss"
+              aria-label="ปิดข้อความ"
+              onClick={() => {
+                setError("");
+                setOk("");
+              }}
+            >
+              ×
+            </button>
+          </div>
         ) : null}
 
         <section className="account-panel">
@@ -589,7 +601,7 @@ export default function AccountPage() {
                         disabled={busy === `sess-${s.id}`}
                         onClick={() => void revokeOne(s)}
                       >
-                        ปิด
+                        ออกจากเซสชัน
                       </button>
                     ) : (
                       <span className="account-badge is-ok">ปัจจุบัน</span>

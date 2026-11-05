@@ -60,6 +60,45 @@ export function getAiJob(jobId: string): AiJobRecord | null {
   return job ? publicAiJob(job) : null;
 }
 
+export type AiJobActivitySummary = {
+  jobState: "idle" | "queued" | "running" | "error";
+  activeJobId: string | null;
+  activeJobKind: string | null;
+  activeJobMessage: string | null;
+};
+
+/** Latest in-flight or failed job for the session user (for status pill / polling). */
+export function summarizeAiJobsForUser(
+  ownerUserId: string | null | undefined,
+): AiJobActivitySummary {
+  pruneOldJobs();
+  const uid = String(ownerUserId || "").trim();
+  let best: InternalJob | null = null;
+  for (const job of jobs.values()) {
+    if (uid && job.ownerUserId && job.ownerUserId !== uid) continue;
+    if (!uid && job.ownerUserId) continue;
+    if (job.status !== "queued" && job.status !== "running" && job.status !== "error") {
+      continue;
+    }
+    if (!best || job.updatedAt > best.updatedAt) best = job;
+  }
+  if (!best) {
+    return {
+      jobState: "idle",
+      activeJobId: null,
+      activeJobKind: null,
+      activeJobMessage: null,
+    };
+  }
+  const jobState = best.status as AiJobActivitySummary["jobState"];
+  return {
+    jobState,
+    activeJobId: best.id,
+    activeJobKind: best.kind,
+    activeJobMessage: best.progress?.message || best.error || null,
+  };
+}
+
 export function cancelAiJob(jobId: string, ownerUserId?: string | null): boolean {
   const job = jobs.get(String(jobId || "").trim());
   if (!job) return false;

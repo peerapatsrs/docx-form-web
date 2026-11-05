@@ -50,7 +50,7 @@ async function defaultQuery<T>(
  * works without a prior OAuth sign-in. Idempotent (safe to rerun).
  *
  * Same enablement gate as the dev-auth plugin (`isDevAuthEnabled`).
- * Skips when disabled, when production without DEV_AUTH, or when no
+ * Skips when disabled, in production, or when no
  * email is configured via DEV_AUTH_DEFAULT_EMAIL / SUPERADMIN_EMAILS.
  * Relies on login-as (no password); never logs credentials.
  */

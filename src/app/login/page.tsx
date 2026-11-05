@@ -9,6 +9,7 @@ import {
 } from "@/components/AuthIcons";
 import { BrandLogo, BRAND_NAME } from "@/components/BrandLogo";
 import { resolveDevAutoLoginUser } from "@/lib/dev-auth-auto-login";
+import { isDevAuthClientIncluded } from "@/lib/dev-auth-flag";
 type ProviderInfo = { id: string; label: string };
 
 type DevUser = {
@@ -20,9 +21,7 @@ type DevUser = {
   banned?: boolean;
 };
 
-const INCLUDE_DEV_AUTH_CLIENT =
-  process.env.NODE_ENV !== "production" ||
-  process.env.NEXT_PUBLIC_DEV_AUTH === "1";
+const INCLUDE_DEV_AUTH_CLIENT = isDevAuthClientIncluded();
 
 const PROVIDER_LABELS: Record<string, string> = {
   google: "Google",

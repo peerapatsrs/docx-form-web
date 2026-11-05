@@ -59,10 +59,10 @@ function check(name, fn) {
 
 console.log("dev-auth-unit-test");
 
-await check("isDevAuthEnabled respects DEV_AUTH=1 in production NODE_ENV", async () => {
+await check("isDevAuthEnabled stays off in production even when DEV_AUTH=1", async () => {
   setDevAuthEnv({ NODE_ENV: "production", DEV_AUTH: "1" });
   const { isDevAuthEnabled } = await loadFlagFresh();
-  assert.equal(isDevAuthEnabled(), true);
+  assert.equal(isDevAuthEnabled(), false);
 });
 
 await check("isDevAuthEnabled stays off in production without DEV_AUTH", async () => {
@@ -178,13 +178,13 @@ await check("importing/calling factory does not open auth pool", async () => {
   });
 });
 
-await check("production + DEV_AUTH includes plugin factory result like auth.ts", async () => {
+await check("production + DEV_AUTH omits plugin like auth.ts", async () => {
   setDevAuthEnv({ NODE_ENV: "production", DEV_AUTH: "1" });
   const { isDevAuthEnabled } = await loadFlagFresh();
   const { devAuthPlugin } = await import("../src/server/dev-auth-plugin.ts");
   const plugins = isDevAuthEnabled() ? [devAuthPlugin()] : [];
-  assert.equal(plugins.length, 1);
-  assert.equal(plugins[0].id, "dev-auth");
+  assert.equal(plugins.length, 0);
+  assert.equal(typeof devAuthPlugin, "function");
 });
 
 await check("production without DEV_AUTH omits plugin", async () => {

@@ -108,24 +108,25 @@ export function AuthBar() {
   const label = user.name || user.email || "บัญชี";
   const paid = isPaidSessionUser(user);
   const planLabel = planBadgeLabel(user);
+  const accountTitle = paid
+    ? "บัญชี · พาสคีย์ · แผนจ่ายแล้ว"
+    : "บัญชี · พาสคีย์ · แผนฟรี";
 
   return (
     <div className="auth-bar">
-      <ProfileAvatar
-        image={user.image}
-        name={user.name}
-        email={user.email}
-        size={28}
-      />
-      <Link className="auth-bar-name" href="/account" title="บัญชี · พาสคีย์ · แผน">
-        {label}
-      </Link>
-      <Link
-        className={`auth-bar-plan ${paid ? "is-pro" : ""}`}
-        href="/account"
-        title={paid ? "แผนจ่ายแล้ว — ดูโควตาที่บัญชี" : "แผนฟรี — ดูโควตาที่บัญชี"}
-      >
-        {planLabel}
+      <Link className="auth-bar-account" href="/account" title={accountTitle}>
+        <ProfileAvatar
+          image={user.image}
+          name={user.name}
+          email={user.email}
+          size={28}
+        />
+        <span className="auth-bar-account-text">
+          <span className="auth-bar-name">{label}</span>
+          <span className={`auth-bar-plan-inline ${paid ? "is-pro" : ""}`}>
+            {planLabel}
+          </span>
+        </span>
       </Link>
       {isSuperAdmin(user) ? (
         <Link className="auth-bar-btn auth-bar-ghost" href="/admin">

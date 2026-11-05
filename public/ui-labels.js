@@ -9,14 +9,27 @@
 export const UI_LABELS = Object.freeze({
   // Shared controls
   skip: "ข้าม",
+  skipFieldAria: "ข้ามฟิลด์นี้ — ไม่ใส่ค่าในเอกสาร",
   skipTitle: "ข้าม — ไม่ใส่ค่าในเอกสารที่สร้าง",
+  a11ySkipToContent: "ข้ามไปยังเนื้อหาหลัก",
   skipFirstUseTip:
     "ข้าม = ไม่ใส่ค่าในเอกสารที่สร้าง (ช่องจะว่างตามเทมเพลต) — ใช้เมื่อฟิลด์นั้นไม่จำเป็นในรอบนี้",
   skipFirstUseStorageKey: "docx-form-skip-tip-seen-v1",
 
   // Validation banner
   validationTitle: (count) => `ยังมีช่องที่ยังไม่ได้กรอก (${count})`,
-  validationHint: "กรอกให้ครบ หรือติ๊ก “ข้าม” ก่อนสร้างเอกสาร",
+  validationHint: "กรอกให้ครบ หรือติ๊ก “ข้าม” — ช่องที่ข้ามแล้วไม่บังคับ",
+  validationSoftEmpty: (n) => `ยังว่าง ${n} ช่อง (ข้ามได้)`,
+  validationAllSkippedReady: "ติ๊กข้ามแล้ว — พร้อมสร้างได้",
+  statusReady: "พร้อมใช้",
+  statusGenerating: "กำลังสร้าง",
+  statusEmptyFields: (n) => `มีช่องว่าง ${n}`,
+  statusError: "ข้อผิดพลาด",
+  statusNeedsKey: "ต้องใส่คีย์ AI",
+  statusOffline: "เชื่อมต่อไม่ได้",
+  postCreateToast: "ดาวน์โหลดแล้ว — ล้างช่องที่กรอกไหม?",
+  postCreateKeep: "เก็บค่าไว้",
+  postCreateClear: "ล้างช่อง",
   validationListMinRows: "ต้องมีอย่างน้อย 1 แถว",
   /** Banner item when a required table/list has no filled row (seeded empty rows do not count). */
   validationListNeedFilledRow: "กรอกอย่างน้อย 1 แถว",
@@ -61,7 +74,9 @@ export const UI_LABELS = Object.freeze({
   exportJsonTitle: "ส่งออกค่าที่กรอกเป็น JSON",
   importJson: "นำเข้า JSON",
   importJsonTitle: "นำเข้าค่าจากไฟล์ JSON",
-  putAiKey: "ใส่ AI key",
+  putAiKey: "ตั้งค่าคีย์ AI",
+  manageAiKeys: "ตั้งค่าคีย์ AI",
+  aiSuggestTags: "แนะนำแท็กจากเอกสาร",
   aiReadyFallback: "พร้อม",
   aiConnectedPrefix: "AI · ",
   attachSource: "แนบเอกสารต้นทาง",
@@ -75,8 +90,8 @@ export const UI_LABELS = Object.freeze({
   addTemplateInputAria: "เลือกไฟล์เทมเพลต Word เพิ่ม",
   homeLink: "← หน้าหลัก",
   homeLinkTitle: "กลับไปหน้าอัปโหลดเทมเพลต",
-  createTemplate: "สร้างเทมเพลต",
-  createTemplateTitle: "สร้างเทมเพลตใหม่จากเอกสารตัวอย่าง",
+  createTemplate: "สร้างเทมเพลตจากเอกสาร",
+  createTemplateTitle: "สร้างเทมเพลตจากเอกสารตัวอย่าง",
   createDoc: "สร้างเอกสาร",
   createDocMulti: "สร้างเอกสาร…",
   saveDraft: "บันทึกดราฟ",
@@ -89,9 +104,10 @@ export const UI_LABELS = Object.freeze({
     " · หลายเทมเพลต: แนบต้นทางเพื่อแมป JSON ลงจอ แล้วกดสร้างเลือกไฟล์เดียวหรือทั้งหมด",
 
   // Home (mockup 01 / prototype-screens.html)
-  homeHeadline: "docx-form — กรอกแบบฟอร์มเอกสาร Word จากเทมเพลต .docx",
+  homeHeadline: "กรอกเอกสาร Word จากเทมเพลต .docx",
   homeSubhead:
-    "อัปโหลดเทมเพลตที่มีแท็ก {{ชื่อฟิลด์}} แล้วกรอกบนหน้าเว็บ · รองรับหลายเทมเพลต · JSON · AI (BYOK)",
+    "อัปโหลดไฟล์ที่มี {{ตัวแปร}} แล้วกรอกบนหน้าเว็บ — หลายไฟล์ · JSON · AI (BYOK)",
+  homeReadMore: "อ่านเพิ่ม",
   homeAboutSummary: "เกี่ยวกับ docx-form",
   homeAboutBody:
     "เว็บแอปสร้างเอกสารจากเทมเพลต Microsoft Word (.docx) อ่านตัวแปรแล้วสร้างฟอร์มให้กรอก รองรับดราฟ นำเข้า/ส่งออก JSON และ AI แมปจากไฟล์ต้นทาง",
@@ -306,6 +322,10 @@ export function collectMissingListValidation(opts) {
   const labelMap = opts?.labelMap || null;
   const needRowNote =
     UI_LABELS.validationListNeedFilledRow || UI_LABELS.validationListMinRows;
+
+  if (opts?.listSkipped) {
+    return { missing: [], mode: "cells" };
+  }
 
   if (!listHasFilledRow(rows, itemFields)) {
     return {
@@ -528,4 +548,61 @@ export function layoutBlocksToPlainText(blocks, fileContent = "") {
  */
 export function listDisplayName(listName, field, labelMap) {
   return fieldDisplayLabel(field || { name: listName }, labelMap, listName);
+}
+
+/**
+ * Count required cells still empty (skipped fields/rows excluded). Pure — for status pill + tests.
+ * @param {{
+ *   fields: LabelField[],
+ *   values: Record<string, unknown>,
+ *   images?: Record<string, unknown>,
+ *   skip?: Record<string, boolean>,
+ *   rowSkip?: Record<string, Record<number, Record<string, boolean>>>,
+ *   labelMap?: Map<string, string> | Record<string, string> | null,
+ *   isEmailField?: (name: string, field: LabelField) => boolean,
+ *   emailInvalid?: (raw: string) => boolean,
+ * }} snap
+ */
+export function countEmptyRequiredFields(snap) {
+  const fields = Array.isArray(snap?.fields) ? snap.fields : [];
+  const values = snap?.values && typeof snap.values === "object" ? snap.values : {};
+  const images = snap?.images && typeof snap.images === "object" ? snap.images : {};
+  const skip = snap?.skip && typeof snap.skip === "object" ? snap.skip : {};
+  const rowSkip = snap?.rowSkip && typeof snap.rowSkip === "object" ? snap.rowSkip : {};
+  const labelMap = snap?.labelMap || null;
+
+  /** @type {string[]} */
+  const missing = [];
+  for (const f of fields) {
+    if (!f || skip[f.name]) continue;
+    const fieldLabel = fieldDisplayLabel(f, labelMap, f.name);
+    if (f.type === "text" || f.type === "email") {
+      const raw = String(values[f.name] ?? "").trim();
+      if (!raw) missing.push(fieldLabel);
+      else if (
+        typeof snap.isEmailField === "function" &&
+        typeof snap.emailInvalid === "function" &&
+        snap.isEmailField(f.name, f) &&
+        snap.emailInvalid(raw)
+      ) {
+        missing.push(fieldLabel);
+      }
+    } else if (f.type === "image") {
+      if (!images[f.name]) missing.push(fieldLabel);
+    } else if (f.type === "list") {
+      const rows = values[f.name];
+      const listResult = collectMissingListValidation({
+        fieldLabel,
+        itemFields: f.itemFields,
+        rows,
+        rowSkip: rowSkip[f.name],
+        labelMap,
+        listSkipped: false,
+        isEmailField: snap.isEmailField,
+        emailInvalid: snap.emailInvalid,
+      });
+      missing.push(...listResult.missing);
+    }
+  }
+  return missing.length;
 }

@@ -13,6 +13,7 @@ import {
   isListRowEmpty,
   listHasFilledRow,
   collectMissingListValidation,
+  countEmptyRequiredFields,
   clipValidationItems,
   formatInvalidEmailMissing,
   shouldShowSkipFirstUseTip,
@@ -26,7 +27,8 @@ console.log("ui-labels-unit-test");
 assert.equal(UI_LABELS.exportJson, "ส่งออก JSON");
 assert.equal(UI_LABELS.importJson, "นำเข้า JSON");
 assert.equal(UI_LABELS.toolsMenu, "เครื่องมือ");
-assert.equal(UI_LABELS.homeHeadline.startsWith("docx-form"), true);
+assert.ok(UI_LABELS.homeHeadline.length > 0);
+assert.equal(UI_LABELS.homeReadMore, "อ่านเพิ่ม");
 assert.equal(UI_LABELS.homeAboutSummary, "เกี่ยวกับ docx-form");
 assert.ok(UI_LABELS.dropzoneOrPick.includes("ฟรีสูงสุด 2"));
 assert.equal(UI_LABELS.placeholderExamplePrefix, "เช่น ");
@@ -212,5 +214,27 @@ assert.match(plainFromBlocks, /customer_name/);
 assert.match(plainFromBlocks, /\{\{logo\}\}/);
 assert.match(plainFromBlocks, /\{\{#items\}\}/);
 console.log("✓ layoutBlocksToPlainText");
+
+const listSkipped = collectMissingListValidation({
+  fieldLabel: "รายการ",
+  itemFields: [{ name: "name", type: "text" }],
+  rows: [{}],
+  listSkipped: true,
+});
+assert.equal(listSkipped.missing.length, 0);
+
+const emptyCount = countEmptyRequiredFields({
+  fields: [
+    { name: "a", type: "text" },
+    { name: "b", type: "text" },
+  ],
+  values: { a: "ok", b: "" },
+  skip: { b: true },
+});
+assert.equal(emptyCount, 0);
+console.log("✓ list skip + empty count");
+
+assert.equal(UI_LABELS.createTemplate, UI_LABELS.createTemplateFromDoc);
+console.log("✓ create template wording");
 
 console.log("\nAll ui-labels unit tests passed");

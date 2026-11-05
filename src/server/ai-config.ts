@@ -336,11 +336,48 @@ export async function getGeminiModelAsync(
   }
 }
 
+export type AiReadinessState =
+  | "ready"
+  | "needs_key"
+  | "generating"
+  | "error";
+
+export type AiKeySource =
+  | "request"
+  | "vault"
+  | "server_env"
+  | "none";
+
+function deriveKeySource(opts: {
+  requestKey?: string | null;
+  keyId?: string | null;
+  connected: boolean;
+  byok: boolean;
+}): AiKeySource {
+  if (opts.requestKey && String(opts.requestKey).trim()) return "request";
+  if (opts.keyId) return "vault";
+  if (opts.connected && !opts.byok) return "server_env";
+  return "none";
+}
+
+function deriveReadinessState(opts: {
+  connected: boolean;
+  jobState: "idle" | "queued" | "running" | "error";
+}): AiReadinessState {
+  if (opts.jobState === "queued" || opts.jobState === "running") {
+    return "generating";
+  }
+  if (opts.jobState === "error") return "error";
+  return opts.connected ? "ready" : "needs_key";
+}
+
 export function geminiStatus(opts?: {
   requestKey?: string | null;
   requestModel?: string | null;
   requestProvider?: string | null;
   explicitProvider?: boolean;
+  keyId?: string | null;
+  jobState?: "idle" | "queued" | "running" | "error";
   /** Admin-configured default when file/env has none */
   adminDefaultModel?: string | null;
   adminDefaultProvider?: string | null;
@@ -373,12 +410,23 @@ export function geminiStatus(opts?: {
       ? normalizeGeminiModel(opts?.adminDefaultModel)
       : null) ||
     provider.defaultModel;
+  const connected = !!key;
+  const byok = isByokOnly();
+  const jobState = opts?.jobState ?? "idle";
+  const keySource = deriveKeySource({
+    requestKey: opts?.requestKey,
+    keyId: opts?.keyId,
+    connected,
+    byok,
+  });
+  const readinessState = deriveReadinessState({ connected, jobState });
   return {
-    connected: !!key,
-    byok: isByokOnly(),
+    connected,
+    byok,
     provider: providerId,
     effectiveProvider: providerId,
     effectiveProviderLabel: provider.label,
+    effectiveModel: model,
     adminDefaultProvider,
     providerLabel: provider.label,
     apiFamily: provider.apiFamily,
@@ -387,6 +435,9 @@ export function geminiStatus(opts?: {
     defaultModel: provider.defaultModel,
     adminDefaultModel: normalizeGeminiModel(opts?.adminDefaultModel) || null,
     maskedKey: key ? maskGeminiKey(key) : null,
+    keySource,
+    readinessState,
+    jobState,
     hasServerEnvKey: !!(
       process.env.DOCX_FORM_GEMINI_API_KEY ||
       process.env.GEMINI_API_KEY ||
@@ -399,7 +450,7 @@ export function geminiStatus(opts?: {
       String(process.env.PREMIUM_ENFORCE || "")
         .trim()
         .toLowerCase() === "true",
-    configPath: isByokOnly() ? "(browser session — not stored on server)" : CONFIG_PATH,
+    configPath: byok ? "(browser session — not stored on server)" : CONFIG_PATH,
     studioUrl: provider.docsUrl,
     docsUrl: provider.docsUrl,
     providers: listAiProvidersPublic(),

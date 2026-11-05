@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { authClient } from "@/lib/auth-client";
+import { isDevAuthClientIncluded } from "@/lib/dev-auth-flag";
 import { ProfileAvatar } from "@/components/ProfileAvatar";
 type SessionUser = {
   name?: string | null;
@@ -53,12 +54,8 @@ export function AuthBar() {
           return;
         }
 
-        // Dev-only auto sign-in. Condition uses build-time env so production
-        // bundles (without NEXT_PUBLIC_DEV_AUTH) drop this import entirely.
-        if (
-          process.env.NODE_ENV !== "production" ||
-          process.env.NEXT_PUBLIC_DEV_AUTH === "1"
-        ) {
+        // Dev-only auto sign-in — omitted from production bundles entirely.
+        if (isDevAuthClientIncluded()) {
           const { fetchDevAuthConfig, loginAsDevUser } = await import(
             "@/components/DevAuthControls"
           );

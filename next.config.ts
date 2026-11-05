@@ -5,6 +5,7 @@ import {
   VERSIONED_ASSET_CACHE_CONTROL,
   securityHeaders,
 } from "./src/lib/security-headers";
+import { LEGACY_HOME_REDIRECT_PATHS } from "./src/lib/legacy-routes";
 
 const security = Object.entries(securityHeaders()).map(([key, value]) => ({
   key,
@@ -27,6 +28,12 @@ const nextConfig: NextConfig = {
     "@better-auth/passkey",
     "@cursor/sdk",
   ],
+  async redirects() {
+    return LEGACY_HOME_REDIRECT_PATHS.flatMap((path) => [
+      { source: path, destination: "/", permanent: false },
+      { source: `${path}/`, destination: "/", permanent: false },
+    ]);
+  },
   async headers() {
     return [
       {

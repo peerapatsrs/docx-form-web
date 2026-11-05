@@ -581,12 +581,16 @@ export function createApi(options: {
       sessionUserId,
     );
     const adminDefaultProvider = adminDefaultProviderFromSettings(aiAdmin);
+    const { summarizeAiJobsForUser } = await import("./ai-jobs");
+    const jobSummary = summarizeAiJobsForUser(sessionUserId);
     return c.json(
       geminiStatus({
         requestKey: creds.apiKey,
         requestModel: creds.model,
         requestProvider: creds.provider,
         explicitProvider: requestHasExplicitAiProvider(c.req.raw),
+        keyId: creds.keyId,
+        jobState: jobSummary.jobState,
         adminDefaultModel: aiAdmin.defaultModel,
         adminDefaultProvider,
       }),

@@ -12,7 +12,7 @@ export { isDevAuthEnabled } from "@/lib/dev-auth-flag";
  * Local/dev only: pick an existing DB user and get a real session cookie
  * without going through Google OAuth.
  *
- * Enabled when DEV_AUTH=1, or automatically in non-production.
+ * Enabled in non-production when DEV_AUTH is not 0 (never in NODE_ENV=production).
  * Disable with DEV_AUTH=0.
  *
  * Module load is side-effect free: no pool open, no throwing env reads.

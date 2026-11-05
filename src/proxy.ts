@@ -10,6 +10,7 @@ import {
   buildSafeHttpsRedirectUrl,
   safeAppPathUrl,
 } from "@/lib/public-origin";
+import { isLegacyHomeRedirectPath } from "@/lib/legacy-routes";
 
 function applySecurityHeaders(response: NextResponse): NextResponse {
   const headers = securityHeaders();
@@ -82,10 +83,16 @@ export function proxy(request: NextRequest) {
 
   const { pathname } = request.nextUrl;
 
+  if (isLegacyHomeRedirectPath(pathname)) {
+    const home = new URL(safeAppPathUrl("/"));
+    home.search = request.nextUrl.search;
+    return applySecurityHeaders(NextResponse.redirect(home, 308));
+  }
+
   // Development-only Better Auth plugin paths — unavailable when disabled.
   if (pathname.startsWith("/api/auth/dev")) {
     if (!isDevAuthEnabled()) {
-      return applySecurityHeaders(new NextResponse(null, { status: 404 }));
+      return applySecurityHeaders(new NextResponse(null, { status: 403 }));
     }
   }
 

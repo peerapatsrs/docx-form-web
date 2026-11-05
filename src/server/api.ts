@@ -258,12 +258,14 @@ export function createApi(options: {
   /**
    * Public plan/quota snapshot for the guest shell (no internal diagnostics).
    * Admin limit changes are reflected here for the fill UI.
+   * `version` is package.json only — not author / AI inventory.
    */
   api.get("/entitlement", async (c) => {
     await ensureAdminSchema().catch(() => undefined);
     const ent = await canUseFeature(PremiumFeature.AiSourceMap, c.req.raw);
     const limits = await getAppLimits().catch(() => null);
     return c.json({
+      version: options.version || "0.0.0",
       premium: {
         enforce: String(process.env.PREMIUM_ENFORCE || "") === "1",
         paid: ent.entitlement.paid,

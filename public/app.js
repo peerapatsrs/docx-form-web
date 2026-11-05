@@ -3168,6 +3168,9 @@ async function checkHealth() {
     const entitlement = entitlementRes.ok
       ? await entitlementRes.json().catch(() => ({}))
       : {};
+    if (entitlement && typeof entitlement === "object" && entitlement.version) {
+      setCreditsVersion(entitlement.version);
+    }
     const premium =
       entitlement.premium && typeof entitlement.premium === "object"
         ? entitlement.premium

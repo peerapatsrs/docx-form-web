@@ -9,31 +9,70 @@ import {
   SITE_NAME,
 } from "@/lib/site-meta";
 
+type HomeClientProps = {
+  appJsSrc: string;
+  fieldNamesSrc: string;
+  versionLabel: string;
+};
+
 /** Same shell as the original docx-form Web UI — logic lives in /public/app.js */
-export function HomeClient({ appJsSrc }: { appJsSrc: string }) {
+export function HomeClient({
+  appJsSrc,
+  fieldNamesSrc,
+  versionLabel,
+}: HomeClientProps) {
   // Load after React hydration so client render does not wipe #app / status.
   // Soft nav remounts home with a fresh #app — re-run boot (app.js is a singleton).
   // Guest trips through /login must hard-navigate (see AuthBar / login foot)
   // or the shell paints without topbar/status bindings.
   useEffect(() => {
-    const w = window as Window & { __docxFormBoot?: () => void };
+    const w = window as Window & {
+      __docxFormBoot?: () => void;
+      DocxFieldNames?: unknown;
+    };
     const runBoot = () => {
       w.__docxFormBoot?.();
     };
-    const existing = document.querySelector("script[data-docx-form-app]");
-    if (existing) {
-      // Wait a frame so the remounted #app / #status exist before rebind.
-      requestAnimationFrame(() => requestAnimationFrame(runBoot));
+    const loadAppAfterFieldNames = () => {
+      // Soft remount: scripts already in DOM — just rebind the shell.
+      if (document.querySelector("script[data-docx-form-app]")) {
+        requestAnimationFrame(() => requestAnimationFrame(runBoot));
+        return;
+      }
+      const s = document.createElement("script");
+      // Module so app.js can import ./ui-labels.js; still waits for field-names.
+      s.type = "module";
+      s.src = appJsSrc;
+      s.dataset.docxFormApp = "1";
+      document.body.appendChild(s);
+    };
+
+    // Always resolve field-names.js before app.js (classic global, then module).
+    if (w.DocxFieldNames) {
+      loadAppAfterFieldNames();
       return;
     }
-    const s = document.createElement("script");
-    s.src = appJsSrc;
-    s.dataset.docxFormApp = "1";
-    document.body.appendChild(s);
-  }, [appJsSrc]);
+    const existingNames = document.querySelector(
+      "script[data-docx-field-names]",
+    ) as HTMLScriptElement | null;
+    if (existingNames) {
+      const resume = () => loadAppAfterFieldNames();
+      if (w.DocxFieldNames) resume();
+      else existingNames.addEventListener("load", resume, { once: true });
+      return;
+    }
+    const names = document.createElement("script");
+    names.src = fieldNamesSrc;
+    names.dataset.docxFieldNames = "1";
+    names.onload = () => loadAppAfterFieldNames();
+    document.body.appendChild(names);
+  }, [appJsSrc, fieldNamesSrc]);
 
   return (
     <>
+      <a className="skip-link" href="#main-content">
+        ข้ามไปยังเนื้อหาหลัก
+      </a>
       <div className="ambient" aria-hidden="true">
         <span className="orb orb-a" />
         <span className="orb orb-b" />
@@ -42,7 +81,7 @@ export function HomeClient({ appJsSrc }: { appJsSrc: string }) {
       </div>
 
       <header className="topbar">
-        <BrandLockup versionId="appVersion" />
+        <BrandLockup versionId="appVersion" versionLabel={versionLabel} />
         <div className="topbar-end">
           <AuthBar />
           <div className="status-pill" id="status">
@@ -52,12 +91,25 @@ export function HomeClient({ appJsSrc }: { appJsSrc: string }) {
         </div>
       </header>
 
-      <div id="banner" className="banner" hidden role="status" aria-live="polite" />
+      <div
+        id="banner"
+        className="banner"
+        hidden
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      />
 
-      <main className="shell">
+      <main className="shell" id="main-content" tabIndex={-1}>
         {/* Crawlable product summary — UI itself mounts into #app via app.js */}
         <section className="sr-only" aria-label={`เกี่ยวกับ ${SITE_NAME}`}>
-          <h1>{SITE_NAME} — กรอกแบบฟอร์มเอกสาร Word จากเทมเพลต .docx</h1>
+          <h1>
+            {SITE_NAME} — กรอกแบบฟอร์มเอกสาร Word จากเทมเพลต .docx
+          </h1>
+          <p>
+            อัปโหลดเทมเพลตที่มีแท็ก {"{{ชื่อฟิลด์}}"} แล้วกรอกบนหน้าเว็บ ·
+            รองรับหลายเทมเพลต · JSON · AI (BYOK)
+          </p>
           <p>{SITE_ABOUT}</p>
           <ul>
             {SITE_FEATURE_BULLETS.map((item) => (
@@ -77,7 +129,7 @@ export function HomeClient({ appJsSrc }: { appJsSrc: string }) {
         </div>
         <div className="credits-meta">
           <span className="credits-ver" id="creditsVersion">
-            v…
+            {versionLabel}
           </span>
         </div>
       </footer>

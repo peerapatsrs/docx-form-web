@@ -3379,7 +3379,7 @@ function renderEmpty() {
   document.documentElement.style.setProperty("--sticky-bar-offset", "0px");
   syncBannerContentOffset();
   // Home matches prototype mockup 01: about details + primary upload dropzone.
-  // Tagger stays reachable from the form toolbar after upload (and a secondary link).
+  // Tagger entry card restored for no-template path (also reachable from form toolbar).
   app.innerHTML = `
     <div class="home-card">
       <h1 class="headline">${escapeHtml(UI_LABELS.homeHeadline)}</h1>
@@ -3395,6 +3395,38 @@ function renderEmpty() {
       </button>
       <input class="sr-only" type="file" id="fileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="${escapeAttr(UI_LABELS.dropzoneAriaUploadTemplates)}" />
       <input class="sr-only" type="checkbox" id="showFullContent" ${state.showFullContent ? "checked" : ""} tabindex="-1" aria-hidden="true" />
+      <section class="tagger-entry-card home-secondary-card" aria-labelledby="taggerEntryTitle">
+        <h2 class="tagger-entry-title" id="taggerEntryTitle">${escapeHtml(UI_LABELS.noTemplateTitle)}</h2>
+        <p class="tagger-entry-sub">${escapeHtml(UI_LABELS.noTemplateDesc)}</p>
+        <button type="button" class="btn-secondary tagger-entry-cta" id="startTaggerMode">${escapeHtml(UI_LABELS.createTemplateFromDoc)}</button>
+        <details class="home-manual-vars">
+          <summary>${escapeHtml(UI_LABELS.manualVarsDetails)}</summary>
+          <div class="upload-tips">
+            <ul>
+              <li><span>${escapeHtml(UI_LABELS.tipKindText)}</span> <code>${escapeHtml(UI_LABELS.tipCodeText)}</code></li>
+              <li>
+                <span>${escapeHtml(UI_LABELS.tipKindBool)}</span>
+                <code>${escapeHtml(UI_LABELS.tipCodeBool)}</code>
+                <small class="tip-note">${escapeHtml(UI_LABELS.tipNoteBoolLead)} <code>?</code> ${escapeHtml(UI_LABELS.tipNoteBoolTrail)}</small>
+              </li>
+              <li>
+                <span>${escapeHtml(UI_LABELS.tipKindAuto)}</span>
+                <code>${escapeHtml(UI_LABELS.tipCodeAuto)}</code>
+                <small class="tip-note">${escapeHtml(UI_LABELS.tipNoteAuto)}</small>
+              </li>
+              <li>
+                <span>${escapeHtml(UI_LABELS.tipKindImage)}</span>
+                <code>${escapeHtml(UI_LABELS.tipCodeImage)}</code>
+                <small class="tip-note">${escapeHtml(UI_LABELS.tipNoteImage)}</small>
+              </li>
+              <li>
+                <span>${escapeHtml(UI_LABELS.tipKindListTable)}</span>
+                <code>${escapeHtml(UI_LABELS.tipCodeList)}</code>
+              </li>
+            </ul>
+          </div>
+        </details>
+      </section>
       <section class="draft-entry-panel home-draft-collapsed" id="emptyDraftPanel" aria-label="${escapeAttr(UI_LABELS.loadDraftAria)}" hidden>
         <div class="draft-entry-body" id="emptyDraftList"></div>
       </section>

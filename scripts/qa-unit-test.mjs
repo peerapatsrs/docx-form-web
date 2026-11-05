@@ -72,28 +72,6 @@ async function readDocXml(buf) {
   return zip.file("word/document.xml").async("string");
 }
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const FIX = join(__dirname, "..", "fixtures", "tag-parse");
-
-async function docxFromFixture(documentXmlName) {
-  const zip = new JSZip();
-  zip.file("[Content_Types].xml", readFileSync(join(FIX, "content-types.xml")));
-  zip.folder("_rels").file(".rels", readFileSync(join(FIX, "rels.xml")));
-  zip
-    .folder("word")
-    .file("document.xml", readFileSync(join(FIX, documentXmlName)));
-  zip
-    .folder("word")
-    .folder("_rels")
-    .file("document.xml.rels", readFileSync(join(FIX, "document.xml.rels")));
-  return Buffer.from(await zip.generateAsync({ type: "nodebuffer" }));
-}
-
-async function readDocXml(buf) {
-  const zip = await JSZip.loadAsync(buf);
-  return zip.file("word/document.xml").async("string");
-}
-
 console.log("qa-unit-test");
 
 assert.equal(fieldIdentityKey(" Name "), fieldIdentityKey("name"));

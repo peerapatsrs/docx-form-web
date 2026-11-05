@@ -10,6 +10,9 @@ type AiStatus = {
   adminDefaultModel?: string | null;
   hasServerEnvKey?: boolean;
   hasServerEnvCursorKey?: boolean;
+  effectiveProvider?: string;
+  effectiveProviderLabel?: string;
+  adminDefaultProvider?: string;
   premiumEnforce?: boolean;
   maskedKey?: string | null;
   configPath?: string;
@@ -105,6 +108,18 @@ export default function AdminAiPage() {
           <li>
             <span>PREMIUM_ENFORCE</span>
             <strong>{status?.premiumEnforce ? "เปิด" : "ปิด"}</strong>
+          </li>
+          <li>
+            <span>ผู้ให้บริการที่ใช้จริง (effective)</span>
+            <strong>
+              {status?.effectiveProviderLabel ||
+                status?.effectiveProvider ||
+                "—"}
+            </strong>
+          </li>
+          <li>
+            <span>ค่าเริ่มต้นจาก admin</span>
+            <strong>{status?.adminDefaultProvider || "google"}</strong>
           </li>
           <li>
             <span>โมเดลที่ resolve ตอนนี้</span>

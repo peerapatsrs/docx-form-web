@@ -153,16 +153,24 @@ export async function setAppLimits(
 
 export type AiAdminSettings = {
   defaultModel: string;
+  /** When unset, treated as google (Gemini) for effective-provider resolution. */
+  defaultProvider?: string;
 };
 
 export async function getAiAdminSettings(): Promise<AiAdminSettings> {
   await ensureAdminSchema();
   const pool = getAuthPool();
-  const { rows } = await pool.query<{ value: { defaultModel?: string } }>(
+  const { rows } = await pool.query<{
+    value: { defaultModel?: string; defaultProvider?: string };
+  }>(
     `SELECT value FROM app_settings WHERE key = 'ai' LIMIT 1`,
   );
   const model = String(rows[0]?.value?.defaultModel || "gemini-3.8-flash").trim();
-  return { defaultModel: model || "gemini-3.8-flash" };
+  const defaultProvider = String(rows[0]?.value?.defaultProvider || "").trim();
+  return {
+    defaultModel: model || "gemini-3.8-flash",
+    ...(defaultProvider ? { defaultProvider } : {}),
+  };
 }
 
 export async function setAiAdminSettings(
@@ -172,6 +180,7 @@ export async function setAiAdminSettings(
   const cur = await getAiAdminSettings();
   const value: AiAdminSettings = {
     defaultModel: String(next.defaultModel || cur.defaultModel).trim() || cur.defaultModel,
+    defaultProvider: String(next.defaultProvider || cur.defaultProvider || "").trim() || undefined,
   };
   const pool = getAuthPool();
   await pool.query(

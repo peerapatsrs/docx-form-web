@@ -30,6 +30,7 @@ export type AiFillOpts = {
   apiKey?: string | null;
   model?: string | null;
   fields?: FormField[];
+  signal?: AbortSignal;
 };
 
 const FILL_RULES = `Fill values from Source text. Set skip=true when unknown/empty (bool false is a real value → skip=false).
@@ -475,12 +476,14 @@ async function callCompatJson(
     apiKey: string;
     model: string;
     images: { mimeType: string; base64: string; filename: string }[];
+    signal?: AbortSignal;
   },
 ): Promise<Record<string, unknown> | null> {
   if (apiFamily === "cursor") {
     return callCursorAgentJson(prompt, {
       apiKey: opts.apiKey,
       model: opts.model,
+      signal: opts.signal,
       images: opts.images.map((img) => ({
         mimeType: img.mimeType,
         base64: img.base64,
@@ -524,6 +527,7 @@ async function fillViaCompat(
     apiKey,
     model,
     images,
+    signal: opts.signal,
   });
   return mergeAiIntoValuesJson(skeleton, parsed);
 }
@@ -554,6 +558,7 @@ async function fillBatchViaCompat(
     apiKey,
     model,
     images,
+    signal: opts.signal,
   });
 
   const out: BatchFillResultItem[] = [];

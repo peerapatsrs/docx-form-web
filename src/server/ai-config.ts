@@ -149,6 +149,62 @@ export function getRequestAiProvider(req?: Request | null): string {
   return p?.id || "google";
 }
 
+/** True when the client sent X-Ai-Provider (not the implicit google default). */
+export function requestHasExplicitAiProvider(req?: Request | null): boolean {
+  if (!req) return false;
+  return Boolean(
+    String(
+      req.headers.get("x-ai-provider") ||
+        req.headers.get("x-docx-ai-provider") ||
+        "",
+    ).trim(),
+  );
+}
+
+export function adminDefaultProviderFromSettings(settings?: {
+  defaultProvider?: string | null;
+  defaultModel?: string | null;
+}): string {
+  const explicit = String(settings?.defaultProvider || "").trim();
+  if (explicit) {
+    const p = getAiProvider(explicit);
+    if (p) return p.id;
+  }
+  return "google";
+}
+
+function providerHasUsableKey(
+  providerId: string,
+  requestKey?: string | null,
+): boolean {
+  return Boolean(resolveProviderApiKey(providerId, requestKey));
+}
+
+/**
+ * Provider for users without a working key on their chosen default:
+ * admin default when usable → else Cursor shared key → else requested.
+ */
+export function resolveEffectiveAiProvider(opts: {
+  requestProvider?: string | null;
+  explicitProvider?: boolean;
+  requestKey?: string | null;
+  adminDefaultProvider?: string | null;
+}): string {
+  const adminDefault =
+    getAiProvider(opts.adminDefaultProvider)?.id || "google";
+  const requested =
+    getAiProvider(opts.requestProvider)?.id || "google";
+  const explicit = !!opts.explicitProvider;
+  const usable = (id: string) => providerHasUsableKey(id, opts.requestKey);
+
+  if (explicit && usable(requested)) return requested;
+  if (usable(adminDefault)) return adminDefault;
+  if (adminDefault !== "cursor" && usable("cursor")) return "cursor";
+  if (explicit) return requested;
+  if (usable(requested)) return requested;
+  return adminDefault;
+}
+
 /** Optional vault key id — server looks up the secret instead of accepting plaintext. */
 export function getRequestAiKeyId(req?: Request | null): string | undefined {
   if (!req) return undefined;
@@ -284,13 +340,21 @@ export function geminiStatus(opts?: {
   requestKey?: string | null;
   requestModel?: string | null;
   requestProvider?: string | null;
+  explicitProvider?: boolean;
   /** Admin-configured default when file/env has none */
   adminDefaultModel?: string | null;
+  adminDefaultProvider?: string | null;
 }) {
-  const providerId =
-    getAiProvider(opts?.requestProvider)?.id ||
-    getAiProvider("google")?.id ||
-    "google";
+  const adminDefaultProvider = adminDefaultProviderFromSettings({
+    defaultProvider: opts?.adminDefaultProvider,
+    defaultModel: opts?.adminDefaultModel,
+  });
+  const providerId = resolveEffectiveAiProvider({
+    requestProvider: opts?.requestProvider,
+    explicitProvider: opts?.explicitProvider,
+    requestKey: opts?.requestKey,
+    adminDefaultProvider,
+  });
   const provider = getAiProvider(providerId)!;
   const key =
     provider.apiFamily === "gemini"
@@ -313,6 +377,9 @@ export function geminiStatus(opts?: {
     connected: !!key,
     byok: isByokOnly(),
     provider: providerId,
+    effectiveProvider: providerId,
+    effectiveProviderLabel: provider.label,
+    adminDefaultProvider,
     providerLabel: provider.label,
     apiFamily: provider.apiFamily,
     model,

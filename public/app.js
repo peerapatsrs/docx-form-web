@@ -2215,7 +2215,14 @@ function getClientAiModel() {
 }
 
 function getClientAiProvider() {
-  return String(getActiveAiEntry()?.provider || "google").trim() || "google";
+  const entryProvider = getActiveAiEntry()?.provider;
+  if (entryProvider) {
+    return String(entryProvider).trim() || "google";
+  }
+  return (
+    String(aiStatus.effectiveProvider || aiStatus.provider || "google").trim() ||
+    "google"
+  );
 }
 
 function getClientAiLabel() {
@@ -2434,7 +2441,8 @@ function applyAiStatus(data) {
   const clientKey = entry?.apiKey || "";
   const hasVaultRef = !!(entry?.storeOnServer && entry?.id);
   const clientModel = entry?.model || "";
-  const provider = entry?.provider || data.provider || "google";
+  const provider =
+    entry?.provider || data.effectiveProvider || data.provider || "google";
   if (Array.isArray(data.providers) && data.providers.length) {
     aiProvidersCatalog = data.providers;
   }
@@ -2453,10 +2461,72 @@ function applyAiStatus(data) {
     studioUrl: data.docsUrl || data.studioUrl || providerDocs(provider),
     byok: data.byok !== false,
     provider,
-    providerLabel: data.providerLabel || providerLabel(provider),
+    effectiveProvider: data.effectiveProvider || provider,
+    providerLabel:
+      data.effectiveProviderLabel ||
+      data.providerLabel ||
+      providerLabel(provider),
     entryLabel: entry?.label || "",
     providers: aiProvidersCatalog,
   };
+}
+
+/** @type {AbortController|null} */
+let taggerSuggestAbort = null;
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function pollAiJobResult(jobId, { signal, onProgress } = {}) {
+  while (true) {
+    if (signal?.aborted) {
+      try {
+        await fetch(`/api/ai/jobs/${encodeURIComponent(jobId)}`, {
+          method: "DELETE",
+          credentials: "include",
+        });
+      } catch {
+        /* ignore */
+      }
+      throw new DOMException("Aborted", "AbortError");
+    }
+    const res = await fetch(`/api/ai/jobs/${encodeURIComponent(jobId)}`, {
+      credentials: "include",
+      signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || "ติดตามงาน AI ไม่สำเร็จ");
+    }
+    if (onProgress && data.progress) onProgress(data.progress);
+    if (data.status === "done") return data.result ?? data;
+    if (data.status === "error") {
+      throw new Error(data.error || "งาน AI ล้มเหลว");
+    }
+    if (data.status === "cancelled") {
+      throw new Error(data.error || "ยกเลิกแล้ว");
+    }
+    await sleepMs(1500);
+  }
+}
+
+async function postSuggestTagsAsync(fd, { signal, onProgress } = {}) {
+  fd.append("async", "1");
+  const res = await fetch("/api/template/suggest-tags?async=1", {
+    method: "POST",
+    body: fd,
+    headers: aiAuthHeaders(),
+    signal,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || "AI ดราฟตัวแปรไม่สำเร็จ");
+  }
+  if (data.jobId) {
+    return pollAiJobResult(data.jobId, { signal, onProgress });
+  }
+  return data;
 }
 
 async function ensureAiProviders() {
@@ -3724,16 +3794,15 @@ async function runTaggerAiDraft() {
     if (byokProvider) fd.append("aiProvider", byokProvider);
     fd.append("nameLanguage", getTaggerAiNameLanguage());
 
-    const res = await fetch("/api/template/suggest-tags", {
-      method: "POST",
-      body: fd,
-      headers: aiAuthHeaders(),
+    taggerSuggestAbort?.abort();
+    taggerSuggestAbort = new AbortController();
+    const data = await postSuggestTagsAsync(fd, {
+      signal: taggerSuggestAbort.signal,
+      onProgress: (p) => {
+        if (p?.message) showBanner(String(p.message), "progress");
+      },
     });
-    const data = await res.json().catch(() => ({}));
     stopAiWaitBanner();
-    if (!res.ok) {
-      throw new Error(data.error || "AI ดราฟตัวแปรไม่สำเร็จ");
-    }
 
     const staff = isAiStaffAdmin();
     const rawAi =
@@ -4048,10 +4117,15 @@ async function runTaggerAiDraft() {
       );
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "AI ดราฟตัวแปรไม่สำเร็จ";
-    showBanner(msg);
+    if (err instanceof DOMException && err.name === "AbortError") {
+      showBanner("ยกเลิก AI ดราฟตัวแปรแล้ว");
+    } else {
+      const msg = err instanceof Error ? err.message : "AI ดราฟตัวแปรไม่สำเร็จ";
+      showBanner(msg);
+    }
   } finally {
     stopAiWaitBanner?.();
+    taggerSuggestAbort = null;
     if (taggerSession) {
       taggerSession.busy = false;
       taggerSession.aiDrafting = false;
@@ -4444,6 +4518,7 @@ function renderTaggerWorkspace() {
     ev.preventDefault();
     ev.stopPropagation();
     clearTaggerCancelAllUndo();
+    taggerSuggestAbort?.abort();
     // Close only the tagger — never open the AI key dialog as a side effect.
     document.getElementById("appDialog")?.remove();
     document.getElementById("appConfirmDialog")?.remove();

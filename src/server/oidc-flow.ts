@@ -32,6 +32,7 @@ import {
   normalizeSilentOutcome,
   oidcSsoCooldownClearCookie,
   oidcSsoCooldownSetCookie,
+  parseOidcSsoCooldownCookie,
 } from "./oidc-silent";
 import type { JSONWebKeySet } from "jose";
 
@@ -251,6 +252,8 @@ export async function handleOidcCallback(input: {
   resolveUser?: typeof resolveUserForOidcClaims;
   /** Current docx_oidc_fail cookie (loop breaker). */
   failCookieRaw?: string | null;
+  /** Current docx_sso_checked cookie (preserve .b bypass mark). */
+  ssoCooldownCookieRaw?: string | null;
 }): Promise<{
   status: number;
   redirectTo: string;
@@ -266,6 +269,8 @@ export async function handleOidcCallback(input: {
   const kcStatus = normalizeKcActionStatus(input.kcActionStatus);
   const consumeState = input.consumeState ?? consumeOidcLoginState;
   const resolveUser = input.resolveUser ?? resolveUserForOidcClaims;
+  const priorCooldown = parseOidcSsoCooldownCookie(input.ssoCooldownCookieRaw);
+  const viaBypass = Boolean(priorCooldown?.viaBypass);
   const failBumpCookie = () =>
     oidcFailSetCookieHeader(
       bumpOidcFailState(parseOidcFailCookie(input.failCookieRaw)),
@@ -284,12 +289,17 @@ export async function handleOidcCallback(input: {
 
   const quietSilentFail = (returnTo: string, error: string) => {
     const outcome = normalizeSilentOutcome(error);
-    console.info("[oidc] silent outcome", { outcome });
-    // Same-origin land hop + cooldown outcome so hub Referer cannot re-bypass.
+    console.info("[oidc] silent outcome", {
+      outcome,
+      viaBypass: viaBypass || undefined,
+    });
+    // Same-origin land hop; preserve .b so a second bypass is refused.
     return {
       status: 302,
       redirectTo: buildSilentLandPath(safeOidcReturnTo(returnTo, "/")),
-      setCookies: [oidcSsoCooldownSetCookie(secure, { outcome })],
+      setCookies: [
+        oidcSsoCooldownSetCookie(secure, { outcome, viaBypass }),
+      ],
       error,
       referrerPolicy: "no-referrer" as const,
     };

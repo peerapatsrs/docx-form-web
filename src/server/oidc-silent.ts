@@ -1,7 +1,12 @@
 /**
  * Silent SSO (prompt=none) — top-level authorize only (no iframes / 3P cookies).
- * Cooldown cookie stores attemptedAt + outcome; hub/?sso=1 bypass is one-shot
- * per cooldown window (ignored once a silent attempt has returned).
+ *
+ * Cooldown cookie: `<attemptedAtMs>.<outcome>` or `<attemptedAtMs>.<outcome>.b`
+ * where `.b` means the attempt was started via hub/?sso=1 bypass.
+ *
+ * Bypass rules:
+ * - Allowed when no active cookie, or last attempt was a normal (non-bypass) fail
+ * - Refused while pending, or when the last attempt was itself a bypass (.b)
  */
 
 export const OIDC_SSO_COOLDOWN_COOKIE = "docx_sso_checked";
@@ -10,7 +15,6 @@ export const OIDC_SSO_CHECKED_COOKIE = OIDC_SSO_COOLDOWN_COOKIE;
 
 export const DEFAULT_OIDC_SSO_COOLDOWN_SEC = 60;
 
-/** Cookie value outcomes (no PII). */
 export type OidcSsoCooldownOutcome =
   | "pending"
   | "login_required"
@@ -20,6 +24,8 @@ export type OidcSsoCooldownOutcome =
 export type OidcSsoCooldownState = {
   attemptedAt: number;
   outcome: OidcSsoCooldownOutcome | string;
+  /** True when this attempt was started via hub Referer / ?sso=1 bypass. */
+  viaBypass: boolean;
 };
 
 export function getOidcSsoCooldownSec(
@@ -32,7 +38,6 @@ export function getOidcSsoCooldownSec(
   return DEFAULT_OIDC_SSO_COOLDOWN_SEC;
 }
 
-/** Comma-separated absolute origins (no hardcoded hosts). */
 export function parseOidcSsoHubOrigins(
   envSource: NodeJS.ProcessEnv = process.env,
 ): string[] {
@@ -87,35 +92,40 @@ export function stripSsoBypassParam(pathWithQuery: string): string {
 }
 
 /**
- * Cookie value: `<attemptedAtMs>.<outcome>` (e.g. `1700000000000.login_required`).
- * Legacy bare timestamps / `"1"` parse best-effort.
+ * Cookie value: `<ts>.<outcome>` or `<ts>.<outcome>.b` (bypass attempt).
  */
 export function parseOidcSsoCooldownCookie(
   cookieValue: string | null | undefined,
 ): OidcSsoCooldownState | null {
   const raw = String(cookieValue || "").trim();
   if (!raw) return null;
-  const dot = raw.indexOf(".");
-  if (dot > 0) {
-    const attemptedAt = Number(raw.slice(0, dot));
-    const outcome = raw.slice(dot + 1).trim() || "fail";
+  const parts = raw.split(".");
+  if (parts.length >= 2) {
+    const attemptedAt = Number(parts[0]);
     if (!Number.isFinite(attemptedAt) || attemptedAt <= 0) return null;
-    return { attemptedAt, outcome };
+    let viaBypass = false;
+    let outcomeParts = parts.slice(1);
+    if (outcomeParts.length >= 2 && outcomeParts[outcomeParts.length - 1] === "b") {
+      viaBypass = true;
+      outcomeParts = outcomeParts.slice(0, -1);
+    }
+    const outcome = outcomeParts.join(".").trim() || "fail";
+    return { attemptedAt, outcome, viaBypass };
   }
   const attemptedAt = Number(raw);
   if (!Number.isFinite(attemptedAt) || attemptedAt <= 0) return null;
-  // Legacy timestamp-only → treat as completed fail so hub Referer cannot loop.
-  return { attemptedAt, outcome: "fail" };
+  return { attemptedAt, outcome: "fail", viaBypass: false };
 }
 
 export function serializeOidcSsoCooldownValue(
   state: OidcSsoCooldownState,
 ): string {
   const ts = Math.floor(state.attemptedAt);
-  const outcome = String(state.outcome || "fail")
-    .replace(/[^a-z0-9_:-]/gi, "")
-    .slice(0, 64) || "fail";
-  return `${ts}.${outcome}`;
+  const outcome =
+    String(state.outcome || "fail")
+      .replace(/[^a-z0-9_:-]/gi, "")
+      .slice(0, 64) || "fail";
+  return state.viaBypass ? `${ts}.${outcome}.b` : `${ts}.${outcome}`;
 }
 
 export function isOidcSsoCooldownActive(
@@ -130,8 +140,9 @@ export function isOidcSsoCooldownActive(
 }
 
 /**
- * Hub Referer / ?sso=1 may bypass cooldown only once per window.
- * Once a silent attempt has returned (any non-pending outcome), ignore bypass.
+ * Hub / ?sso=1 bypass:
+ * - allow after a normal (non-bypass) cooldown fail so hub login can silent-SSO
+ * - refuse while pending, or when the last attempt was itself a bypass (.b)
  */
 export function canUseSilentSsoBypass(
   cookieValue: string | null | undefined,
@@ -140,11 +151,20 @@ export function canUseSilentSsoBypass(
 ): boolean {
   const state = parseOidcSsoCooldownCookie(cookieValue);
   if (!state) return true;
-  if (!isOidcSsoCooldownActive(serializeOidcSsoCooldownValue(state), nowMs, cooldownSec)) {
+  if (
+    !isOidcSsoCooldownActive(
+      serializeOidcSsoCooldownValue(state),
+      nowMs,
+      cooldownSec,
+    )
+  ) {
     return true;
   }
-  // Pending or any returned outcome → bypass already consumed this window.
-  return false;
+  const outcome = String(state.outcome || "").toLowerCase();
+  if (outcome === "pending") return false;
+  if (state.viaBypass) return false;
+  // Normal returned attempt (login_required / fail) → one bypass allowed.
+  return true;
 }
 
 export function normalizeSilentOutcome(
@@ -155,7 +175,11 @@ export function normalizeSilentOutcome(
     .toLowerCase()
     .replace(/^oidc_/, "");
   if (!e) return "fail";
-  if (e === "login_required" || e === "interaction_required" || e === "consent_required") {
+  if (
+    e === "login_required" ||
+    e === "interaction_required" ||
+    e === "consent_required"
+  ) {
     return "login_required";
   }
   if (e === "pending" || e === "success") return e;
@@ -167,6 +191,7 @@ export function oidcSsoCooldownSetCookie(
   input: {
     nowMs?: number;
     outcome?: string;
+    viaBypass?: boolean;
     cooldownSec?: number;
   } = {},
 ): string {
@@ -176,6 +201,7 @@ export function oidcSsoCooldownSetCookie(
   const value = serializeOidcSsoCooldownValue({
     attemptedAt: input.nowMs ?? Date.now(),
     outcome: normalizeSilentOutcome(input.outcome ?? "pending"),
+    viaBypass: Boolean(input.viaBypass),
   });
   return `${OIDC_SSO_COOLDOWN_COOKIE}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secureAttr}`;
 }
@@ -200,9 +226,6 @@ export function oidcSsoCheckedSetCookie(
 /** @deprecated */
 export const oidcSsoCheckedClearCookie = oidcSsoCooldownClearCookie;
 
-/**
- * Edge-safe same-origin path + query (no open redirects).
- */
 export function safeAppReturnPath(pathname: string, search = ""): string {
   const raw = `${pathname}${search}`;
   if (!raw.startsWith("/") || raw.startsWith("//") || raw.includes("\\")) {
@@ -212,9 +235,6 @@ export function safeAppReturnPath(pathname: string, search = ""): string {
   return raw.split("#")[0] || "/";
 }
 
-/**
- * Same-origin quiet-land hop after silent fail (strips hub Referer for next GET).
- */
 export function buildSilentLandPath(returnTo: string): string {
   const next = safeAppReturnPath(
     String(returnTo || "/").split("?")[0] || "/",
@@ -284,11 +304,16 @@ export function isTopLevelDocumentNavigation(input: {
   return false;
 }
 
+export type SilentSsoStartDecision = {
+  start: boolean;
+  /** Hub / ?sso=1 path — mark cooldown with .b */
+  viaBypass: boolean;
+};
+
 /**
- * Whether middleware should kick off a silent SSO check.
- * Hub/?sso=1 bypass is ignored once a silent attempt has returned this window.
+ * Decide whether to start silent SSO and whether this start is a bypass.
  */
-export function shouldStartSilentSso(input: {
+export function resolveSilentSsoStart(input: {
   pathname: string;
   search?: string;
   hasSession: boolean;
@@ -299,11 +324,13 @@ export function shouldStartSilentSso(input: {
   referer?: string | null;
   oidcEnabled: boolean;
   isDocumentNavigation: boolean;
-}): boolean {
-  if (!input.oidcEnabled) return false;
-  if (!input.isDocumentNavigation) return false;
-  if (input.hasSession) return false;
-  if (shouldSkipSilentSsoPath(input.pathname)) return false;
+}): SilentSsoStartDecision {
+  if (!input.oidcEnabled) return { start: false, viaBypass: false };
+  if (!input.isDocumentNavigation) return { start: false, viaBypass: false };
+  if (input.hasSession) return { start: false, viaBypass: false };
+  if (shouldSkipSilentSsoPath(input.pathname)) {
+    return { start: false, viaBypass: false };
+  }
 
   const nowMs = input.nowMs ?? Date.now();
   const cooldownSec = input.cooldownSec ?? getOidcSsoCooldownSec();
@@ -314,15 +341,19 @@ export function shouldStartSilentSso(input: {
       input.hubOrigins ?? parseOidcSsoHubOrigins(),
     );
 
-  if (wantBypass) {
-    if (canUseSilentSsoBypass(input.cooldownCookie, nowMs, cooldownSec)) {
-      return true;
-    }
-    // Bypass already used this window — fall through; cooldown still blocks.
+  if (wantBypass && canUseSilentSsoBypass(input.cooldownCookie, nowMs, cooldownSec)) {
+    return { start: true, viaBypass: true };
   }
 
   if (isOidcSsoCooldownActive(input.cooldownCookie, nowMs, cooldownSec)) {
-    return false;
+    return { start: false, viaBypass: false };
   }
-  return true;
+  return { start: true, viaBypass: false };
+}
+
+/** @deprecated use resolveSilentSsoStart */
+export function shouldStartSilentSso(
+  input: Parameters<typeof resolveSilentSsoStart>[0],
+): boolean {
+  return resolveSilentSsoStart(input).start;
 }

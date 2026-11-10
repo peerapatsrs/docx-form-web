@@ -1,9 +1,11 @@
-import Link from "next/link";
 import { BrandLockup } from "@/components/BrandLogo";
 
 /**
  * Post IdP logout landing — must NOT auto-redirect to /login (that would
  * immediately bounce into Keycloak again via OIDC-only /login).
+ *
+ * Home uses a plain <a href="/?sso=1"> so the browser does a full document
+ * navigation (Next <Link> soft-nav would skip silent SSO).
  */
 export default function LoggedOutPage() {
   return (
@@ -17,12 +19,12 @@ export default function LoggedOutPage() {
           เซสชันของแอปและ Keycloak ถูกปิดแล้ว — กดด้านล่างเมื่อต้องการเข้าสู่ระบบใหม่
         </p>
         <div className="auth-actions">
-          <Link className="auth-provider auth-provider-sso" href="/login">
+          <a className="auth-provider auth-provider-sso" href="/login">
             เข้าสู่ระบบด้วย TPS18 SSO
-          </Link>
-          <Link className="auth-provider" href="/?sso=1">
+          </a>
+          <a className="auth-provider" href="/?sso=1">
             กลับหน้าหลัก
-          </Link>
+          </a>
         </div>
       </div>
     </main>

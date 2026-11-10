@@ -15,8 +15,7 @@ export const dynamic = "force-dynamic";
 
 /**
  * Silent SSO start: top-level authorize with prompt=none (no iframe).
- * Marks cooldown as `pending` immediately so hub Referer cannot start a second
- * attempt before the callback returns.
+ * Marks cooldown pending (`.b` when hub/?sso=1 bypass) before Keycloak.
  */
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -24,12 +23,17 @@ export async function GET(request: Request) {
     url.searchParams.get("next") || url.searchParams.get("returnTo"),
     "/",
   );
+  const viaBypass = url.searchParams.get("bypass") === "1";
   const secure = process.env.NODE_ENV === "production";
   const pendingCookie = oidcSsoCooldownSetCookie(secure, {
     outcome: "pending",
+    viaBypass,
   });
 
-  console.info("[oidc] silent attempt", { returnTo });
+  console.info("[oidc] silent attempt", {
+    returnTo,
+    viaBypass: viaBypass || undefined,
+  });
 
   const config = getOidcConfig();
   if (!config) {
@@ -39,7 +43,7 @@ export async function GET(request: Request) {
     const headers = new Headers();
     headers.set("Referrer-Policy", "no-referrer");
     applyOidcSetCookies(headers, [
-      oidcSsoCooldownSetCookie(secure, { outcome: "fail" }),
+      oidcSsoCooldownSetCookie(secure, { outcome: "fail", viaBypass }),
     ]);
     return NextResponse.redirect(home, { status: 302, headers });
   }
@@ -59,14 +63,13 @@ export async function GET(request: Request) {
     const headers = new Headers();
     headers.set("Referrer-Policy", "no-referrer");
     applyOidcSetCookies(headers, [
-      oidcSsoCooldownSetCookie(secure, { outcome: "fail" }),
+      oidcSsoCooldownSetCookie(secure, { outcome: "fail", viaBypass }),
     ]);
     return NextResponse.redirect(home, { status: 302, headers });
   }
 
   console.info("[oidc] silent outcome", { outcome: "redirect_authorize" });
   const headers = new Headers();
-  // Consume bypass for this window before leaving for Keycloak.
   applyOidcSetCookies(headers, [pendingCookie]);
   headers.set("Referrer-Policy", "no-referrer");
   return NextResponse.redirect(result.url, { status: 302, headers });

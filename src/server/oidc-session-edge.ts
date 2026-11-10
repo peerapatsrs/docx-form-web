@@ -1,22 +1,20 @@
 /**
- * Edge-safe Better Auth session_token checks (HMAC signature only — no DB).
- * Invalid/malformed cookies are treated as absent so silent SSO can run.
+ * Better Auth session_token checks for the proxy.
+ * HMAC verify always; optional DB/session-API validation on real page loads.
  */
 
 import { getSessionCookie } from "better-auth/cookies";
-
-function authSecret(): string {
-  return (
-    String(process.env.BETTER_AUTH_SECRET || "").trim() ||
-    String(process.env.AUTH_SECRET || "").trim() ||
-    "docx-form-dev-secret-change-me-32b"
-  );
-}
+import { resolveBetterAuthSecret } from "./auth-secret";
 
 function sessionCookieNames(): string[] {
   const prefix = "better-auth";
   const base = `${prefix}.session_token`;
-  return [`__Secure-${base}`, base, `__Secure-${prefix}-session_token`, `${prefix}-session_token`];
+  return [
+    `__Secure-${base}`,
+    base,
+    `__Secure-${prefix}-session_token`,
+    `${prefix}-session_token`,
+  ];
 }
 
 /**
@@ -24,7 +22,7 @@ function sessionCookieNames(): string[] {
  */
 export async function verifySignedCookieValue(
   rawValue: string,
-  secret: string = authSecret(),
+  secret: string = resolveBetterAuthSecret(),
 ): Promise<string | null> {
   const value = String(rawValue || "").trim();
   if (!value) return null;
@@ -70,16 +68,24 @@ export function expireAppSessionCookies(secure: boolean): string[] {
 }
 
 /**
- * Resolve whether the request presents a cryptographically valid session cookie.
- * Does not hit the DB — forged/truncated cookies → absent + clear Set-Cookie.
+ * Resolve whether the request has a live app session.
+ * - Always HMAC-verify the cookie (forged → clear).
+ * - When validateInDb (top-level document navigations only), also call
+ *   auth.api.getSession; missing/expired DB session → clear + absent.
  */
 export async function resolveProxySession(input: {
-  request: { headers: Headers; cookies?: { get: (n: string) => { value: string } | undefined } };
+  request: {
+    headers: Headers;
+    cookies?: { get: (n: string) => { value: string } | undefined };
+  };
   secure?: boolean;
+  /** Page-load only — skip on RSC/prefetch to avoid DB load. */
+  validateInDb?: boolean;
 }): Promise<{ hasSession: boolean; clearCookies: string[] }> {
-  const secure =
-    input.secure ?? process.env.NODE_ENV === "production";
-  const raw = getSessionCookie(input.request as Parameters<typeof getSessionCookie>[0]);
+  const secure = input.secure ?? process.env.NODE_ENV === "production";
+  const raw = getSessionCookie(
+    input.request as Parameters<typeof getSessionCookie>[0],
+  );
   if (!raw) {
     return { hasSession: false, clearCookies: [] };
   }
@@ -90,5 +96,27 @@ export async function resolveProxySession(input: {
       clearCookies: expireAppSessionCookies(secure),
     };
   }
+
+  if (input.validateInDb) {
+    try {
+      const { auth } = await import("./auth");
+      const session = await auth.api.getSession({
+        headers: input.request.headers,
+      });
+      if (!session?.session || !session?.user) {
+        return {
+          hasSession: false,
+          clearCookies: expireAppSessionCookies(secure),
+        };
+      }
+    } catch {
+      // Treat lookup failure as absent so silent SSO can still run.
+      return {
+        hasSession: false,
+        clearCookies: expireAppSessionCookies(secure),
+      };
+    }
+  }
+
   return { hasSession: true, clearCookies: [] };
 }

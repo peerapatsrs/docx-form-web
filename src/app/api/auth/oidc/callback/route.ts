@@ -5,6 +5,7 @@ import {
   readCookie,
 } from "@/server/oidc-flow";
 import { OIDC_FAIL_COOKIE } from "@/server/oidc-login-guard";
+import { OIDC_SSO_COOLDOWN_COOKIE } from "@/server/oidc-silent";
 import { getAppBaseUrl } from "@/lib/app-base-url";
 
 export const dynamic = "force-dynamic";
@@ -18,16 +19,15 @@ function absoluteRedirect(pathOrUrl: string): string {
 /** OIDC authorization-code callback — validates state/nonce/PKCE + JWKS id_token. */
 export async function GET(request: Request) {
   const url = new URL(request.url);
+  const cookieHeader = request.headers.get("cookie");
   // Authorization code must never be logged.
   const result = await handleOidcCallback({
     code: url.searchParams.get("code"),
     state: url.searchParams.get("state"),
     error: url.searchParams.get("error"),
     kcActionStatus: url.searchParams.get("kc_action_status"),
-    failCookieRaw: readCookie(
-      request.headers.get("cookie"),
-      OIDC_FAIL_COOKIE,
-    ),
+    failCookieRaw: readCookie(cookieHeader, OIDC_FAIL_COOKIE),
+    ssoCooldownCookieRaw: readCookie(cookieHeader, OIDC_SSO_COOLDOWN_COOKIE),
   });
   const headers = new Headers();
   applyOidcSetCookies(headers, result.setCookies);

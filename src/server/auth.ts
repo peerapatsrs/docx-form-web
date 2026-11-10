@@ -5,6 +5,7 @@ import { getIpAddressHeaders } from "./client-ip";
 import { ac, roles } from "@/lib/auth-permissions";
 import { isSuperAdminEmail } from "./auth-superadmin";
 import { getBetterAuthBaseUrl } from "@/lib/app-base-url";
+import { resolveBetterAuthSecret } from "./auth-secret";
 
 function env(name: string): string | undefined {
   const v = String(process.env[name] || "").trim();
@@ -22,11 +23,7 @@ function baseURL(): string {
 export const auth = betterAuth({
   appName: "docx-form",
   baseURL: baseURL(),
-  secret:
-    env("BETTER_AUTH_SECRET") ||
-    env("AUTH_SECRET") ||
-    // Build-time / local fallback only — set BETTER_AUTH_SECRET in production.
-    "docx-form-dev-secret-change-me-32b",
+  secret: resolveBetterAuthSecret(),
   database: getAuthPool(),
   emailAndPassword: {
     enabled: false,

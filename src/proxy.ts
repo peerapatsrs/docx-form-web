@@ -15,8 +15,8 @@ import {
   isTopLevelDocumentNavigation,
   OIDC_SSO_COOLDOWN_COOKIE,
   parseOidcSsoHubOrigins,
+  resolveSilentSsoStart,
   safeAppReturnPath,
-  shouldStartSilentSso,
   stripSsoBypassParam,
 } from "@/server/oidc-silent";
 import { resolveProxySession } from "@/server/oidc-session-edge";
@@ -36,7 +36,6 @@ function applySetCookies(response: NextResponse, cookies: string[]): void {
   }
 }
 
-/** Broader than silent SSO — used only for Cache-Control on HTML-ish responses. */
 function isHtmlishNavigation(request: NextRequest): boolean {
   const accept = request.headers.get("accept") || "";
   if (accept.includes("text/html")) return true;
@@ -79,8 +78,6 @@ function maybeRedirectToHttps(request: NextRequest): NextResponse | null {
 
 /**
  * Network boundary: HTTPS redirect, security headers, auth gates, silent SSO.
- * Public pages render logged-out; protected pages → interactive /login.
- * Silent SSO is a top-level prompt=none redirect (no iframes) on document loads.
  */
 export async function proxy(request: NextRequest) {
   const httpsRedirect = maybeRedirectToHttps(request);
@@ -89,7 +86,6 @@ export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const search = request.nextUrl.search;
 
-  // Removed DEV auth + app-hosted passkey/WebAuthn paths — always 404.
   if (
     pathname.startsWith("/api/auth/dev") ||
     pathname.startsWith("/api/dev/") ||
@@ -99,8 +95,6 @@ export async function proxy(request: NextRequest) {
     return applySecurityHeaders(new NextResponse(null, { status: 404 }));
   }
 
-  const session = await resolveProxySession({ request });
-  const hasSession = session.hasSession;
   const htmlish = isHtmlishNavigation(request);
   const topLevelDoc = isTopLevelDocumentNavigation({
     accept: request.headers.get("accept"),
@@ -113,25 +107,32 @@ export async function proxy(request: NextRequest) {
     search,
   });
 
-  // Silent SSO — top-level document navigations only (Safari/ITP-safe).
-  if (
-    shouldStartSilentSso({
-      pathname,
-      search,
-      hasSession,
-      cooldownCookie: request.cookies.get(OIDC_SSO_COOLDOWN_COOKIE)?.value,
-      cooldownSec: getOidcSsoCooldownSec(),
-      hubOrigins: parseOidcSsoHubOrigins(),
-      referer: request.headers.get("referer"),
-      oidcEnabled: isOidcEnabled(),
-      isDocumentNavigation: topLevelDoc,
-    })
-  ) {
-    const returnTo = stripSsoBypassParam(
-      safeAppReturnPath(pathname, search),
-    );
+  // HMAC always; DB/session-API validation only on real top-level page loads.
+  const session = await resolveProxySession({
+    request,
+    validateInDb: topLevelDoc,
+  });
+  const hasSession = session.hasSession;
+
+  const decision = resolveSilentSsoStart({
+    pathname,
+    search,
+    hasSession,
+    cooldownCookie: request.cookies.get(OIDC_SSO_COOLDOWN_COOKIE)?.value,
+    cooldownSec: getOidcSsoCooldownSec(),
+    hubOrigins: parseOidcSsoHubOrigins(),
+    referer: request.headers.get("referer"),
+    oidcEnabled: isOidcEnabled(),
+    isDocumentNavigation: topLevelDoc,
+  });
+
+  if (decision.start) {
+    const returnTo = stripSsoBypassParam(safeAppReturnPath(pathname, search));
     const silent = new URL(safeAppPathUrl("/api/auth/oidc/silent"));
     silent.searchParams.set("next", returnTo);
+    if (decision.viaBypass) {
+      silent.searchParams.set("bypass", "1");
+    }
     const redirect = applySecurityHeaders(NextResponse.redirect(silent, 307));
     redirect.headers.set("Referrer-Policy", "no-referrer");
     applySetCookies(redirect, session.clearCookies);
@@ -141,7 +142,6 @@ export async function proxy(request: NextRequest) {
     return redirect;
   }
 
-  // Protected pages only — interactive login (not silent). Preserve query.
   if (isProtectedAppPath(pathname) && !hasSession) {
     const login = new URL(safeAppPathUrl("/login"));
     login.searchParams.set(

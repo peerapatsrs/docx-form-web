@@ -60,15 +60,15 @@ Pattern: `https://auth.tps18.space/realms/tps18-{env}` where `{env}` is
    session to `/api/auth/oidc/silent` → authorize with `prompt=none` (same
    `redirect_uri` / `client_id` / scopes / PKCE S256 as interactive). Requires
    `Sec-Fetch-Dest: document` or `Sec-Fetch-Mode: navigate`; skips RSC /
-   prefetch / non-HTML `Accept`. Marks `docx_sso_checked=<attemptedAt>.pending`
-   before leaving for Keycloak. Any silent error → quiet land via
-   `/api/auth/oidc/silent/land` (`Referrer-Policy: no-referrer`) then the
-   original page — **never** `/login?error=`. Cooldown cookie outcome
-   (`login_required` / `fail`) blocks further checks for
-   `OIDC_SSO_COOLDOWN_SEC` (default 60). Hub Referer /
-   `OIDC_SSO_HUB_ORIGINS` or `?sso=1` may bypass **once** per window; after a
-   returned attempt the bypass is ignored (stops Referer-sticky loops).
-   Invalid/forged session cookies are cleared so silent SSO can still run.
+   prefetch / non-HTML `Accept`.    Marks `docx_sso_checked=<attemptedAt>.pending` (`.b` suffix when the start
+   was a hub/`?sso=1` bypass) before leaving for Keycloak. Any silent error →
+   quiet land via `/api/auth/oidc/silent/land` (`Referrer-Policy: no-referrer`)
+   then the original page (sso=1 stripped) — **never** `/login?error=`.
+   Cooldown blocks normal re-checks for `OIDC_SSO_COOLDOWN_SEC` (default 60).
+   Hub Referer / `OIDC_SSO_HUB_ORIGINS` or `?sso=1` may bypass after a
+   **normal** fail so a later hub login can silent-SSO; a second bypass in the
+   same window (`.b`) is refused (stops Referer-sticky loops). On real page
+   loads, forged or DB-expired session cookies are cleared so silent SSO runs.
    Info logs: `[oidc] silent …` (no PII).
 3. **Protected pages** (`/account`, `/admin`, …) without a session → interactive
    `/login?next=…` preserving path + query (then Keycloak authorize **without**

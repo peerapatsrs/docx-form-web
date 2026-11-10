@@ -1,11 +1,25 @@
 import { BrandLockup } from "@/components/BrandLogo";
+import { formatAppVersionLabel } from "@/lib/app-build-info";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+function readAppVersionLabel(): string {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(join(process.cwd(), "package.json"), "utf-8"),
+    ) as { version?: string };
+    return formatAppVersionLabel(String(pkg.version || "0.0.0"));
+  } catch {
+    return formatAppVersionLabel("0.0.0");
+  }
+}
 
 export default function NotFound() {
   return (
     <main className="auth-page">
       <div className="auth-card">
         <div className="auth-brand">
-          <BrandLockup versionLabel="v0.1.0" />
+          <BrandLockup versionLabel={readAppVersionLabel()} />
         </div>
         <h1 className="auth-title">ไม่พบหน้านี้</h1>
         <p className="auth-lead">

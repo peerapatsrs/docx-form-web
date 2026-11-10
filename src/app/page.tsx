@@ -1,5 +1,6 @@
 import { HomeClient } from "@/app/home-client";
 import { publicAssetUrl } from "@/lib/public-asset-version";
+import { formatAppVersionLabel } from "@/lib/app-build-info";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -8,10 +9,9 @@ function readAppVersionLabel(): string {
     const pkg = JSON.parse(
       readFileSync(join(process.cwd(), "package.json"), "utf-8"),
     ) as { version?: string };
-    const raw = String(pkg.version || "0.0.0").replace(/^v/i, "");
-    return raw ? `v${raw}` : "v…";
+    return formatAppVersionLabel(String(pkg.version || "0.0.0"));
   } catch {
-    return "v…";
+    return formatAppVersionLabel("0.0.0");
   }
 }
 

@@ -4,14 +4,97 @@ import { join } from "node:path";
 import {
   defaultModelForProvider,
   getAiProvider,
+  listAiProviders,
   listAiProvidersPublic,
   normalizeProviderModel,
   resolveEffectiveModelForProvider,
+  type AiApiFamily,
+  type AiProviderDef,
   type AiProviderId,
 } from "./ai-providers";
 import { getAiTimeoutMs } from "./ai-request";
 
 const CURSOR_SERVER_KEY_ENV = "DOCX_FORM_CURSOR_API_KEY";
+
+/** Human-facing server key row for /admin/ai (no env var names). */
+export type ServerKeySource = {
+  providerId: string;
+  label: string;
+  /** e.g. "set via server" — never an env var name */
+  sourceLabel: string;
+  /** True when the key can be cleared via DELETE /api/admin/ai/server-key */
+  clearable: boolean;
+};
+
+/**
+ * Families that can carry a shared server key (env and/or DB).
+ * Driven by apiFamily — not by hardcoding provider ids in the admin UI.
+ */
+function serverKeyConfigurableFamilies(): ReadonlySet<AiApiFamily> {
+  return new Set(["gemini", "cursor"]);
+}
+
+function hasServerEnvGeminiKey(): boolean {
+  return !!(
+    process.env.DOCX_FORM_GEMINI_API_KEY ||
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY
+  );
+}
+
+/**
+ * Resolve configured shared server-key rows from the live provider catalog.
+ * Only providers whose apiFamily supports server keys and that currently have
+ * a key are returned. Empty → admin shows a single neutral line.
+ */
+export function listConfiguredServerKeySources(): ServerKeySource[] {
+  if (isByokOnly()) return [];
+  const families = serverKeyConfigurableFamilies();
+  const out: ServerKeySource[] = [];
+  for (const p of listAiProviders()) {
+    if (!families.has(p.apiFamily)) continue;
+    const row = configuredServerKeyForProvider(p);
+    if (row) out.push(row);
+  }
+  return out;
+}
+
+function configuredServerKeyForProvider(
+  p: AiProviderDef,
+): ServerKeySource | null {
+  if (p.apiFamily === "gemini") {
+    if (hasServerEnvGeminiKey()) {
+      return {
+        providerId: p.id,
+        label: p.label,
+        sourceLabel: "set via server",
+        clearable: false,
+      };
+    }
+    if (hasServerFileGeminiKey()) {
+      return {
+        providerId: p.id,
+        label: p.label,
+        sourceLabel: maskServerFileGeminiKey() || "database",
+        clearable: true,
+      };
+    }
+    return null;
+  }
+  if (p.apiFamily === "cursor") {
+    if (hasServerEnvCursorKey()) {
+      return {
+        providerId: p.id,
+        label: p.label,
+        sourceLabel: "set via server",
+        clearable: false,
+      };
+    }
+    return null;
+  }
+  return null;
+}
 
 export type AiConfig = {
   /** Google AI Studio / Gemini API key — only used when BYOK is off (legacy/local) */
@@ -678,14 +761,10 @@ export function geminiStatus(opts?: {
   // Same resolver the fill/tag paths use — pill must not show a cross-family
   // leftover like gemini-3.8-flash when effective provider is Cursor.
   const model = resolveEffectiveModelForProvider(providerId, rawModel);
-  const hasEnvGemini = !!(
-    process.env.DOCX_FORM_GEMINI_API_KEY ||
-    process.env.GEMINI_API_KEY ||
-    process.env.GOOGLE_API_KEY ||
-    process.env.GOOGLE_GENERATIVE_AI_API_KEY
-  );
+  const hasEnvGemini = hasServerEnvGeminiKey();
   const hasEnvCursor = hasServerEnvCursorKey();
   const hasFileGemini = hasServerFileGeminiKey();
+  const serverKeySources = listConfiguredServerKeySources();
   const fromVault = Boolean(opts?.fromUserVault && key);
   const usedShared = Boolean(opts?.usedSharedEnvFallback);
   let keySource: AiKeySource = "none";
@@ -745,6 +824,13 @@ export function geminiStatus(opts?: {
     /** Human label only — never leak env var names. */
     serverEnvGeminiKeySource: hasEnvGemini ? "set via server" : null,
     serverEnvCursorKeySource: hasEnvCursor ? "set via server" : null,
+    /**
+     * Configured shared server keys from the provider catalog (generic).
+     * Admin UI lists these; empty → show a single neutral “not set” line.
+     */
+    serverKeySources,
+    /** True when any catalog server key is clearable via admin DELETE. */
+    hasClearableServerKey: serverKeySources.some((s) => s.clearable),
     premiumEnforce,
     /** Human storage label — never leak filesystem paths (DB-backed, not /tmp). */
     configStore: isByokOnly() ? "browser" : "database",

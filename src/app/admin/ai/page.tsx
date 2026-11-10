@@ -2,6 +2,13 @@
 
 import { useEffect, useState } from "react";
 
+type ServerKeySource = {
+  providerId: string;
+  label: string;
+  sourceLabel: string;
+  clearable?: boolean;
+};
+
 type AiStatus = {
   byok?: boolean;
   connected?: boolean;
@@ -9,18 +16,14 @@ type AiStatus = {
   effectiveModel?: string;
   models?: { id: string; label: string }[];
   adminDefaultModel?: string | null;
-  hasServerEnvKey?: boolean;
-  hasServerEnvCursorKey?: boolean;
-  hasServerFileGeminiKey?: boolean;
-  serverEnvCursorKeySource?: string | null;
-  serverEnvGeminiKeySource?: string | null;
+  serverKeySources?: ServerKeySource[];
+  hasClearableServerKey?: boolean;
   effectiveProvider?: string;
   effectiveProviderLabel?: string;
   adminDefaultProvider?: string;
   defaultModel?: string;
   premiumEnforce?: boolean;
   premiumEnforceLabel?: string;
-  maskedKey?: string | null;
   configStoreLabel?: string;
   studioUrl?: string;
   keySource?: "user" | "shared" | "none";
@@ -92,7 +95,7 @@ export default function AdminAiPage() {
   async function clearServerFileKey() {
     if (
       !window.confirm(
-        "ลบคีย์ Gemini ที่เก็บบนเซิร์ฟเวอร์ (ไฟล์)? คีย์จากเซิร์ฟเวอร์จะไม่ถูกลบถ้าตั้งผ่านระบบ",
+        "ลบคีย์ที่เก็บบนเซิร์ฟเวอร์ (ฐานข้อมูล)? คีย์ที่ตั้งผ่านระบบจะไม่ถูกลบ",
       )
     ) {
       return;
@@ -133,6 +136,13 @@ export default function AdminAiPage() {
   const effectiveModel = status?.effectiveModel || status?.model || "—";
   const effectiveProvider =
     status?.effectiveProviderLabel || status?.effectiveProvider || "—";
+  const serverKeySources = Array.isArray(status?.serverKeySources)
+    ? status.serverKeySources
+    : [];
+  const canClearServerKey = Boolean(
+    status?.hasClearableServerKey ||
+      serverKeySources.some((s) => s.clearable),
+  );
 
   return (
     <div className="admin-overview">
@@ -147,30 +157,19 @@ export default function AdminAiPage() {
                 : "เซิร์ฟเวอร์เก็บคีย์ได้"}
             </strong>
           </li>
-          <li>
-            <span>คีย์ Gemini ของเซิร์ฟเวอร์</span>
-            <strong>
-              {status?.hasServerEnvKey
-                ? status.serverEnvGeminiKeySource || "set via server"
-                : "ยังไม่ตั้ง"}
-            </strong>
-          </li>
-          <li>
-            <span>คีย์ Cursor ของเซิร์ฟเวอร์</span>
-            <strong>
-              {status?.hasServerEnvCursorKey
-                ? status.serverEnvCursorKeySource || "set via server"
-                : "ยังไม่ตั้ง"}
-            </strong>
-          </li>
-          <li>
-            <span>คีย์ Gemini บนเซิร์ฟเวอร์ (ไฟล์)</span>
-            <strong>
-              {status?.hasServerFileGeminiKey
-                ? status.maskedKey || "มี"
-                : "ไม่มี"}
-            </strong>
-          </li>
+          {serverKeySources.length === 0 ? (
+            <li>
+              <span>คีย์เซิร์ฟเวอร์</span>
+              <strong>ไม่ได้ตั้งค่าคีย์เซิร์ฟเวอร์</strong>
+            </li>
+          ) : (
+            serverKeySources.map((src) => (
+              <li key={src.providerId}>
+                <span>คีย์เซิร์ฟเวอร์ · {src.label}</span>
+                <strong>{src.sourceLabel || "set via server"}</strong>
+              </li>
+            ))
+          )}
           <li>
             <span>บังคับแผนพรีเมียม</span>
             <strong>
@@ -209,7 +208,7 @@ export default function AdminAiPage() {
             <strong>{status?.configStoreLabel || "—"}</strong>
           </li>
         </ul>
-        {status?.hasServerFileGeminiKey ? (
+        {canClearServerKey ? (
           <p className="admin-muted" style={{ marginTop: "0.75rem" }}>
             <button
               type="button"
@@ -217,7 +216,7 @@ export default function AdminAiPage() {
               disabled={busy}
               onClick={() => void clearServerFileKey()}
             >
-              ลบคีย์บนเซิร์ฟเวอร์ (ไฟล์)
+              ลบคีย์บนเซิร์ฟเวอร์ (ฐานข้อมูล)
             </button>
           </p>
         ) : null}
@@ -272,7 +271,7 @@ export default function AdminAiPage() {
             </select>
           </label>
           <p className="admin-muted">
-            ค่านี้เป็นค่าตั้งต้นของแอดมิน — โมเดลที่ใช้จริงด้านบนอาจต่างออกไปเมื่อมีคีย์ Cursor
+            ค่านี้เป็นค่าตั้งต้นของแอดมิน — โมเดลที่ใช้จริงด้านบนอาจต่างออกไปเมื่อมีคีย์ร่วม
             หรือคีย์ผู้ใช้ (ตรงกับ pill)
           </p>
           <button type="submit" className="admin-btn admin-btn-primary" disabled={busy}>

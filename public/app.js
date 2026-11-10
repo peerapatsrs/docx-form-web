@@ -2131,7 +2131,13 @@ function ensureRowSkip(listName, rowCount, itemFields) {
 }
 
 function setCreditsVersion(version) {
-  const label = version ? `v${String(version).replace(/^v/i, "")}` : "v…";
+  const raw = String(version || "").trim();
+  // Short git SHA from /api/entitlement — do not force a "v" prefix.
+  const label = !raw
+    ? "v…"
+    : /^[0-9a-f]{7,40}$/i.test(raw)
+      ? raw.slice(0, 7).toLowerCase()
+      : `v${raw.replace(/^v/i, "")}`;
   const appVer = document.getElementById("appVersion");
   const creditsVer = document.getElementById("creditsVersion");
   if (appVer) appVer.textContent = label;

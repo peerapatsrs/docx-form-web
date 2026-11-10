@@ -91,8 +91,13 @@ await check("shared dialog + account + pill wiring present", async () => {
   assert.match(account, /AiKeysSection/);
   assert.match(section, /openAiKeysDialog/);
   assert.match(section, /ai-key-dialog\.js/);
-  assert.match(admin, /set via server/);
+  assert.match(admin, /serverKeySources/);
+  assert.match(admin, /ไม่ได้ตั้งค่าคีย์เซิร์ฟเวอร์/);
   assert.match(admin, /\/api\/admin\/ai\/server-key/);
+  // No provider-specific server-key row labels in the admin UI.
+  assert.doesNotMatch(admin, /คีย์ Gemini ของเซิร์ฟเวอร์/);
+  assert.doesNotMatch(admin, /คีย์ Gemini บนเซิร์ฟเวอร์ \(ไฟล์\)/);
+  assert.doesNotMatch(admin, /คีย์ Cursor ของเซิร์ฟเวอร์/);
 });
 
 await check("resolveEffectiveModelForProvider remaps gemini id under cursor", async () => {

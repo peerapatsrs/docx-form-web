@@ -76,6 +76,8 @@ export default function AccountPage() {
   const [ok, setOk] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  /** Keycloak account-console URL for passkeys; null when SSO is not configured. */
+  const [passkeyManageUrl, setPasskeyManageUrl] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     setError("");
@@ -96,6 +98,16 @@ export default function AccountPage() {
     }
     setMe(meData as MePayload);
     setEditName(meData.user.name || "");
+
+    const cfgRes = await fetch("/api/auth-config", { credentials: "include" });
+    const cfg = (await cfgRes.json().catch(() => ({}))) as {
+      passkeyManageUrl?: string | null;
+    };
+    setPasskeyManageUrl(
+      typeof cfg.passkeyManageUrl === "string" && cfg.passkeyManageUrl
+        ? cfg.passkeyManageUrl
+        : null,
+    );
 
     const sess = await authClient.listSessions();
     if (!sess.error && Array.isArray(sess.data)) {
@@ -288,6 +300,24 @@ export default function AccountPage() {
         <AiKeysSection />
 
         <section className="account-panel">
+          <h2 className="auth-section-title">ความปลอดภัย</h2>
+          <p className="auth-hint">
+            Passkey / WebAuthn จัดการที่ Keycloak (IdP กลาง) ไม่ใช่ในแอปนี้
+          </p>
+          {passkeyManageUrl ? (
+            <a
+              className="admin-btn admin-btn-primary"
+              href={passkeyManageUrl}
+              rel="noopener noreferrer"
+            >
+              จัดการ passkey
+            </a>
+          ) : (
+            <p className="auth-hint">SSO ยังไม่ได้ตั้งค่า — ไม่สามารถจัดการ passkey ได้</p>
+          )}
+        </section>
+
+        <section className="account-panel">
           <h2 className="auth-section-title">แผน & โควตา</h2>
           <ul className="admin-kv">
             <li>
@@ -322,14 +352,14 @@ export default function AccountPage() {
           {sessions.length === 0 ? (
             <p className="auth-hint">ไม่พบเซสชัน</p>
           ) : (
-            <ul className="auth-passkey-list">
+            <ul className="account-row-list">
               {sessions.map((s) => {
                 const isCurrent =
                   s.id === currentSession.id ||
                   (currentToken ? s.token === currentToken : false);
                 return (
-                  <li key={s.id} className="auth-passkey-item">
-                    <div className="auth-passkey-meta">
+                  <li key={s.id} className="account-row-item">
+                    <div className="account-row-meta">
                       <strong>
                         {shortUa(s.userAgent)}
                         {isCurrent ? " · เครื่องนี้" : ""}

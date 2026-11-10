@@ -82,3 +82,30 @@ export function logOidcNotConfigured(context: string): void {
     `[oidc] SSO not configured (${context}): set OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET`,
   );
 }
+
+const DEFAULT_PASSKEY_MANAGE_PATH = "/account/#/account-security/signing-in";
+
+/**
+ * Keycloak account-console URL for managing passkeys (WebAuthn lives at the IdP).
+ * Prefer optional `OIDC_PASSKEY_MANAGE_URL`; otherwise derive from issuer:
+ * `${OIDC_ISSUER}/account/#/account-security/signing-in`.
+ * Returns null when OIDC is not configured (or override URL is invalid).
+ */
+export function resolveOidcPasskeyManageUrl(
+  envSource: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const explicit = String(envSource.OIDC_PASSKEY_MANAGE_URL || "").trim();
+  if (explicit) {
+    try {
+      const u = new URL(explicit);
+      if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+      return u.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  const cfg = getOidcConfig(envSource);
+  if (!cfg) return null;
+  return `${cfg.issuer}${DEFAULT_PASSKEY_MANAGE_PATH}`;
+}

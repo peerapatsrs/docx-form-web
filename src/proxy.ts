@@ -69,8 +69,13 @@ export function proxy(request: NextRequest) {
 
   const { pathname } = request.nextUrl;
 
-  // Removed DEV auth paths — always 404.
-  if (pathname.startsWith("/api/auth/dev") || pathname.startsWith("/api/dev/")) {
+  // Removed DEV auth + app-hosted passkey/WebAuthn paths — always 404.
+  if (
+    pathname.startsWith("/api/auth/dev") ||
+    pathname.startsWith("/api/dev/") ||
+    pathname === "/api/auth/passkey" ||
+    pathname.startsWith("/api/auth/passkey/")
+  ) {
     return applySecurityHeaders(new NextResponse(null, { status: 404 }));
   }
 

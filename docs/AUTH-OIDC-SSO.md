@@ -2,7 +2,8 @@
 
 This app is a standard **OIDC Relying Party** of the TPS18 central Keycloak SSO.
 **Keycloak is the only login method.** There is no Google OAuth chooser, password
-form, passkey sign-in, or DEV test-login panel.
+form, app-hosted passkey/WebAuthn, or DEV test-login panel. Passkeys are managed
+in Keycloak’s account console (see `OIDC_PASSKEY_MANAGE_URL`).
 
 Issuer hosts realms under `https://auth.tps18.space` named `tps18-dev` /
 `tps18-sit` / `tps18-uat` / `tps18-prod`. **Never hardcode** the issuer or realm —
@@ -15,6 +16,7 @@ configure per environment via `OIDC_ISSUER`.
 | `OIDC_ISSUER` | **yes** | e.g. `https://auth.tps18.space/realms/tps18-dev` |
 | `OIDC_CLIENT_ID` | **yes** | Confidential client id |
 | `OIDC_CLIENT_SECRET` | **yes** | Client secret |
+| `OIDC_PASSKEY_MANAGE_URL` | no | Override Keycloak passkey management URL. Default: `${OIDC_ISSUER}/account/#/account-security/signing-in` |
 | `APP_BASE_URL` (or `NEXT_PUBLIC_APP_URL` / `BETTER_AUTH_URL` / `RENDER_EXTERNAL_URL`) | yes for redirects | Public base URL |
 | `SUPERADMIN_EMAILS` | recommended | Comma-separated emails promoted to `superadmin` when they match an OIDC-verified email |
 | `BETTER_AUTH_SECRET` | yes | Session signing |
@@ -61,10 +63,12 @@ Pattern: `https://auth.tps18.space/realms/tps18-{env}` where `{env}` is
 | GET | `/api/auth/oidc/login` | Same authorize start (API/FE helper) |
 | GET | `/api/auth/oidc/callback` | Code callback |
 | GET/POST | `/api/auth/oidc/logout` | RP logout |
-| GET | `/api/auth-config` | `{ oidc, ssoLoginPath, ssoLogoutPath }` |
+| GET | `/api/auth-config` | `{ oidc, ssoLoginPath, ssoLogoutPath, passkeyManageUrl }` |
+| — | Account → **จัดการ passkey** | Top-level redirect to Keycloak passkey management (hidden when SSO unset) |
 
 Removed (404): `/api/dev/test-accounts`, `/api/dev/test-login`, `/api/auth/dev/*`,
-social OAuth callbacks, passkey auth endpoints.
+`/api/auth/passkey` (+ `/*`), social OAuth callbacks. App-hosted passkey tables are
+left in place but unused (no migrations that drop them).
 
 ## Roles
 

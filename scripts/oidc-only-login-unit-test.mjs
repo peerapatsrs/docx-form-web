@@ -24,6 +24,7 @@ function clearOidcEnv() {
     "OIDC_ISSUER",
     "OIDC_CLIENT_ID",
     "OIDC_CLIENT_SECRET",
+    "OIDC_PASSKEY_MANAGE_URL",
     "APP_BASE_URL",
     "NEXT_PUBLIC_APP_URL",
     "BETTER_AUTH_URL",
@@ -314,17 +315,39 @@ await check("AuthBar / account logout go to /api/auth/oidc/logout", async () => 
   const account = readFileSync(join(root, "src/app/account/page.tsx"), "utf8");
   assert.match(account, /\/api\/auth\/oidc\/logout/);
   assert.doesNotMatch(account, /passkey\.|linkSocial|unlinkAccount/);
+  assert.doesNotMatch(account, /listUserPasskeys|addPasskey|deletePasskey/);
+  assert.match(account, /จัดการ passkey/);
+  assert.match(account, /passkeyManageUrl/);
+});
+
+await check("app-hosted passkey routes 404; AuthIcons removed", async () => {
+  const proxy = readFileSync(join(root, "src/proxy.ts"), "utf8");
+  assert.match(proxy, /\/api\/auth\/passkey/);
+  assert.match(proxy, /status:\s*404/);
+  let iconsExist = true;
+  try {
+    readFileSync(join(root, "src/components/AuthIcons.tsx"));
+  } catch {
+    iconsExist = false;
+  }
+  assert.equal(iconsExist, false);
+  const auth = readFileSync(join(root, "src/server/auth.ts"), "utf8");
+  assert.doesNotMatch(auth, /from "@better-auth\/passkey"/);
+  assert.doesNotMatch(auth, /passkey\(/);
 });
 
 await check("missing OIDC env does not enable soft social/password fallback", async () => {
-  const { isOidcEnabled, getOidcConfig } = await load("src/server/oidc-config.ts");
+  const { isOidcEnabled, getOidcConfig, resolveOidcPasskeyManageUrl } =
+    await load("src/server/oidc-config.ts");
   assert.equal(isOidcEnabled(), false);
   assert.equal(getOidcConfig(), null);
+  assert.equal(resolveOidcPasskeyManageUrl(), null);
   const authCfg = readFileSync(
     join(root, "src/app/api/auth-config/route.ts"),
     "utf8",
   );
   assert.match(authCfg, /passkey:\s*false/);
+  assert.match(authCfg, /passkeyManageUrl/);
   assert.match(authCfg, /passwordLogin:\s*false/);
   assert.match(authCfg, /providers:\s*\[\]/);
 });

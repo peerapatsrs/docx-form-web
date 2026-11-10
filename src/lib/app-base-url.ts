@@ -32,7 +32,7 @@ export function getAppBaseUrl(): string {
 
 /**
  * Origin used by Better Auth (session cookies / OIDC redirect base).
- * Prefer BETTER_AUTH_URL when set so IdP / WebAuthn origins stay aligned;
+ * Prefer BETTER_AUTH_URL when set so IdP / session cookie origins stay aligned;
  * otherwise fall back to the general app base URL.
  */
 export function getBetterAuthBaseUrl(): string {

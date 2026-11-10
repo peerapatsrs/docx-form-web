@@ -20,6 +20,7 @@ function clearOidcEnv() {
     "OIDC_ISSUER",
     "OIDC_CLIENT_ID",
     "OIDC_CLIENT_SECRET",
+    "OIDC_PASSKEY_MANAGE_URL",
     "ENABLE_PASSWORD_LOGIN",
     "APP_BASE_URL",
     "NEXT_PUBLIC_APP_URL",
@@ -214,6 +215,38 @@ await check("OIDC post-logout URI is /logged-out (no auto-loop to /login)", asyn
   const cfg = getOidcConfig();
   assert.equal(cfg.postLogoutRedirectUri, "https://app.example.com/logged-out");
   assert.doesNotMatch(cfg.postLogoutRedirectUri, /\/login$/);
+});
+
+await check("passkey manage URL derives from issuer when override unset", async () => {
+  process.env.OIDC_ISSUER = ISSUER;
+  process.env.OIDC_CLIENT_ID = CLIENT_ID;
+  process.env.OIDC_CLIENT_SECRET = CLIENT_SECRET;
+  process.env.APP_BASE_URL = "https://app.example.com";
+  const { resolveOidcPasskeyManageUrl } = await loadConfig();
+  assert.equal(
+    resolveOidcPasskeyManageUrl(),
+    `${ISSUER}/account/#/account-security/signing-in`,
+  );
+});
+
+await check("passkey manage URL uses OIDC_PASSKEY_MANAGE_URL override", async () => {
+  process.env.OIDC_ISSUER = ISSUER;
+  process.env.OIDC_CLIENT_ID = CLIENT_ID;
+  process.env.OIDC_CLIENT_SECRET = CLIENT_SECRET;
+  process.env.APP_BASE_URL = "https://app.example.com";
+  process.env.OIDC_PASSKEY_MANAGE_URL =
+    "https://auth.example.com/realms/custom/account/#/security/signingin";
+  const { resolveOidcPasskeyManageUrl } = await loadConfig();
+  assert.equal(
+    resolveOidcPasskeyManageUrl(),
+    "https://auth.example.com/realms/custom/account/#/security/signingin",
+  );
+});
+
+await check("passkey manage URL is null when OIDC is not configured", async () => {
+  const { resolveOidcPasskeyManageUrl, isOidcEnabled } = await loadConfig();
+  assert.equal(isOidcEnabled(), false);
+  assert.equal(resolveOidcPasskeyManageUrl(), null);
 });
 
 await check("PKCE S256 challenge is stable for a verifier", async () => {

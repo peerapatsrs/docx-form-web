@@ -122,10 +122,10 @@ export function AiKeysSection() {
       {entries.length === 0 ? (
         <p className="auth-hint">ยังไม่มีคีย์ในเครื่องนี้</p>
       ) : (
-        <ul className="auth-passkey-list">
+        <ul className="account-row-list">
           {entries.map((e) => (
-            <li key={e.id} className="auth-passkey-item">
-              <div className="auth-passkey-meta">
+            <li key={e.id} className="account-row-item">
+              <div className="account-row-meta">
                 <strong>
                   {e.label || providerLabel(e.provider)}
                   {e.storeOnServer ? " · เซิร์ฟเวอร์" : " · เครื่องนี้"}

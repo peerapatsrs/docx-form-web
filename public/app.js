@@ -20,6 +20,14 @@ import {
   mapFillError,
   maskAiKeyLocal,
 } from "./ai-key-client.js";
+import {
+  collectSelfTagsFromLayout,
+  collectSelfTagsFromText,
+  fieldTableLocation,
+  isStackableStaticTable,
+  mergeMissingTextFields,
+  renderCellTemplateHtml,
+} from "./doc-table-fields.js";
 
 /** @typedef {{ name: string, type: 'text', aliases?: string[] }} TextField */
 /** @typedef {{ name: string, type: 'image', aliases?: string[] }} ImageField */
@@ -2345,15 +2353,9 @@ const CURSOR_STALE_MODELS = new Set([
   "composer-2-fast",
 ]);
 
-function isCrossFamilyCursorModelId(raw) {
-  return /^(gemini|gpt-|o[1-9]|chatgpt|claude|deepseek|grok|mistral|llama|qwen)/i.test(
-    String(raw || "").trim(),
-  );
-}
-
 /**
- * Prefer a model that exists in `models` (live or catalog). Cursor stale /
- * cross-family ids (gemini leftovers) fall back to Composer 2.5.
+ * Prefer a model that exists in `models` (live or catalog). Cursor stale ids
+ * fall back to Composer 2.5 so draft headers do not hard-fail.
  * @param {string} provider
  * @param {string} model
  * @param {{id:string,label?:string}[]=} models
@@ -2373,10 +2375,7 @@ function coerceClientAiModel(provider, model, models) {
         : catalogDef || list[0]?.id || "composer-2.5"
       : catalogDef || list[0]?.id || "";
   const id = String(model || "").trim();
-  if (
-    provider === "cursor" &&
-    (!id || CURSOR_STALE_MODELS.has(id) || isCrossFamilyCursorModelId(id))
-  ) {
+  if (provider === "cursor" && (!id || CURSOR_STALE_MODELS.has(id))) {
     return fallback;
   }
   if (id && ids.size && !ids.has(id)) return fallback || id;
@@ -2386,104 +2385,6 @@ function coerceClientAiModel(provider, model, models) {
 function providerDocs(id) {
   const p = aiProvidersCatalog.find((x) => x.id === id);
   return p?.docsUrl || "https://aistudio.google.com/apikey";
-}
-
-function clientAiTimeoutMs() {
-  const serverMs = Number(aiStatus?.aiTimeoutMs);
-  const base =
-    Number.isFinite(serverMs) && serverMs >= 5000 ? serverMs : 90_000;
-  return base + 15_000;
-}
-
-function formatAiClientError(data, fallback) {
-  const code = String(data?.code || "").trim();
-  const err = String(data?.error || data?.message || "").trim();
-  if (code === "AI_TIMEOUT" || /^AI_TIMEOUT\b/i.test(err)) {
-    return (
-      err ||
-      "AI_TIMEOUT: ผู้ให้บริการ AI ไม่ตอบภายในเวลาที่กำหนด — ลองใหม่หรือเปลี่ยนโมเดล"
-    );
-  }
-  if (err) return err;
-  return fallback || "คำขอ AI ไม่สำเร็จ";
-}
-
-async function pollAiJobResult(jobId, { signal, onProgress, timeoutMs } = {}) {
-  const limit = timeoutMs ?? clientAiTimeoutMs();
-  const deadline = Date.now() + limit;
-  while (true) {
-    if (signal?.aborted) {
-      try {
-        await fetch(`/api/ai/jobs/${encodeURIComponent(jobId)}`, {
-          method: "DELETE",
-          credentials: "include",
-        });
-      } catch {
-        /* ignore */
-      }
-      throw new DOMException("Aborted", "AbortError");
-    }
-    if (Date.now() > deadline) {
-      try {
-        await fetch(`/api/ai/jobs/${encodeURIComponent(jobId)}`, {
-          method: "DELETE",
-          credentials: "include",
-        });
-      } catch {
-        /* ignore */
-      }
-      throw new Error(
-        "AI_TIMEOUT: การรอ AI นานเกินไป — ลองใหม่หรือเปลี่ยนโมเดล",
-      );
-    }
-    const res = await fetch(`/api/ai/jobs/${encodeURIComponent(jobId)}`, {
-      credentials: "include",
-      signal,
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      throw new Error(formatAiClientError(data, "ติดตามงาน AI ไม่สำเร็จ"));
-    }
-    if (onProgress && data.progress) onProgress(data.progress);
-    if (data.status === "done") return data.result ?? data;
-    if (data.status === "error") {
-      throw new Error(formatAiClientError(data, "งาน AI ล้มเหลว"));
-    }
-    if (data.status === "cancelled") {
-      throw new Error(data.error || "ยกเลิกแล้ว");
-    }
-    await sleepMs(1500);
-  }
-}
-
-async function postSuggestTagsAsync(fd, { signal, onProgress, timeoutMs } = {}) {
-  fd.append("async", "1");
-  const res = await fetch("/api/template/suggest-tags?async=1", {
-    method: "POST",
-    body: fd,
-    headers: aiAuthHeaders(),
-    signal,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(formatAiClientError(data, "AI ดราฟตัวแปรไม่สำเร็จ"));
-  }
-  if (data.jobId) {
-    return pollAiJobResult(data.jobId, { signal, onProgress, timeoutMs });
-  }
-  return data;
-}
-
-async function ensureAiProviders() {
-  if (aiProvidersCatalog.length) return aiProvidersCatalog;
-  try {
-    const res = await fetch("/api/ai/providers");
-    const data = await res.json().catch(() => ({}));
-    if (Array.isArray(data.providers)) aiProvidersCatalog = data.providers;
-  } catch {
-    /* ignore */
-  }
-  return aiProvidersCatalog;
 }
 
 async function refreshAiLoginState() {
@@ -2601,75 +2502,52 @@ function applyAiStatus(data) {
   const entry = getActiveAiEntry();
   const clientKey = entry?.apiKey || "";
   const hasVaultRef = !!(entry?.storeOnServer && entry?.id);
-  // Prefer the provider the server will actually use (effective), then vault.
+  const clientModel = entry?.model || "";
   const provider =
-    data.effectiveProvider ||
-    entry?.provider ||
-    data.provider ||
-    "google";
+    entry?.provider || data.effectiveProvider || data.provider || "google";
   if (Array.isArray(data.providers) && data.providers.length) {
     aiProvidersCatalog = data.providers;
   }
-  const models = Array.isArray(data.models)
-    ? data.models
-    : providerModels(provider);
-  // Prefer server effective model so vault leftovers (gemini under Cursor /
-  // shared env key) never win the pill over the model that will actually run.
-  const model = coerceClientAiModel(
-    provider,
-    data.model || entry?.model || data.defaultModel || "",
-    models,
-  );
-  const aiTimeoutMs = Number(data.aiTimeoutMs);
-  const keySource =
-    clientKey || hasVaultRef
-      ? "user"
-      : data.keySource === "user" ||
-          data.keySource === "shared" ||
-          data.keySource === "none"
-        ? data.keySource
-        : data.connected
-          ? "shared"
-          : "none";
   aiStatus = {
-    // When BYOK-only is off, trust server connected / keySource=shared
-    // (env DOCX_FORM_CURSOR_API_KEY or DB server key). Not a plan gate —
-    // quotas stay on /api/entitlement. When byok=true, BE leaves connected
-    // false without a personal key, so this stays personal-key-only.
+    // When BYOK-only is off, trust server connected / keySource=shared.
+    // Quotas stay on /api/entitlement (not a plan gate on the shared key).
     connected:
       !!clientKey ||
       hasVaultRef ||
       hasClientAiCredentials() ||
       !!data.connected,
-    maskedKey: entry ? maskAiEntry(entry) : data.maskedKey || null,
-    model,
-    models,
-    defaultModel:
+    maskedKey: entry ? maskAiEntry(entry) : null,
+    model:
+      clientModel ||
+      data.model ||
       data.defaultModel ||
-      coerceClientAiModel(provider, "", models) ||
-      model,
+      "gemini-3.8-flash",
+    models: Array.isArray(data.models)
+      ? data.models
+      : providerModels(provider),
+    defaultModel: data.defaultModel || "gemini-3.8-flash",
     studioUrl: data.docsUrl || data.studioUrl || providerDocs(provider),
     byok: data.byok !== false,
     provider,
     effectiveProvider: data.effectiveProvider || provider,
-    effectiveModel: data.effectiveModel || model,
+    effectiveModel: data.effectiveModel || data.model || clientModel || "",
     providerLabel:
       data.effectiveProviderLabel ||
       data.providerLabel ||
       providerLabel(provider),
     entryLabel: entry?.label || "",
     providers: aiProvidersCatalog,
-    keySource,
-    keyId: data.keyId || (hasVaultRef ? entry?.id : null) || null,
-    lastTestStatus: data.lastTestStatus || null,
-    lastTestOk:
-      typeof data.lastTestOk === "boolean" ? data.lastTestOk : null,
-    aiTimeoutMs:
-      Number.isFinite(aiTimeoutMs) && aiTimeoutMs >= 5000
-        ? aiTimeoutMs
-        : 90_000,
+    keySource:
+      clientKey || hasVaultRef
+        ? "user"
+        : data.keySource === "user" ||
+            data.keySource === "shared" ||
+            data.keySource === "none"
+          ? data.keySource
+          : data.connected
+            ? "shared"
+            : "none",
   };
-  updateStatusPillFromAi();
 }
 
 /** @type {AbortController|null} */
@@ -3396,7 +3274,7 @@ function countUnfilledFields() {
   }
 }
 
-/** Status pill copy: personal key → ready; shared server key → คีย์เซิร์ฟเวอร์; else no key. */
+/** Status pill: personal key → ready; shared server key → คีย์เซิร์ฟเวอร์; else no key. */
 function syncAiStatusPill() {
   if (!statusText || !statusDot) return;
   const pill = document.getElementById("status");
@@ -3431,7 +3309,7 @@ function syncAiStatusPill() {
   }
   statusDot.classList.add("ok");
   statusDot.classList.remove("bad");
-  if (sharedReady && !hasPersonalKey) {
+  if (sharedReady) {
     const provider =
       aiStatus.providerLabel || providerLabel(getClientAiProvider());
     const model = aiStatus.effectiveModel || aiStatus.model || "";
@@ -3973,11 +3851,6 @@ async function startTaggerSession(file, errorEl) {
     renderTaggerWorkspace();
   } catch (err) {
     const msg = err instanceof Error ? err.message : "อ่านเอกสารไม่สำเร็จ";
-      if (/AI_TIMEOUT/i.test(msg)) {
-        showBanner(
-          "หมดเวลารอ AI อ่านเอกสาร — ลองใหม่หรือเปลี่ยนโมเดล/ผู้ให้บริการ",
-        );
-      }
     if (errorEl) {
       errorEl.hidden = false;
       errorEl.textContent = msg;
@@ -9767,8 +9640,14 @@ async function hydrateTemplateContent(slot, opts = {}) {
     if (multiActiveId === slot.id) {
       state.fileContent = full.fileContent;
       state.fileLayout = full.fileLayout;
+      // Re-merge fields when layout arrives — Backend may omit cell tags until fixed.
+      ensureFieldsFromLayoutTags();
+      live.fields = state.fields;
+      live.values = state.values;
+      live.skip = state.skip;
       renderForm();
     } else {
+      ensureFieldsFromLayoutTagsForSlot(live);
       persistActiveSlot();
     }
     // Never wipe a warning/error from multi-upload — only clear our own progress line.
@@ -10631,8 +10510,57 @@ function fieldsOutsidePreview() {
   });
 }
 
+/**
+ * Client fallback: if Backend left {{name}} in layout cells but omitted them from
+ * `fields`, seed text fields so inline inputs + skip still bind to /api/fill.
+ * When Backend already returns cell tags as normal FormField entries (current
+ * shape: { name, type, aliases? } — optional location.tableIndex / rowIndexInTable /
+ * cellIndex when present), this is a no-op.
+ */
+function ensureFieldsFromLayoutTags() {
+  const tags = [
+    ...collectSelfTagsFromLayout(state.fileLayout || []),
+    ...collectSelfTagsFromText(state.fileContent || ""),
+  ];
+  const { fields, added } = mergeMissingTextFields(state.fields || [], tags);
+  if (!added.length) {
+    state.fields = fields;
+    return;
+  }
+  state.fields = fields;
+  for (const name of added) {
+    if (!(name in state.values)) state.values[name] = "";
+    if (!(name in state.skip)) state.skip[name] = false;
+  }
+  console.info(
+    "[docx-form] client fallback: seeded missing table-cell fields from layout tags:",
+    added.join(", "),
+  );
+}
+
+/** Same seeding for a multi-slot that is not the active one. */
+function ensureFieldsFromLayoutTagsForSlot(slot) {
+  if (!slot) return;
+  const tags = [
+    ...collectSelfTagsFromLayout(slot.fileLayout || []),
+    ...collectSelfTagsFromText(slot.fileContent || ""),
+  ];
+  const { fields, added } = mergeMissingTextFields(slot.fields || [], tags);
+  slot.fields = fields;
+  if (!added.length) return;
+  for (const name of added) {
+    if (!(name in slot.values)) slot.values[name] = "";
+    if (!(name in slot.skip)) slot.skip[name] = false;
+  }
+  console.info(
+    "[docx-form] client fallback: seeded missing table-cell fields from layout tags:",
+    added.join(", "),
+  );
+}
+
 function renderForm() {
   removeTaggerDialogPortals();
+  ensureFieldsFromLayoutTags();
   const useDocLayout =
     state.showFullContent && (state.fileLayout.length > 0 || !!state.fileContent);
   const bodyHtml = state.fileLayout.length
@@ -12011,14 +11939,42 @@ function layoutCellAttrs(cell, opts = {}) {
   return { text: cell.text || "", attrs: parts.length ? ` ${parts.join(" ")}` : "" };
 }
 
+/**
+ * Inner HTML for a layout table cell — never leave raw {{tags}} visible.
+ * Prefers optional Backend cell.fieldName / cell.tags; otherwise tokenizes text.
+ */
+function renderLayoutCellInner(cell) {
+  if (cell && typeof cell === "object") {
+    const fieldName = String(cell.fieldName || "").trim();
+    if (fieldName) return renderInlineBlank(fieldName);
+    if (Array.isArray(cell.tags) && cell.tags.length) {
+      return cell.tags
+        .map((t) => {
+          const name = String(t || "").trim();
+          return name ? renderInlineBlank(name) : "";
+        })
+        .join("");
+    }
+  }
+  const text = cellTextOf(cell);
+  if (/\{\{/.test(text)) {
+    return renderCellTemplateHtml(
+      text,
+      (name) => renderInlineBlank(name),
+      formatPlainText,
+    );
+  }
+  return formatPlainText(text);
+}
+
 function renderLayoutCellTag(tag, cell, extraClass) {
   // Word headers without explicit w:jc often read centered in narrow columns
   const normalized =
     tag === "th" && typeof cell === "object" && cell && !cell.align
       ? { ...cell, align: "center" }
       : cell;
-  const { text, attrs } = layoutCellAttrs(normalized, { extraClass });
-  return `<${tag}${attrs}>${formatPlainText(text)}</${tag}>`;
+  const { attrs } = layoutCellAttrs(normalized, { extraClass });
+  return `<${tag}${attrs}>${renderLayoutCellInner(normalized)}</${tag}>`;
 }
 
 function renderColgroup(block, withRowNum) {
@@ -12048,10 +12004,12 @@ function renderColgroup(block, withRowNum) {
 
 function renderWordTableBlock(block) {
   if (block.staticRows?.length) {
+    const stackable = isStackableStaticTable(block);
     const rows = block.staticRows
       .map((r) => `<tr>${r.map((c) => renderLayoutCellTag("td", c)).join("")}</tr>`)
       .join("");
-    return `<div class="doc-table-scroll doc-table-real"><table class="doc-table doc-table-stretch">${renderColgroup(block, false)}${rows}</table></div>`;
+    const tableClass = `doc-table doc-table-stretch${stackable ? " doc-table-stackable" : ""}`;
+    return `<div class="doc-table-scroll doc-table-real${stackable ? " is-stackable" : ""}"><table class="${tableClass}">${renderColgroup(block, false)}${rows}</table></div>`;
   }
 
   const listName = block.listName || "";
@@ -12071,10 +12029,12 @@ function renderWordTableBlock(block) {
       .join("");
 
   if (!field || field.type !== "list") {
+    // Unbound / non-loop template row: still turn {{tags}} into inputs (never raw text).
     const tmpl = (block.templateCells || [])
       .map((c) => {
-        const { attrs } = layoutCellAttrs(typeof c === "string" ? { text: c } : c);
-        return `<td${attrs}>${formatPlainText(cellTextOf(c))}</td>`;
+        const cellObj = typeof c === "string" ? { text: c } : c;
+        const { attrs } = layoutCellAttrs(cellObj);
+        return `<td${attrs}>${renderLayoutCellInner(cellObj)}</td>`;
       })
       .join("");
     return `<div class="doc-list doc-list-table" data-list-field="${escapeAttr(listName)}">
@@ -12494,6 +12454,18 @@ function renderInlineBlank(name) {
   const skipped = !!state.skip[name];
   const labelMap = currentFieldLabelMap();
   const label = fieldDisplayLabel(field || { name }, labelMap, name);
+  const loc = fieldTableLocation(field);
+  const locAttrs = loc
+    ? [
+        loc.tableIndex != null ? `data-table-index="${loc.tableIndex}"` : "",
+        loc.rowIndexInTable != null
+          ? `data-row-in-table="${loc.rowIndexInTable}"`
+          : "",
+        loc.cellIndex != null ? `data-cell-index="${loc.cellIndex}"` : "",
+      ]
+        .filter(Boolean)
+        .join(" ")
+    : "";
 
   if (field?.type === "image") {
     return renderInlineImageControl(name, { label, showLabel: false });
@@ -12517,7 +12489,7 @@ function renderInlineBlank(name) {
   }
 
   const val = state.values[name] ?? "";
-  return `<span class="doc-blank-wrap ${skipped ? "is-skipped" : ""} ${shouldUseTextarea(val) ? "is-multiline" : ""}">
+  return `<span class="doc-blank-wrap ${skipped ? "is-skipped" : ""} ${shouldUseTextarea(val) ? "is-multiline" : ""}"${locAttrs ? ` ${locAttrs}` : ""}>
     ${renderTextValueControl({
       value: val,
       className: "doc-blank",

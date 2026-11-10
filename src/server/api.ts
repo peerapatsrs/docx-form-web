@@ -1409,6 +1409,16 @@ export function createApi(options: {
   api.post("/template/suggest-tags", async (c) => {
     const denied = await requirePremium(c, PremiumFeature.AiTagDraft);
     if (denied) return denied;
+    const {
+      getOrCreateRequestId,
+      logAiCall,
+      aiProviderErrorJsonBody,
+      isAiTimeoutError,
+    } = await import("./ai-request");
+    const requestId = getOrCreateRequestId(c.req.raw);
+    const startedAt = Date.now();
+    let logProvider = "";
+    let logModel = "";
     try {
       const form = await c.req.formData();
       const file = form.get("file");
@@ -1471,6 +1481,16 @@ export function createApi(options: {
         apiKey: clientKey,
         model: clientModel,
       } = routed;
+      logProvider = clientProvider;
+      logModel = clientModel;
+      logAiCall({
+        route: "/api/template/suggest-tags",
+        provider: clientProvider,
+        model: clientModel,
+        requestId,
+        outcome: "start",
+        phase: "begin",
+      });
 
       const buffer = Buffer.from(await file.arrayBuffer());
       const { assertDocxReadable } = await import("./docx-errors");
@@ -1539,9 +1559,35 @@ export function createApi(options: {
               total: 2,
               message: "กำลังส่งเอกสารให้ AI อ่าน…",
             });
-            const payload = await runSuggest(signal);
-            emit({ step: 2, total: 2, message: "เสร็จแล้ว" });
-            return payload;
+            try {
+              const payload = await runSuggest(signal);
+              emit({ step: 2, total: 2, message: "เสร็จแล้ว" });
+              logAiCall({
+                route: "/api/template/suggest-tags",
+                provider: clientProvider,
+                model: clientModel,
+                requestId,
+                durationMs: Date.now() - startedAt,
+                outcome: "ok",
+                phase: "finish",
+              });
+              return payload;
+            } catch (err) {
+              const body = aiProviderErrorJsonBody(err);
+              logAiCall({
+                route: "/api/template/suggest-tags",
+                provider: clientProvider,
+                model: clientModel,
+                requestId,
+                durationMs: Date.now() - startedAt,
+                errorClass: body.code,
+                outcome: isAiTimeoutError(err) ? "timeout" : "error",
+                phase: "finish",
+              });
+              const e = new Error(body.error) as Error & { code?: string };
+              e.code = body.code;
+              throw e;
+            }
           },
         });
         return c.json(
@@ -1550,10 +1596,39 @@ export function createApi(options: {
         );
       }
 
-      return c.json(await runSuggest(c.req.raw.signal));
+      const payload = await runSuggest(c.req.raw.signal);
+      logAiCall({
+        route: "/api/template/suggest-tags",
+        provider: clientProvider,
+        model: clientModel,
+        requestId,
+        durationMs: Date.now() - startedAt,
+        outcome: "ok",
+        phase: "finish",
+      });
+      return c.json(payload);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: `AI ดราฟตัวแปรไม่สำเร็จ: ${message}` }, 400);
+      const body = aiProviderErrorJsonBody(err);
+      logAiCall({
+        route: "/api/template/suggest-tags",
+        provider: logProvider || null,
+        model: logModel || null,
+        requestId,
+        durationMs: Date.now() - startedAt,
+        errorClass: body.code,
+        outcome: isAiTimeoutError(err) ? "timeout" : "error",
+        phase: "finish",
+      });
+      return c.json(
+        {
+          ...body,
+          error:
+            body.code === "AI_TIMEOUT"
+              ? body.error
+              : `AI ดราฟตัวแปรไม่สำเร็จ: ${body.error}`,
+        },
+        isAiTimeoutError(err) ? 504 : 400,
+      );
     }
   });
 
@@ -1564,6 +1639,17 @@ export function createApi(options: {
   api.post("/batch-from-source", async (c) => {
     const denied = await requirePremium(c, PremiumFeature.BatchFill);
     if (denied) return denied;
+
+    const {
+      getOrCreateRequestId,
+      logAiCall,
+      aiProviderErrorJsonBody,
+      isAiTimeoutError,
+    } = await import("./ai-request");
+    const requestId = getOrCreateRequestId(c.req.raw);
+    const startedAt = Date.now();
+    let logProvider = "";
+    let logModel = "";
 
     try {
       const form = await c.req.formData();
@@ -1597,6 +1683,16 @@ export function createApi(options: {
         apiKey: clientKey,
         model: clientModel,
       } = routed;
+      logProvider = clientProvider;
+      logModel = clientModel;
+      logAiCall({
+        route: "/api/batch-from-source",
+        provider: clientProvider,
+        model: clientModel,
+        requestId,
+        outcome: "start",
+        phase: "begin",
+      });
 
       const schemasRaw = form.get("schemas");
       if (typeof schemasRaw !== "string") {
@@ -1706,7 +1802,7 @@ export function createApi(options: {
             extracted: unknown;
             message?: string;
           }
-        | { type: "error"; error: string; message?: string };
+        | { type: "error"; error: string; message?: string; code?: string };
 
       const runBatch = async (emit: (evt: BatchEvt) => void | Promise<void>) => {
         const [{ detectKind }, { fillDocxFormValuesBatch }, { sourceFilesMeta }] =
@@ -1871,6 +1967,14 @@ export function createApi(options: {
               });
             }
           } catch (err) {
+            // Timeouts / auth failures must surface as route-level errors
+            // (not silent per-template failures) so the UI can stop spinning.
+            if (isAiTimeoutError(err)) throw err;
+            const hay =
+              err instanceof Error ? err.message : String(err || "");
+            if (/API key|หมดอายุ|สิทธิ์ไม่ถูกต้อง|Authentication|unauthorized/i.test(hay)) {
+              throw err;
+            }
             const error = formatTemplateError(err);
             for (const item of fillItems) {
               if (results.some((r) => r.id === item.id && r.ok)) continue;
@@ -1922,17 +2026,46 @@ export function createApi(options: {
         const box: {
           payload: Extract<BatchEvt, { type: "batch-result" }> | null;
           error: string | null;
-        } = { payload: null, error: null };
-        await runBatch((evt) => {
-          if (evt.type === "batch-result") box.payload = evt;
-          if (evt.type === "error") box.error = evt.error;
-        });
+          errorCode: string | null;
+        } = { payload: null, error: null, errorCode: null };
+        try {
+          await runBatch((evt) => {
+            if (evt.type === "batch-result") box.payload = evt;
+            if (evt.type === "error") box.error = evt.error;
+          });
+        } catch (err) {
+          const body = aiProviderErrorJsonBody(err);
+          box.error = body.error;
+          box.errorCode = body.code;
+        }
         if (box.error || !box.payload) {
+          logAiCall({
+            route: "/api/batch-from-source",
+            provider: clientProvider,
+            model: clientModel,
+            requestId,
+            durationMs: Date.now() - startedAt,
+            errorClass: box.errorCode || "AI_PROVIDER_ERROR",
+            outcome: box.errorCode === "AI_TIMEOUT" ? "timeout" : "error",
+            phase: "finish",
+          });
           return c.json(
-            { error: box.error || "แมปหลายเทมเพลตไม่สำเร็จ" },
-            400,
+            {
+              error: box.error || "แมปหลายเทมเพลตไม่สำเร็จ",
+              code: box.errorCode || "AI_PROVIDER_ERROR",
+            },
+            box.errorCode === "AI_TIMEOUT" ? 504 : 400,
           );
         }
+        logAiCall({
+          route: "/api/batch-from-source",
+          provider: clientProvider,
+          model: clientModel,
+          requestId,
+          durationMs: Date.now() - startedAt,
+          outcome: "ok",
+          phase: "finish",
+        });
         return c.json({
           ok: true,
           mapped: box.payload.mapped,
@@ -1950,17 +2083,40 @@ export function createApi(options: {
           };
           try {
             await runBatch(emit);
+            logAiCall({
+              route: "/api/batch-from-source",
+              provider: clientProvider,
+              model: clientModel,
+              requestId,
+              durationMs: Date.now() - startedAt,
+              outcome: "ok",
+              phase: "finish",
+            });
           } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
+            const body = aiProviderErrorJsonBody(err);
+            const message = body.error;
             const cancelled =
               (err instanceof Error && err.name === "AbortError") ||
               /ยกเลิกโดยผู้ใช้/i.test(message);
+            logAiCall({
+              route: "/api/batch-from-source",
+              provider: clientProvider,
+              model: clientModel,
+              requestId,
+              durationMs: Date.now() - startedAt,
+              errorClass: cancelled ? "ABORTED" : body.code,
+              outcome: isAiTimeoutError(err) ? "timeout" : "error",
+              phase: "finish",
+            });
             await emit({
               type: "error",
               error: cancelled
                 ? "ยกเลิกโดยผู้ใช้"
-                : `แมปหลายเทมเพลตไม่สำเร็จ: ${message}`,
+                : body.code === "AI_TIMEOUT"
+                  ? body.error
+                  : `แมปหลายเทมเพลตไม่สำเร็จ: ${message}`,
               message,
+              code: cancelled ? undefined : body.code,
             });
           } finally {
             controller.close();
@@ -1979,8 +2135,27 @@ export function createApi(options: {
         },
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: `แมปหลายเทมเพลตไม่สำเร็จ: ${message}` }, 400);
+      const body = aiProviderErrorJsonBody(err);
+      logAiCall({
+        route: "/api/batch-from-source",
+        provider: logProvider || null,
+        model: logModel || null,
+        requestId,
+        durationMs: Date.now() - startedAt,
+        errorClass: body.code,
+        outcome: isAiTimeoutError(err) ? "timeout" : "error",
+        phase: "finish",
+      });
+      return c.json(
+        {
+          error:
+            body.code === "AI_TIMEOUT"
+              ? body.error
+              : `แมปหลายเทมเพลตไม่สำเร็จ: ${body.error}`,
+          code: body.code,
+        },
+        isAiTimeoutError(err) ? 504 : 400,
+      );
     }
   });
 

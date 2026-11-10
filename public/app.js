@@ -2274,9 +2274,15 @@ const CURSOR_STALE_MODELS = new Set([
   "composer-2-fast",
 ]);
 
+function isCrossFamilyCursorModelId(raw) {
+  return /^(gemini|gpt-|o[1-9]|chatgpt|claude|deepseek|grok|mistral|llama|qwen)/i.test(
+    String(raw || "").trim(),
+  );
+}
+
 /**
- * Prefer a model that exists in `models` (live or catalog). Cursor stale ids
- * fall back to Composer 2.5 so draft headers do not hard-fail.
+ * Prefer a model that exists in `models` (live or catalog). Cursor stale /
+ * cross-family ids (gemini leftovers) fall back to Composer 2.5.
  * @param {string} provider
  * @param {string} model
  * @param {{id:string,label?:string}[]=} models
@@ -2296,7 +2302,10 @@ function coerceClientAiModel(provider, model, models) {
         : catalogDef || list[0]?.id || "composer-2.5"
       : catalogDef || list[0]?.id || "";
   const id = String(model || "").trim();
-  if (provider === "cursor" && (!id || CURSOR_STALE_MODELS.has(id))) {
+  if (
+    provider === "cursor" &&
+    (!id || CURSOR_STALE_MODELS.has(id) || isCrossFamilyCursorModelId(id))
+  ) {
     return fallback;
   }
   if (id && ids.size && !ids.has(id)) return fallback || id;
@@ -2456,12 +2465,14 @@ function applyAiStatus(data) {
   const models = Array.isArray(data.models)
     ? data.models
     : providerModels(provider);
-  // Same remap rules as the server (coerceClientAiModel ↔ resolveEffectiveModel).
+  // Prefer server effective model so vault leftovers (gemini under Cursor /
+  // shared env key) never win the pill over the model that will actually run.
   const model = coerceClientAiModel(
     provider,
-    entry?.model || data.model || data.defaultModel || "",
+    data.model || entry?.model || data.defaultModel || "",
     models,
   );
+  const aiTimeoutMs = Number(data.aiTimeoutMs);
   aiStatus = {
     connected: !!clientKey || hasVaultRef || !!data.connected,
     maskedKey: entry ? maskAiEntry(entry) : data.maskedKey || null,
@@ -2481,6 +2492,10 @@ function applyAiStatus(data) {
       providerLabel(provider),
     entryLabel: entry?.label || "",
     providers: aiProvidersCatalog,
+    aiTimeoutMs:
+      Number.isFinite(aiTimeoutMs) && aiTimeoutMs >= 5000
+        ? aiTimeoutMs
+        : 90_000,
   };
   updateStatusPillFromAi();
 }
@@ -2541,7 +2556,30 @@ function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function pollAiJobResult(jobId, { signal, onProgress } = {}) {
+/** Client wait budget: slightly above the server AI timeout so the server can reply first. */
+function clientAiTimeoutMs() {
+  const serverMs = Number(aiStatus?.aiTimeoutMs);
+  const base =
+    Number.isFinite(serverMs) && serverMs >= 5000 ? serverMs : 90_000;
+  return base + 15_000;
+}
+
+function formatAiClientError(data, fallback) {
+  const code = String(data?.code || "").trim();
+  const err = String(data?.error || data?.message || "").trim();
+  if (code === "AI_TIMEOUT" || /^AI_TIMEOUT\b/i.test(err)) {
+    return (
+      err ||
+      "AI_TIMEOUT: ผู้ให้บริการ AI ไม่ตอบภายในเวลาที่กำหนด — ลองใหม่หรือเปลี่ยนโมเดล"
+    );
+  }
+  if (err) return err;
+  return fallback || "คำขอ AI ไม่สำเร็จ";
+}
+
+async function pollAiJobResult(jobId, { signal, onProgress, timeoutMs } = {}) {
+  const limit = timeoutMs ?? clientAiTimeoutMs();
+  const deadline = Date.now() + limit;
   while (true) {
     if (signal?.aborted) {
       try {
@@ -2554,18 +2592,31 @@ async function pollAiJobResult(jobId, { signal, onProgress } = {}) {
       }
       throw new DOMException("Aborted", "AbortError");
     }
+    if (Date.now() > deadline) {
+      try {
+        await fetch(`/api/ai/jobs/${encodeURIComponent(jobId)}`, {
+          method: "DELETE",
+          credentials: "include",
+        });
+      } catch {
+        /* ignore */
+      }
+      throw new Error(
+        "AI_TIMEOUT: การรอ AI นานเกินไป — ลองใหม่หรือเปลี่ยนโมเดล",
+      );
+    }
     const res = await fetch(`/api/ai/jobs/${encodeURIComponent(jobId)}`, {
       credentials: "include",
       signal,
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      throw new Error(data.error || "ติดตามงาน AI ไม่สำเร็จ");
+      throw new Error(formatAiClientError(data, "ติดตามงาน AI ไม่สำเร็จ"));
     }
     if (onProgress && data.progress) onProgress(data.progress);
     if (data.status === "done") return data.result ?? data;
     if (data.status === "error") {
-      throw new Error(data.error || "งาน AI ล้มเหลว");
+      throw new Error(formatAiClientError(data, "งาน AI ล้มเหลว"));
     }
     if (data.status === "cancelled") {
       throw new Error(data.error || "ยกเลิกแล้ว");
@@ -2574,7 +2625,7 @@ async function pollAiJobResult(jobId, { signal, onProgress } = {}) {
   }
 }
 
-async function postSuggestTagsAsync(fd, { signal, onProgress } = {}) {
+async function postSuggestTagsAsync(fd, { signal, onProgress, timeoutMs } = {}) {
   fd.append("async", "1");
   const res = await fetch("/api/template/suggest-tags?async=1", {
     method: "POST",
@@ -2584,10 +2635,10 @@ async function postSuggestTagsAsync(fd, { signal, onProgress } = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.error || "AI ดราฟตัวแปรไม่สำเร็จ");
+    throw new Error(formatAiClientError(data, "AI ดราฟตัวแปรไม่สำเร็จ"));
   }
   if (data.jobId) {
-    return pollAiJobResult(data.jobId, { signal, onProgress });
+    return pollAiJobResult(data.jobId, { signal, onProgress, timeoutMs });
   }
   return data;
 }
@@ -3574,6 +3625,7 @@ async function runTaggerAiDraft() {
 
   try {
     await refreshAiLoginState();
+    await refreshAiStatus();
     const fd = new FormData();
     fd.append("file", taggerSession.originalFile);
     const byokKey = getClientAiKey();
@@ -3592,12 +3644,35 @@ async function runTaggerAiDraft() {
 
     taggerSuggestAbort?.abort();
     taggerSuggestAbort = new AbortController();
-    const data = await postSuggestTagsAsync(fd, {
-      signal: taggerSuggestAbort.signal,
-      onProgress: (p) => {
-        if (p?.message) showBanner(String(p.message), "progress");
-      },
-    });
+    const clientTimeoutMs = clientAiTimeoutMs();
+    let timedOutByClient = false;
+    const timeoutTimer = setTimeout(() => {
+      timedOutByClient = true;
+      try {
+        taggerSuggestAbort?.abort();
+      } catch {
+        /* ignore */
+      }
+    }, clientTimeoutMs);
+    let data;
+    try {
+      data = await postSuggestTagsAsync(fd, {
+        signal: taggerSuggestAbort.signal,
+        timeoutMs: clientTimeoutMs,
+        onProgress: (p) => {
+          if (p?.message) showBanner(String(p.message), "progress");
+        },
+      });
+    } catch (err) {
+      if (timedOutByClient) {
+        throw new Error(
+          "AI_TIMEOUT: การรอ AI นานเกินไป — ลองใหม่หรือเปลี่ยนโมเดล",
+        );
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeoutTimer);
+    }
     stopAiWaitBanner();
 
     const staff = isAiStaffAdmin();
@@ -3913,11 +3988,20 @@ async function runTaggerAiDraft() {
       );
     }
   } catch (err) {
+    stopAiWaitBanner?.();
     if (err instanceof DOMException && err.name === "AbortError") {
       showBanner("ยกเลิก AI ดราฟตัวแปรแล้ว");
     } else {
       const msg = err instanceof Error ? err.message : "AI ดราฟตัวแปรไม่สำเร็จ";
-      showBanner(msg);
+      if (/AI_TIMEOUT/i.test(msg)) {
+        showBanner(
+          "หมดเวลารอ AI อ่านเอกสาร — ลองใหม่หรือเปลี่ยนโมเดล/ผู้ให้บริการ",
+        );
+      } else if (/Failed to fetch|NetworkError|network/i.test(msg)) {
+        showBanner("เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ — ตรวจเครือข่ายแล้วลองใหม่");
+      } else {
+        showBanner(msg);
+      }
     }
   } finally {
     stopAiWaitBanner?.();
@@ -9845,7 +9929,7 @@ async function runBatchFromSource(sourceFiles) {
       const data = await res.json().catch(() => ({}));
       sourceMapSession = null;
       renderForm();
-      showBanner(data.error || "แมป JSON ไม่สำเร็จ");
+      showBanner(formatAiClientError(data, "แมป JSON ไม่สำเร็จ"));
       return;
     }
 
@@ -9854,7 +9938,7 @@ async function runBatchFromSource(sourceFiles) {
       if (!res.ok) {
         sourceMapSession = null;
         renderForm();
-        showBanner(data.error || "แมป JSON ไม่สำเร็จ");
+        showBanner(formatAiClientError(data, "แมป JSON ไม่สำเร็จ"));
         return;
       }
       applyBatchFromSourceResults(data);

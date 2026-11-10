@@ -9,6 +9,7 @@ import {
   resolveEffectiveModelForProvider,
   type AiProviderId,
 } from "./ai-providers";
+import { getAiTimeoutMs } from "./ai-request";
 
 const CURSOR_SERVER_KEY_ENV = "DOCX_FORM_CURSOR_API_KEY";
 
@@ -531,6 +532,8 @@ export function geminiStatus(opts?: {
     providerLabel: provider.label,
     apiFamily: provider.apiFamily,
     model,
+    /** Server AI call budget (DOCX_FORM_AI_TIMEOUT_MS); client should wait slightly longer. */
+    aiTimeoutMs: getAiTimeoutMs(),
     models: provider.models,
     defaultModel: provider.defaultModel,
     adminDefaultModel: normalizeGeminiModel(opts?.adminDefaultModel) || null,

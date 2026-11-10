@@ -272,6 +272,15 @@ export function resolveCursorModelId(
   }
 
   if (wantsRemap) return fallback;
+  // Cross-family leftovers (gemini-*, gpt-*, …) must never reach Agent.prompt —
+  // without a live catalog they used to pass through and hang the shared-env path.
+  if (
+    /^(gemini|gpt-|o[1-9]|chatgpt|claude|deepseek|grok|mistral|llama|qwen)/i.test(
+      id,
+    )
+  ) {
+    return fallback;
+  }
   if (provider?.models.some((m) => m.id === id)) return id;
   // Unknown id — still pass through (live catalog may accept it); caller
   // can remap again after Cursor.models.list() when a key is present.

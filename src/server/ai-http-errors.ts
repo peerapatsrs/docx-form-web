@@ -45,10 +45,30 @@ function looksInsufficientBalance(hay: string): boolean {
   );
 }
 
-function looksInvalidKey(hay: string): boolean {
-  return /invalid.?api.?key|incorrect api key|api key not valid|unauthorized|authentication|permission.?denied|invalid.?key|wrong api key|expired.?key/i.test(
+export function looksInvalidKey(hay: string): boolean {
+  return /invalid.?api.?key|incorrect api key|api key not valid|unauthorized|authentication|permission.?denied|invalid.?key|wrong api key|expired.?key|หมดอายุ|ไม่ถูกต้องหรือหมดอายุ/i.test(
     hay,
   );
+}
+
+/** True when an AI provider error is auth/key rejection (not quota/model/etc.). */
+export function isAiCredentialAuthError(err: unknown): boolean {
+  if (!err) return false;
+  const status =
+    typeof err === "object" && err && "status" in err
+      ? Number((err as { status?: unknown }).status)
+      : NaN;
+  if (status === 401 || status === 403) return true;
+  const hay =
+    err instanceof Error
+      ? `${err.name} ${err.message}`
+      : typeof err === "string"
+        ? err
+        : String(err);
+  if (/API key หรือสิทธิ์ไม่ถูกต้อง|API key ไม่ถูกต้องหรือหมดอายุ/i.test(hay)) {
+    return true;
+  }
+  return looksInvalidKey(hay);
 }
 
 function looksQuota(hay: string): boolean {

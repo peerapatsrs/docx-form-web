@@ -347,3 +347,41 @@ export function defaultModelForProvider(providerId: string | null | undefined): 
   const p = getAiProvider(providerId);
   return p?.defaultModel || "gemini-3.8-flash";
 }
+
+/**
+ * Model the server will actually send for this provider — same remap rules as
+ * fill/tag calls (Cursor stale/cross-family ids → registry default).
+ * Use this for status pills /admin displays so the label matches the call.
+ *
+ * For Cursor, pass the static catalog as the availability set so unknown
+ * leftovers like `gemini-3.8-flash` remap to `composer-2.5` the same way
+ * `resolveCursorModelForCall` does once the live list is loaded.
+ */
+export function resolveEffectiveModelForProvider(
+  providerId: string | null | undefined,
+  raw: unknown,
+): string {
+  const provider = getAiProvider(providerId) || getAiProvider("google");
+  const normalized = normalizeProviderModel(providerId, raw);
+  if (provider?.apiFamily === "cursor") {
+    const catalogIds = provider.models.map((m) => m.id);
+    return resolveCursorModelId(
+      normalized || String(raw || ""),
+      catalogIds.length ? catalogIds : null,
+    );
+  }
+  if (normalized) {
+    // Cross-family leftovers (e.g. gemini id while effective provider is openai)
+    // fall through to that provider's default when not in its static catalog and
+    // the catalog is non-empty.
+    if (
+      provider &&
+      provider.models.length > 0 &&
+      !provider.models.some((m) => m.id === normalized)
+    ) {
+      return provider.defaultModel;
+    }
+    return normalized;
+  }
+  return provider?.defaultModel || defaultModelForProvider(providerId);
+}

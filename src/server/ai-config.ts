@@ -6,6 +6,7 @@ import {
   getAiProvider,
   listAiProvidersPublic,
   normalizeProviderModel,
+  resolveEffectiveModelForProvider,
   type AiProviderId,
 } from "./ai-providers";
 
@@ -21,6 +22,19 @@ export type RequestAiCredentials = {
   provider: AiProviderId | string;
   apiKey?: string;
   model?: string;
+};
+
+/** Credentials after vault / header resolution (may include vault metadata). */
+export type ResolvedRequestAiCredentials = RequestAiCredentials & {
+  keyId?: string;
+  /** True when apiKey came from this user's vault row. */
+  fromUserVault?: boolean;
+  /** Vault label for error messages (never a secret). */
+  keyLabel?: string;
+  /** X-Ai-Key-Id that was requested, even when the row was missing/deleted. */
+  requestedKeyId?: string;
+  /** True when missing vault key was replaced by DOCX_FORM_CURSOR_API_KEY. */
+  usedSharedEnvFallback?: boolean;
 };
 
 function resolveConfigDir(): string {
@@ -103,6 +117,19 @@ export function clearGeminiKey(): AiConfig {
   }
   writeFileSync(CONFIG_PATH, JSON.stringify(cur, null, 2), "utf-8");
   return cur;
+}
+
+/** True when a Gemini key is persisted in the server config file (not env). */
+export function hasServerFileGeminiKey(): boolean {
+  if (isByokOnly()) return false;
+  const cfg = readAiConfig().geminiApiKey;
+  return Boolean(cfg && String(cfg).trim());
+}
+
+/** Mask for file-stored Gemini key only — never masks env key material. */
+export function maskServerFileGeminiKey(): string | null {
+  if (!hasServerFileGeminiKey()) return null;
+  return maskGeminiKey(String(readAiConfig().geminiApiKey || ""));
 }
 
 /** Mask secrets for UI lists — last 4 only (never prefix+suffix of the secret). */
@@ -230,11 +257,13 @@ export function getRequestAiCredentials(
 /**
  * Resolve credentials preferring vault key id (no plaintext round-trip).
  * Falls back to per-request API key header for unsynced / guest BYOK.
+ * Missing/deleted vault ids do not throw — callers use
+ * {@link coalesceAiCredentialsWithSharedEnv} / {@link missingAiCredentialsError}.
  */
 export async function resolveRequestAiCredentials(
   req: Request,
   userId?: string | null,
-): Promise<RequestAiCredentials & { keyId?: string }> {
+): Promise<ResolvedRequestAiCredentials> {
   const base = getRequestAiCredentials(req);
   const keyId = getRequestAiKeyId(req);
   if (keyId && userId) {
@@ -250,13 +279,129 @@ export async function resolveRequestAiCredentials(
             base.model ||
             defaultModelForProvider(row.provider || base.provider),
           keyId: row.id,
+          requestedKeyId: keyId,
+          fromUserVault: true,
+          keyLabel: row.label || row.provider || row.id,
         };
       }
     } catch {
       /* fall through to header key */
     }
+    return {
+      ...base,
+      keyId,
+      requestedKeyId: keyId,
+      fromUserVault: false,
+    };
   }
-  return { ...base, keyId };
+  return { ...base, keyId, requestedKeyId: keyId, fromUserVault: false };
+}
+
+/**
+ * Shared Cursor env key for auth/missing-vault fallback.
+ * Reads DOCX_FORM_CURSOR_API_KEY even when BYOK-only is on (unlike getCursorApiKey).
+ * Never log or return this value to clients.
+ */
+export function peekSharedCursorEnvApiKey(): string | undefined {
+  const fromEnv = process.env[CURSOR_SERVER_KEY_ENV];
+  const key = fromEnv && String(fromEnv).trim() ? String(fromEnv).trim() : "";
+  return key || undefined;
+}
+
+export function formatSavedAiKeyAuthError(opts: {
+  keyId?: string | null;
+  label?: string | null;
+}): string {
+  const label = String(opts.label || "").trim();
+  const id = String(opts.keyId || "").trim();
+  if (label && id && label !== id) {
+    return `คีย์ AI ที่บันทึกไว้「${label}」(id: ${id}) ถูกปฏิเสธจากผู้ให้บริการ (ไม่ถูกต้อง/หมดอายุ/ไม่มีสิทธิ์) — ตรวจคีย์นี้หรือตั้ง DOCX_FORM_CURSOR_API_KEY เป็นตัวสำรอง`;
+  }
+  if (label) {
+    return `คีย์ AI ที่บันทึกไว้「${label}」ถูกปฏิเสธจากผู้ให้บริการ (ไม่ถูกต้อง/หมดอายุ/ไม่มีสิทธิ์) — ตรวจคีย์นี้หรือตั้ง DOCX_FORM_CURSOR_API_KEY เป็นตัวสำรอง`;
+  }
+  if (id) {
+    return `คีย์ AI ที่บันทึกไว้ (id: ${id}) ถูกปฏิเสธจากผู้ให้บริการ (ไม่ถูกต้อง/หมดอายุ/ไม่มีสิทธิ์) — ตรวจคีย์นี้หรือตั้ง DOCX_FORM_CURSOR_API_KEY เป็นตัวสำรอง`;
+  }
+  return "คีย์ AI ที่บันทึกไว้ถูกปฏิเสธจากผู้ให้บริการ (ไม่ถูกต้อง/หมดอายุ/ไม่มีสิทธิ์)";
+}
+
+export function formatMissingVaultAiKeyError(opts: {
+  keyId?: string | null;
+}): string {
+  const id = String(opts.keyId || "").trim();
+  if (id) {
+    return `ไม่พบคีย์ AI ที่บันทึกไว้ (id: ${id}) — อาจถูกลบแล้ว หรือไม่มีสิทธิ์ใช้คีย์นี้`;
+  }
+  return "ไม่พบคีย์ AI ที่บันทึกไว้ — อาจถูกลบแล้ว หรือไม่มีสิทธิ์ใช้คีย์นี้";
+}
+
+export function missingAiCredentialsError(
+  creds?: Pick<ResolvedRequestAiCredentials, "requestedKeyId" | "fromUserVault"> | null,
+): string {
+  const requested = String(creds?.requestedKeyId || "").trim();
+  if (requested && !creds?.fromUserVault) {
+    return formatMissingVaultAiKeyError({ keyId: requested });
+  }
+  return "ยังไม่มี AI API key — กด «ใส่ AI key» แล้วเลือกผู้ให้บริการและใส่ key ของคุณ หรือซิงก์คีย์ขึ้นเซิร์ฟเวอร์แล้วส่ง X-Ai-Key-Id";
+}
+
+/**
+ * When X-Ai-Key-Id was sent but the vault row is gone, use shared env Cursor key
+ * if configured (same rule as auth rejection fallback). Otherwise leave unresolved.
+ */
+export function coalesceAiCredentialsWithSharedEnv(
+  creds: ResolvedRequestAiCredentials,
+): ResolvedRequestAiCredentials {
+  if (creds.apiKey && String(creds.apiKey).trim()) return creds;
+  const requested = String(creds.requestedKeyId || creds.keyId || "").trim();
+  if (!requested) return creds;
+  const shared = peekSharedCursorEnvApiKey();
+  if (!shared) return creds;
+  return {
+    provider: "cursor",
+    apiKey: shared,
+    model: defaultModelForProvider("cursor"),
+    keyId: requested,
+    requestedKeyId: requested,
+    fromUserVault: false,
+    usedSharedEnvFallback: true,
+  };
+}
+
+/**
+ * Run an AI call; if the user's own vault key is rejected (auth only),
+ * retry once with DOCX_FORM_CURSOR_API_KEY when configured.
+ */
+export async function runWithSavedAiKeyAuthFallback<T>(
+  creds: ResolvedRequestAiCredentials,
+  run: (effective: RequestAiCredentials) => Promise<T>,
+): Promise<T> {
+  try {
+    return await run({
+      provider: creds.provider,
+      apiKey: creds.apiKey,
+      model: creds.model,
+    });
+  } catch (err) {
+    if (!creds.fromUserVault) throw err;
+    const { isAiCredentialAuthError } = await import("./ai-http-errors");
+    if (!isAiCredentialAuthError(err)) throw err;
+    const shared = peekSharedCursorEnvApiKey();
+    if (!shared) {
+      throw new Error(
+        formatSavedAiKeyAuthError({
+          keyId: creds.keyId || creds.requestedKeyId,
+          label: creds.keyLabel,
+        }),
+      );
+    }
+    return await run({
+      provider: "cursor",
+      apiKey: shared,
+      model: defaultModelForProvider("cursor"),
+    });
+  }
 }
 
 /**
@@ -364,15 +509,18 @@ export function geminiStatus(opts?: {
         : opts?.requestKey && String(opts.requestKey).trim()
           ? String(opts.requestKey).trim()
           : undefined;
-  const model =
-    normalizeProviderModel(providerId, opts?.requestModel) ||
+  const rawModel =
+    opts?.requestModel ||
     (provider.apiFamily === "gemini"
       ? normalizeGeminiModel(readAiConfig().geminiModel)
       : null) ||
     (provider.apiFamily === "gemini"
       ? normalizeGeminiModel(opts?.adminDefaultModel)
       : null) ||
-    provider.defaultModel;
+    null;
+  // Same resolver the fill/tag paths use — pill must not show a cross-family
+  // leftover like gemini-3.8-flash when effective provider is Cursor.
+  const model = resolveEffectiveModelForProvider(providerId, rawModel);
   return {
     connected: !!key,
     byok: isByokOnly(),

@@ -10,6 +10,9 @@ type AiStatus = {
   adminDefaultModel?: string | null;
   hasServerEnvKey?: boolean;
   hasServerEnvCursorKey?: boolean;
+  hasServerFileGeminiKey?: boolean;
+  serverEnvCursorKeySource?: string | null;
+  serverEnvGeminiKeySource?: string | null;
   effectiveProvider?: string;
   effectiveProviderLabel?: string;
   adminDefaultProvider?: string;
@@ -27,24 +30,28 @@ export default function AdminAiPage() {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
 
+  async function load() {
+    const res = await fetch("/api/admin/ai", { credentials: "include" });
+    const data = (await res.json().catch(() => ({}))) as {
+      settings?: { defaultModel?: string };
+      status?: AiStatus;
+      error?: string;
+    };
+    if (!res.ok) {
+      setError(data.error || "โหลดสถานะ AI ไม่สำเร็จ");
+    } else {
+      setStatus(data.status || null);
+      setDefaultModel(
+        data.settings?.defaultModel ||
+          data.status?.adminDefaultModel ||
+          "gemini-3.8-flash",
+      );
+    }
+  }
+
   useEffect(() => {
     void (async () => {
-      const res = await fetch("/api/admin/ai", { credentials: "include" });
-      const data = (await res.json().catch(() => ({}))) as {
-        settings?: { defaultModel?: string };
-        status?: AiStatus;
-        error?: string;
-      };
-      if (!res.ok) {
-        setError(data.error || "โหลดสถานะ AI ไม่สำเร็จ");
-      } else {
-        setStatus(data.status || null);
-        setDefaultModel(
-          data.settings?.defaultModel ||
-            data.status?.adminDefaultModel ||
-            "gemini-3.8-flash",
-        );
-      }
+      await load();
       setLoading(false);
     })();
   }, []);
@@ -78,6 +85,38 @@ export default function AdminAiPage() {
     }
   }
 
+  async function clearServerFileKey() {
+    if (
+      !window.confirm(
+        "ลบคีย์ Gemini ที่เก็บบนเซิร์ฟเวอร์ (ไฟล์)? คีย์จาก env จะไม่ถูกลบ",
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setOk("");
+    try {
+      const res = await fetch("/api/admin/ai/server-key", {
+        method: "DELETE",
+        credentials: "include",
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        status?: AiStatus;
+        error?: string;
+      };
+      if (!res.ok) {
+        setError(data.error || "ลบคีย์ไม่สำเร็จ");
+        return;
+      }
+      setStatus(data.status || null);
+      setOk("ลบคีย์บนเซิร์ฟเวอร์แล้ว");
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (loading) {
     return (
       <section className="admin-panel">
@@ -99,11 +138,27 @@ export default function AdminAiPage() {
           </li>
           <li>
             <span>คีย์ Gemini จาก env</span>
-            <strong>{status?.hasServerEnvKey ? "มี" : "ไม่มี"}</strong>
+            <strong>
+              {status?.hasServerEnvKey
+                ? status.serverEnvGeminiKeySource || "set via server"
+                : "ไม่มี"}
+            </strong>
           </li>
           <li>
             <span>คีย์ Cursor จาก env (DOCX_FORM_CURSOR_API_KEY)</span>
-            <strong>{status?.hasServerEnvCursorKey ? "มี" : "ไม่มี"}</strong>
+            <strong>
+              {status?.hasServerEnvCursorKey
+                ? status.serverEnvCursorKeySource || "set via server"
+                : "ไม่มี"}
+            </strong>
+          </li>
+          <li>
+            <span>คีย์ Gemini บนเซิร์ฟเวอร์ (ไฟล์)</span>
+            <strong>
+              {status?.hasServerFileGeminiKey
+                ? status.maskedKey || "มี"
+                : "ไม่มี"}
+            </strong>
           </li>
           <li>
             <span>PREMIUM_ENFORCE</span>
@@ -130,6 +185,21 @@ export default function AdminAiPage() {
             <strong>{status?.configPath || "—"}</strong>
           </li>
         </ul>
+        {status?.hasServerFileGeminiKey ? (
+          <p className="admin-muted" style={{ marginTop: "0.75rem" }}>
+            <button
+              type="button"
+              className="admin-btn admin-btn-danger"
+              disabled={busy}
+              onClick={() => void clearServerFileKey()}
+            >
+              ลบคีย์บนเซิร์ฟเวอร์ (ไฟล์)
+            </button>
+          </p>
+        ) : null}
+        <p className="admin-muted">
+          คีย์จาก env เป็นแบบอ่านอย่างเดียว (set via server) — ลบผ่าน UI ไม่ได้ · ไม่แสดงค่าคีย์
+        </p>
         {status?.studioUrl ? (
           <p className="admin-muted">
             <a href={status.studioUrl} target="_blank" rel="noreferrer">

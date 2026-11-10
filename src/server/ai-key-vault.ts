@@ -15,6 +15,13 @@ export type UserAiKeyRow = {
   apiKey: string;
 };
 
+/** Client vault ids look like `k-<time>-<rand>`; reject empty / path-like junk. */
+export function isValidUserAiKeyId(id: unknown): boolean {
+  const s = String(id || "").trim();
+  if (!s || s.length > 128) return false;
+  return /^[a-zA-Z0-9._-]+$/.test(s);
+}
+
 function vaultSecret(): string {
   return (
     String(process.env.AI_VAULT_SECRET || "").trim() ||
@@ -145,11 +152,13 @@ export async function deleteUserAiKey(
   userId: string,
   id: string,
 ): Promise<boolean> {
+  const keyId = String(id || "").trim();
+  if (!isValidUserAiKeyId(keyId)) return false;
   await ensureUserAiKeysTable();
   const pool = getAuthPool();
   const res = await pool.query(
     `DELETE FROM user_ai_keys WHERE id = $1 AND "userId" = $2`,
-    [String(id || "").trim(), userId],
+    [keyId, userId],
   );
   return (res.rowCount || 0) > 0;
 }

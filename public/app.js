@@ -14,6 +14,10 @@ import {
   layoutBlocksToPlainText,
   listDisplayName,
 } from "./ui-labels.js";
+import {
+  openAiKeysDialog,
+  installAiKeysDialogGlobal,
+} from "./ai-keys-dialog.js";
 
 /** @typedef {{ name: string, type: 'text', aliases?: string[] }} TextField */
 /** @typedef {{ name: string, type: 'image', aliases?: string[] }} ImageField */
@@ -2440,24 +2444,33 @@ function applyAiStatus(data) {
   const entry = getActiveAiEntry();
   const clientKey = entry?.apiKey || "";
   const hasVaultRef = !!(entry?.storeOnServer && entry?.id);
-  const clientModel = entry?.model || "";
+  // Prefer the provider the server will actually use (effective), then vault.
   const provider =
-    entry?.provider || data.effectiveProvider || data.provider || "google";
+    data.effectiveProvider ||
+    entry?.provider ||
+    data.provider ||
+    "google";
   if (Array.isArray(data.providers) && data.providers.length) {
     aiProvidersCatalog = data.providers;
   }
+  const models = Array.isArray(data.models)
+    ? data.models
+    : providerModels(provider);
+  // Same remap rules as the server (coerceClientAiModel ↔ resolveEffectiveModel).
+  const model = coerceClientAiModel(
+    provider,
+    entry?.model || data.model || data.defaultModel || "",
+    models,
+  );
   aiStatus = {
     connected: !!clientKey || hasVaultRef || !!data.connected,
     maskedKey: entry ? maskAiEntry(entry) : data.maskedKey || null,
-    model:
-      clientModel ||
-      data.model ||
+    model,
+    models,
+    defaultModel:
       data.defaultModel ||
-      "gemini-3.8-flash",
-    models: Array.isArray(data.models)
-      ? data.models
-      : providerModels(provider),
-    defaultModel: data.defaultModel || "gemini-3.8-flash",
+      coerceClientAiModel(provider, "", models) ||
+      model,
     studioUrl: data.docsUrl || data.studioUrl || providerDocs(provider),
     byok: data.byok !== false,
     provider,
@@ -2469,6 +2482,56 @@ function applyAiStatus(data) {
     entryLabel: entry?.label || "",
     providers: aiProvidersCatalog,
   };
+  updateStatusPillFromAi();
+}
+
+function updateStatusPillFromAi() {
+  refreshShellElements();
+  if (!statusText) return;
+  statusText.textContent = aiStatus.connected
+    ? `พร้อมใช้ · ${aiStatus.providerLabel || "AI"} · ${aiStatus.model || ""}`
+    : "พร้อมใช้";
+}
+
+function bindStatusPillAiKeysOpener() {
+  refreshShellElements();
+  const pill = document.getElementById("status");
+  if (!pill || pill.dataset.aiKeysBound === "1") return;
+  pill.dataset.aiKeysBound = "1";
+  pill.setAttribute("role", "button");
+  pill.setAttribute("tabindex", "0");
+  pill.setAttribute("title", "จัดการคีย์ AI ของคุณ");
+  pill.style.cursor = "pointer";
+  const open = () => {
+    void openSharedAiKeysDialog();
+  };
+  pill.addEventListener("click", open);
+  pill.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      open();
+    }
+  });
+}
+
+async function openSharedAiKeysDialog() {
+  await openAiKeysDialog({
+    onBanner: (msg, kind) => {
+      if (!msg) {
+        showBanner("");
+        return;
+      }
+      showBanner(msg, kind || undefined);
+      setTimeout(() => showBanner(""), 3200);
+    },
+    onChange: () => {
+      void refreshAiStatus().then(() => {
+        updateStatusPillFromAi();
+        if (state.file) renderForm();
+        if (taggerSession) renderTaggerWorkspace();
+      });
+    },
+  });
 }
 
 /** @type {AbortController|null} */
@@ -2836,311 +2899,12 @@ async function promptAddAiKey() {
 }
 
 async function openAiKeysManager() {
-  await ensureAiProviders();
-  await refreshAiLoginState();
-  await pullServerAiKeys();
-  await refreshAiStatus();
-
-  const renderList = () => {
-    const vault = readAiVault();
-    if (!vault.entries.length) {
-      return `<p class="dialog-body">ยังไม่มีคีย์ — กด «เพิ่มคีย์» เพื่อเลือกผู้ให้บริการ (Gemini, OpenAI, Claude, OpenRouter ฯลฯ)</p>`;
-    }
-    return `<div class="ai-key-list" role="list">${vault.entries
-      .map((e) => {
-        const active = e.id === vault.activeId;
-        const where = e.storeOnServer ? "เซิร์ฟเวอร์" : "เครื่องนี้";
-        const syncBtn = aiUserLoggedIn
-          ? `<button type="button" class="btn-ghost btn-compact ai-key-sync" data-sync="${escapeAttr(e.id)}" title="${e.storeOnServer ? "เลิกเก็บบนเซิร์ฟเวอร์" : "เก็บคีย์นี้บนเซิร์ฟเวอร์"}">${e.storeOnServer ? "เลิกซิงก์" : "ซิงก์"}</button>`
-          : "";
-        return `<label class="ai-key-row ${active ? "is-active" : ""}" role="listitem">
-          <input type="radio" name="aiActiveKey" value="${escapeAttr(e.id)}" ${active ? "checked" : ""} />
-          <span class="ai-key-meta">
-            <strong>${escapeHtml(e.label || providerLabel(e.provider))} <span class="ai-key-badge">${escapeHtml(where)}</span></strong>
-            <small>${escapeHtml(providerLabel(e.provider))} · ${escapeHtml(e.model)} · ${escapeHtml(maskAiEntry(e))}</small>
-          </span>
-          ${syncBtn}
-          <button type="button" class="btn-ghost btn-compact ai-key-del" data-del="${escapeAttr(e.id)}" title="ลบคีย์นี้">ลบ</button>
-        </label>`;
-      })
-      .join("")}</div>`;
-  };
-
-  return new Promise((resolve) => {
-    const existing = document.getElementById("appDialog");
-    if (existing) existing.remove();
-
-    const overlay = document.createElement("div");
-    overlay.id = "appDialog";
-    overlay.className = "dialog-overlay";
-    overlay.setAttribute("role", "dialog");
-    overlay.setAttribute("aria-modal", "true");
-    overlay.setAttribute("aria-labelledby", "aiKeysDialogTitle");
-    overlay.setAttribute("aria-describedby", "aiKeysDialogBody");
-    let releaseFocus = () => {};
-
-    const paint = () => {
-      const vault = readAiVault();
-      const active = getActiveAiEntry();
-      const allowAdd = canAddAiKey();
-      const quotaHint = premiumStatus.paid
-        ? "แผนจ่ายแล้ว · เพิ่มหลายคีย์ได้ · คีย์ที่เลือกจะใช้ตอนแมปเอกสาร"
-        : `แผนฟรีเก็บได้ ${FREE_MAX_AI_KEYS} คีย์ · จ่ายแล้วถึงจะเพิ่มมากกว่า 1 อันได้`;
-      const syncHint = aiUserLoggedIn
-        ? "ล็อกอินแล้ว · กด「ซิงก์」หรือติ๊กตอนเพิ่มคีย์เพื่อเก็บบนเซิร์ฟเวอร์"
-        : "ยังไม่ล็อกอิน · คีย์อยู่แค่เครื่องนี้";
-      overlay.innerHTML = `
-        <div class="dialog-card dialog-card-wide">
-          <h2 class="dialog-title" id="aiKeysDialogTitle">คีย์ AI ของคุณ</h2>
-          <p class="dialog-body" id="aiKeysDialogBody">${escapeHtml(quotaHint)} · ${escapeHtml(syncHint)}</p>
-          ${renderList()}
-          <div class="dialog-actions dialog-actions-stack">
-            <button type="button" class="btn-primary" data-ai-act="add" title="${allowAdd ? "เพิ่มคีย์ผู้ให้บริการ" : "แผนฟรีมีได้ 1 คีย์ — จ่ายแล้วถึงจะเพิ่มได้อีก"}">${allowAdd ? "เพิ่มคีย์" : "เพิ่มคีย์ (จ่ายแล้ว)"}</button>
-            <button type="button" class="btn-secondary" data-ai-act="use" ${vault.entries.length ? "" : "disabled"}>ใช้คีย์ที่เลือก</button>
-            <button type="button" class="btn-secondary" data-ai-act="edit-model" ${active ? "" : "disabled"}>เปลี่ยนโมเดลคีย์ที่เลือก</button>
-            <button type="button" class="btn-ghost" data-ai-act="close">ปิด</button>
-          </div>
-        </div>`;
-
-      overlay.querySelector('[data-ai-act="close"]')?.addEventListener("click", () => {
-        releaseFocus();
-        overlay.remove();
-        document.removeEventListener("keydown", onKey);
-        resolve("close");
-      });
-      overlay.querySelector('[data-ai-act="add"]')?.addEventListener("click", () => {
-        void (async () => {
-          if (!canAddAiKey()) {
-            await explainAiKeyQuota();
-            paint();
-            return;
-          }
-          releaseFocus();
-          overlay.remove();
-          document.removeEventListener("keydown", onKey);
-          const ok = await promptAddAiKey();
-          if (state.file) renderForm();
-          if (ok || readAiVault().entries.length) {
-            await openAiKeysManager();
-          }
-          resolve("add");
-        })();
-      });
-      overlay.querySelector('[data-ai-act="use"]')?.addEventListener("click", () => {
-        const checked = /** @type {HTMLInputElement | null} */ (
-          overlay.querySelector('input[name="aiActiveKey"]:checked')
-        );
-        const vaultNow = readAiVault();
-        if (checked?.value) {
-          vaultNow.activeId = checked.value;
-          writeAiVault(vaultNow);
-        }
-        applyAiStatus({
-          connected: !!hasClientAiCredentials(),
-          byok: true,
-          provider: getClientAiProvider(),
-          models: providerModels(getClientAiProvider()),
-        });
-        if (state.file) renderForm();
-        const e = getActiveAiEntry();
-        showBanner(
-          e
-            ? `ใช้คีย์「${e.label}」· ${providerLabel(e.provider)} · ${e.model}`
-            : "ยังไม่ได้เลือกคีย์",
-          e ? "success" : undefined,
-        );
-        setTimeout(() => showBanner(""), 2800);
-        releaseFocus();
-        overlay.remove();
-        document.removeEventListener("keydown", onKey);
-        resolve("use");
-      });
-      overlay.querySelector('[data-ai-act="edit-model"]')?.addEventListener("click", () => {
-        void (async () => {
-          const checked = /** @type {HTMLInputElement | null} */ (
-            overlay.querySelector('input[name="aiActiveKey"]:checked')
-          );
-          const vaultNow = readAiVault();
-          const entry =
-            vaultNow.entries.find((e) => e.id === checked?.value) ||
-            getActiveAiEntry();
-          if (!entry) return;
-          releaseFocus();
-          overlay.remove();
-          document.removeEventListener("keydown", onKey);
-          showBanner("กำลังดึงรายการโมเดลจาก API…", "progress");
-          const live = await fetchLiveProviderModels(entry.provider, entry.apiKey);
-          hideBanner();
-          const models = live.models.length ? live.models : providerModels(entry.provider);
-          if (live.warning && live.source !== "live") {
-            const tip = String(live.warning).replace(/\s+/g, " ").trim();
-            showBanner(
-              tip.length > 140
-                ? `ใช้รายการสำรอง — ${tip.slice(0, 137)}…`
-                : `ใช้รายการสำรอง — ${tip}`,
-            );
-            setTimeout(() => showBanner(""), 4200);
-          }
-          const choice = await askDialog({
-            title: `โมเดล · ${entry.label}`,
-            body:
-              live.source === "live"
-                ? `${providerLabel(entry.provider)} · ${maskAiEntry(entry)} · รายการจาก API`
-                : `${providerLabel(entry.provider)} · ${maskAiEntry(entry)} · ดึงจาก API ไม่ได้ — ใช้รายการสำรองหรือพิมพ์เอง`,
-            select: {
-              label: "โมเดล",
-              value: coerceClientAiModel(
-                entry.provider,
-                entry.model,
-                models,
-              ),
-              options: models,
-            },
-            actions: [
-              { id: "save", label: "บันทึก", kind: "primary" },
-              { id: "abort", label: "ยกเลิก", kind: "ghost" },
-            ],
-          });
-          if (choice && choice !== "abort" && choice.id === "save") {
-            const model = coerceClientAiModel(
-              entry.provider,
-              String(choice.model || "").trim(),
-              models,
-            );
-            if (model) {
-              entry.model = model;
-              vaultNow.activeId = entry.id;
-              writeAiVault(vaultNow);
-              if (entry.storeOnServer) void pushServerAiKey(entry);
-              applyAiStatus({
-                connected: true,
-                byok: true,
-                provider: entry.provider,
-                models,
-              });
-              if (state.file) renderForm();
-              showBanner(`ใช้โมเดล ${model} แล้ว`, "success");
-              setTimeout(() => showBanner(""), 2400);
-            }
-          }
-          await openAiKeysManager();
-          resolve("edit");
-        })();
-      });
-      overlay.querySelectorAll("[data-sync]").forEach((btn) => {
-        btn.addEventListener("click", (ev) => {
-          ev.preventDefault();
-          ev.stopPropagation();
-          void (async () => {
-            const id = btn.getAttribute("data-sync");
-            const vaultNow = readAiVault();
-            const entry = vaultNow.entries.find((e) => e.id === id);
-            if (!entry) return;
-            if (entry.storeOnServer) {
-              await deleteServerAiKey(entry.id);
-              entry.storeOnServer = false;
-              writeAiVault(vaultNow);
-              if (!String(entry.apiKey || "").trim()) {
-                showBanner(
-                  `เลิกซิงก์「${entry.label}」แล้ว — คีย์ไม่อยู่ในเครื่องแล้ว กรุณาใส่คีย์ใหม่ถ้าจะใช้ต่อ`,
-                  "warn",
-                );
-              } else {
-                showBanner(`เลิกซิงก์「${entry.label}」แล้ว — เหลือแค่เครื่องนี้`, "success");
-              }
-            } else {
-              if (!String(entry.apiKey || "").trim()) {
-                showBanner("ไม่มีคีย์ในเครื่องให้ซิงก์ — ใส่คีย์ใหม่ก่อน");
-                return;
-              }
-              const ok = await pushServerAiKey(entry);
-              if (!ok) {
-                showBanner("ซิงก์ขึ้นเซิร์ฟเวอร์ไม่สำเร็จ");
-                return;
-              }
-              entry.storeOnServer = true;
-              entry.maskedKey = maskClientKey(entry.apiKey);
-              entry.apiKey = "";
-              writeAiVault(vaultNow);
-              showBanner(`ซิงก์「${entry.label}」ขึ้นเซิร์ฟเวอร์แล้ว`, "success");
-            }
-            setTimeout(() => showBanner(""), 2400);
-            paint();
-          })();
-        });
-      });
-      overlay.querySelectorAll("[data-del]").forEach((btn) => {
-        btn.addEventListener("click", (ev) => {
-          ev.preventDefault();
-          ev.stopPropagation();
-          void (async () => {
-            const id = btn.getAttribute("data-del");
-            const vaultNow = readAiVault();
-            const doomed = vaultNow.entries.find((e) => e.id === id);
-            if (!doomed) return;
-            const confirmed = await askStackedConfirm({
-              title: "ลบคีย์นี้?",
-              body: `ลบ「${doomed.label || providerLabel(doomed.provider)}」แล้วกู้คืนไม่ได้ — คีย์อื่นยังอยู่ครบ`,
-              confirmLabel: "ลบคีย์",
-              abortLabel: "ยกเลิก",
-            });
-            if (!confirmed) return;
-            const latest = readAiVault();
-            const still = latest.entries.find((e) => e.id === id);
-            if (!still) {
-              paint();
-              return;
-            }
-            if (still.storeOnServer) await deleteServerAiKey(id);
-            latest.entries = latest.entries.filter((e) => e.id !== id);
-            if (latest.activeId === id) {
-              latest.activeId = latest.entries[0]?.id || null;
-            }
-            writeAiVault(latest);
-            applyAiStatus({
-              connected: !!hasClientAiCredentials(),
-              byok: true,
-              provider: getClientAiProvider(),
-              models: providerModels(getClientAiProvider()),
-            });
-            paint();
-          })();
-        });
-      });
-    };
-
-    const finishManager = (value) => {
-      releaseFocus();
-      overlay.remove();
-      document.removeEventListener("keydown", onKey);
-      resolve(value);
-    };
-    const onKey = (e) => {
-      if (e.key === "Escape") {
-        if (document.getElementById("appConfirmDialog")) return;
-        finishManager("abort");
-      }
-    };
-    overlay.addEventListener("click", (e) => {
-      if (e.target === overlay) finishManager("abort");
-    });
-    document.addEventListener("keydown", onKey);
-    document.body.appendChild(overlay);
-    paint();
-    releaseFocus = trapFocusInOverlay(overlay);
-  });
+  return openSharedAiKeysDialog();
 }
 
 /** @deprecated name kept for call sites — opens multi-provider key manager */
 async function connectGoogleAi() {
-  if (!hasClientAiCredentials()) {
-    const added = await promptAddAiKey();
-    if (state.file) renderForm();
-    if (taggerSession) renderTaggerWorkspace();
-    // Cancel / abort on the add-key dialog must not open the manager.
-    if (!added) return;
-  }
-  await openAiKeysManager();
+  await openSharedAiKeysDialog();
   if (state.file) renderForm();
   if (taggerSession) renderTaggerWorkspace();
 }
@@ -3213,11 +2977,8 @@ async function checkHealth() {
       statusDot.classList.add("ok");
       statusDot.classList.remove("bad");
     }
-    if (statusText) {
-      statusText.textContent = aiStatus.connected
-        ? `พร้อมใช้ · ${aiStatus.providerLabel || "AI"} · ${aiStatus.model || ""}`
-        : "พร้อมใช้";
-    }
+    updateStatusPillFromAi();
+    bindStatusPillAiKeysOpener();
   } catch {
     if (statusDot) {
       statusDot.classList.remove("ok");
@@ -13280,7 +13041,15 @@ let healthTimer = null;
 
 /** Drop body-portaled UI left behind after leaving home (login soft-nav, etc.). */
 function cleanupOrphanPortals() {
-  for (const id of ["appDialog", "namedDraftDialog"]) {
+  for (const id of [
+    "appDialog",
+    "namedDraftDialog",
+    "aiKeysManagerDialog",
+    "aiKeysConfirmDialog",
+    "aiKeysAddProvider",
+    "aiKeysAddKey",
+    "aiKeysAddModel",
+  ]) {
     document.getElementById(id)?.remove();
   }
   document
@@ -13300,6 +13069,20 @@ window.__docxFormBoot = function docxFormBoot() {
     healthTimer = null;
   }
   cleanupOrphanPortals();
+  installAiKeysDialogGlobal({
+    onBanner: (msg, kind) => {
+      if (!msg) {
+        showBanner("");
+        return;
+      }
+      showBanner(msg, kind || undefined);
+      setTimeout(() => showBanner(""), 3200);
+    },
+    onChange: () => {
+      void refreshAiStatus().then(() => updateStatusPillFromAi());
+    },
+  });
+  bindStatusPillAiKeysOpener();
   void boot().catch((err) => {
     console.error("boot rejected", err);
     showBanner("โหลดหน้าไม่สำเร็จ — รีเฟรชแล้วลองใหม่");

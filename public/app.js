@@ -20,6 +20,14 @@ import {
   mapFillError,
   maskAiKeyLocal,
 } from "./ai-key-client.js";
+import {
+  collectSelfTagsFromLayout,
+  collectSelfTagsFromText,
+  fieldTableLocation,
+  isStackableStaticTable,
+  mergeMissingTextFields,
+  renderCellTemplateHtml,
+} from "./doc-table-fields.js";
 
 /** @typedef {{ name: string, type: 'text', aliases?: string[] }} TextField */
 /** @typedef {{ name: string, type: 'image', aliases?: string[] }} ImageField */
@@ -9603,8 +9611,14 @@ async function hydrateTemplateContent(slot, opts = {}) {
     if (multiActiveId === slot.id) {
       state.fileContent = full.fileContent;
       state.fileLayout = full.fileLayout;
+      // Re-merge fields when layout arrives — Backend may omit cell tags until fixed.
+      ensureFieldsFromLayoutTags();
+      live.fields = state.fields;
+      live.values = state.values;
+      live.skip = state.skip;
       renderForm();
     } else {
+      ensureFieldsFromLayoutTagsForSlot(live);
       persistActiveSlot();
     }
     // Never wipe a warning/error from multi-upload — only clear our own progress line.
@@ -10467,8 +10481,57 @@ function fieldsOutsidePreview() {
   });
 }
 
+/**
+ * Client fallback: if Backend left {{name}} in layout cells but omitted them from
+ * `fields`, seed text fields so inline inputs + skip still bind to /api/fill.
+ * When Backend already returns cell tags as normal FormField entries (current
+ * shape: { name, type, aliases? } — optional location.tableIndex / rowIndexInTable /
+ * cellIndex when present), this is a no-op.
+ */
+function ensureFieldsFromLayoutTags() {
+  const tags = [
+    ...collectSelfTagsFromLayout(state.fileLayout || []),
+    ...collectSelfTagsFromText(state.fileContent || ""),
+  ];
+  const { fields, added } = mergeMissingTextFields(state.fields || [], tags);
+  if (!added.length) {
+    state.fields = fields;
+    return;
+  }
+  state.fields = fields;
+  for (const name of added) {
+    if (!(name in state.values)) state.values[name] = "";
+    if (!(name in state.skip)) state.skip[name] = false;
+  }
+  console.info(
+    "[docx-form] client fallback: seeded missing table-cell fields from layout tags:",
+    added.join(", "),
+  );
+}
+
+/** Same seeding for a multi-slot that is not the active one. */
+function ensureFieldsFromLayoutTagsForSlot(slot) {
+  if (!slot) return;
+  const tags = [
+    ...collectSelfTagsFromLayout(slot.fileLayout || []),
+    ...collectSelfTagsFromText(slot.fileContent || ""),
+  ];
+  const { fields, added } = mergeMissingTextFields(slot.fields || [], tags);
+  slot.fields = fields;
+  if (!added.length) return;
+  for (const name of added) {
+    if (!(name in slot.values)) slot.values[name] = "";
+    if (!(name in slot.skip)) slot.skip[name] = false;
+  }
+  console.info(
+    "[docx-form] client fallback: seeded missing table-cell fields from layout tags:",
+    added.join(", "),
+  );
+}
+
 function renderForm() {
   removeTaggerDialogPortals();
+  ensureFieldsFromLayoutTags();
   const useDocLayout =
     state.showFullContent && (state.fileLayout.length > 0 || !!state.fileContent);
   const bodyHtml = state.fileLayout.length
@@ -11847,14 +11910,42 @@ function layoutCellAttrs(cell, opts = {}) {
   return { text: cell.text || "", attrs: parts.length ? ` ${parts.join(" ")}` : "" };
 }
 
+/**
+ * Inner HTML for a layout table cell — never leave raw {{tags}} visible.
+ * Prefers optional Backend cell.fieldName / cell.tags; otherwise tokenizes text.
+ */
+function renderLayoutCellInner(cell) {
+  if (cell && typeof cell === "object") {
+    const fieldName = String(cell.fieldName || "").trim();
+    if (fieldName) return renderInlineBlank(fieldName);
+    if (Array.isArray(cell.tags) && cell.tags.length) {
+      return cell.tags
+        .map((t) => {
+          const name = String(t || "").trim();
+          return name ? renderInlineBlank(name) : "";
+        })
+        .join("");
+    }
+  }
+  const text = cellTextOf(cell);
+  if (/\{\{/.test(text)) {
+    return renderCellTemplateHtml(
+      text,
+      (name) => renderInlineBlank(name),
+      formatPlainText,
+    );
+  }
+  return formatPlainText(text);
+}
+
 function renderLayoutCellTag(tag, cell, extraClass) {
   // Word headers without explicit w:jc often read centered in narrow columns
   const normalized =
     tag === "th" && typeof cell === "object" && cell && !cell.align
       ? { ...cell, align: "center" }
       : cell;
-  const { text, attrs } = layoutCellAttrs(normalized, { extraClass });
-  return `<${tag}${attrs}>${formatPlainText(text)}</${tag}>`;
+  const { attrs } = layoutCellAttrs(normalized, { extraClass });
+  return `<${tag}${attrs}>${renderLayoutCellInner(normalized)}</${tag}>`;
 }
 
 function renderColgroup(block, withRowNum) {
@@ -11884,10 +11975,12 @@ function renderColgroup(block, withRowNum) {
 
 function renderWordTableBlock(block) {
   if (block.staticRows?.length) {
+    const stackable = isStackableStaticTable(block);
     const rows = block.staticRows
       .map((r) => `<tr>${r.map((c) => renderLayoutCellTag("td", c)).join("")}</tr>`)
       .join("");
-    return `<div class="doc-table-scroll doc-table-real"><table class="doc-table doc-table-stretch">${renderColgroup(block, false)}${rows}</table></div>`;
+    const tableClass = `doc-table doc-table-stretch${stackable ? " doc-table-stackable" : ""}`;
+    return `<div class="doc-table-scroll doc-table-real${stackable ? " is-stackable" : ""}"><table class="${tableClass}">${renderColgroup(block, false)}${rows}</table></div>`;
   }
 
   const listName = block.listName || "";
@@ -11907,10 +12000,12 @@ function renderWordTableBlock(block) {
       .join("");
 
   if (!field || field.type !== "list") {
+    // Unbound / non-loop template row: still turn {{tags}} into inputs (never raw text).
     const tmpl = (block.templateCells || [])
       .map((c) => {
-        const { attrs } = layoutCellAttrs(typeof c === "string" ? { text: c } : c);
-        return `<td${attrs}>${formatPlainText(cellTextOf(c))}</td>`;
+        const cellObj = typeof c === "string" ? { text: c } : c;
+        const { attrs } = layoutCellAttrs(cellObj);
+        return `<td${attrs}>${renderLayoutCellInner(cellObj)}</td>`;
       })
       .join("");
     return `<div class="doc-list doc-list-table" data-list-field="${escapeAttr(listName)}">
@@ -12330,6 +12425,18 @@ function renderInlineBlank(name) {
   const skipped = !!state.skip[name];
   const labelMap = currentFieldLabelMap();
   const label = fieldDisplayLabel(field || { name }, labelMap, name);
+  const loc = fieldTableLocation(field);
+  const locAttrs = loc
+    ? [
+        loc.tableIndex != null ? `data-table-index="${loc.tableIndex}"` : "",
+        loc.rowIndexInTable != null
+          ? `data-row-in-table="${loc.rowIndexInTable}"`
+          : "",
+        loc.cellIndex != null ? `data-cell-index="${loc.cellIndex}"` : "",
+      ]
+        .filter(Boolean)
+        .join(" ")
+    : "";
 
   if (field?.type === "image") {
     return renderInlineImageControl(name, { label, showLabel: false });
@@ -12353,7 +12460,7 @@ function renderInlineBlank(name) {
   }
 
   const val = state.values[name] ?? "";
-  return `<span class="doc-blank-wrap ${skipped ? "is-skipped" : ""} ${shouldUseTextarea(val) ? "is-multiline" : ""}">
+  return `<span class="doc-blank-wrap ${skipped ? "is-skipped" : ""} ${shouldUseTextarea(val) ? "is-multiline" : ""}"${locAttrs ? ` ${locAttrs}` : ""}>
     ${renderTextValueControl({
       value: val,
       className: "doc-blank",

@@ -5900,3 +5900,135 @@ button.danger:hover {
     line-height: 1.4;
   }
 }
+
+/* —— Static table-cell fields: inline inputs + ข้าม (mobile-first 390 / desktop 1280) —— */
+.doc-table td .doc-blank-wrap,
+.doc-table th .doc-blank-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+  max-width: 100%;
+  margin: 0.15rem 0;
+  gap: 0.35rem;
+}
+
+.doc-table td .doc-blank,
+.doc-table th .doc-blank,
+.doc-table td .doc-table-input,
+.doc-table th .doc-table-input {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  box-sizing: border-box;
+}
+
+.doc-table td .doc-skip,
+.doc-table th .doc-skip {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  padding: 0.4rem 0.75rem;
+  box-sizing: border-box;
+  margin-top: 0;
+}
+
+.doc-table td .doc-skip input,
+.doc-table th .doc-skip input {
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  min-height: 22px;
+}
+
+/* ~390px phone: stack simple label/value static tables; others scroll horizontally */
+@media (max-width: 430px) {
+  .doc-table-scroll {
+    -webkit-overflow-scrolling: touch;
+    overflow-x: auto;
+    max-width: 100%;
+  }
+
+  .doc-table:not(.doc-table-stackable) {
+    min-width: 480px;
+  }
+
+  .doc-table.doc-table-stackable {
+    min-width: 0;
+    width: 100%;
+    display: block;
+  }
+
+  .doc-table.doc-table-stackable colgroup {
+    display: none;
+  }
+
+  .doc-table.doc-table-stackable tbody,
+  .doc-table.doc-table-stackable thead {
+    display: block;
+    width: 100%;
+  }
+
+  .doc-table.doc-table-stackable tr {
+    display: block;
+    width: 100%;
+    border-bottom: 1px solid var(--border);
+    padding: 0.55rem 0.65rem;
+    box-sizing: border-box;
+  }
+
+  .doc-table.doc-table-stackable td,
+  .doc-table.doc-table-stackable th {
+    display: block;
+    width: 100% !important;
+    max-width: none !important;
+    border: none;
+    padding: 0.2rem 0;
+    overflow: visible;
+  }
+
+  .doc-table.doc-table-stackable td:first-child,
+  .doc-table.doc-table-stackable th:first-child {
+    font-weight: 600;
+    color: var(--muted);
+    font-size: 0.78rem;
+    padding-bottom: 0.1rem;
+  }
+}
+
+/* Desktop / 1280: keep real table grid */
+@media (min-width: 1280px) {
+  .doc-table.doc-table-stackable {
+    display: table;
+    min-width: 100%;
+    width: 100%;
+  }
+
+  .doc-table.doc-table-stackable tbody,
+  .doc-table.doc-table-stackable thead {
+    display: table-row-group;
+  }
+
+  .doc-table.doc-table-stackable tr {
+    display: table-row;
+    border-bottom: none;
+    padding: 0;
+  }
+
+  .doc-table.doc-table-stackable td,
+  .doc-table.doc-table-stackable th {
+    display: table-cell;
+    width: auto !important;
+    border: 1px solid var(--border);
+    padding: 0.45rem 0.55rem;
+  }
+
+  .doc-table td .doc-blank-wrap,
+  .doc-table th .doc-blank-wrap {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+}

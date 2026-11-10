@@ -9,6 +9,10 @@ export type OidcConfig = {
   /** Auth origin (may equal publicBaseUrl). */
   authBaseUrl: string;
   redirectUri: string;
+  /**
+   * After IdP logout — must NOT be `/login` (that would auto-loop into OIDC).
+   * Use `/logged-out` which shows a static page with a manual sign-in link.
+   */
   postLogoutRedirectUri: string;
   scopes: string[];
 };
@@ -18,10 +22,9 @@ function trimSlash(url: string): string {
 }
 
 /**
- * Central Keycloak SSO as a standard OIDC RP.
+ * Central Keycloak SSO as a standard OIDC RP — the only login method.
  * Issuer comes only from OIDC_ISSUER (e.g. …/realms/tps18-{env}) — never hardcode realms.
- * Enabled only when OIDC_ISSUER + OIDC_CLIENT_ID + OIDC_CLIENT_SECRET are set.
- * Missing env → SSO disabled (no throw).
+ * Missing env → callers must show SSO-not-configured (no silent fallback).
  */
 export function getOidcConfig(
   envSource: NodeJS.ProcessEnv = process.env,
@@ -33,7 +36,6 @@ export function getOidcConfig(
 
   let issuer: string;
   try {
-    // Validate absolute URL; keep path (Keycloak realm) but drop trailing slash.
     const u = new URL(issuerRaw);
     if (u.protocol !== "http:" && u.protocol !== "https:") return null;
     issuer = trimSlash(u.toString());
@@ -63,7 +65,7 @@ export function getOidcConfig(
     publicBaseUrl,
     authBaseUrl,
     redirectUri: `${publicBaseUrl}/api/auth/oidc/callback`,
-    postLogoutRedirectUri: `${publicBaseUrl}/login`,
+    postLogoutRedirectUri: `${publicBaseUrl}/logged-out`,
     scopes: ["openid", "email", "profile"],
   };
 }
@@ -74,12 +76,9 @@ export function isOidcEnabled(
   return getOidcConfig(envSource) !== null;
 }
 
-/** Password / email login remains opt-in until migration decides otherwise. */
-export function isPasswordLoginEnabled(
-  envSource: NodeJS.ProcessEnv = process.env,
-): boolean {
-  const v = String(envSource.ENABLE_PASSWORD_LOGIN || "")
-    .trim()
-    .toLowerCase();
-  return v === "1" || v === "true" || v === "yes" || v === "on";
+/** Log once when SSO env is missing (login/API gates). */
+export function logOidcNotConfigured(context: string): void {
+  console.error(
+    `[oidc] SSO not configured (${context}): set OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET`,
+  );
 }

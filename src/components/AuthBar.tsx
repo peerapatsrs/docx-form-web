@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { authClient } from "@/lib/auth-client";
 import { ProfileAvatar } from "@/components/ProfileAvatar";
+
 type SessionUser = {
   name?: string | null;
   email?: string | null;
@@ -37,64 +38,19 @@ function planBadgeLabel(user: SessionUser | null): string {
   return isPaidSessionUser(user) ? "จ่ายแล้ว" : "ฟรี";
 }
 
-function hasOidcSessionCookie(): boolean {
-  if (typeof document === "undefined") return false;
-  return /(?:^|;\s*)docx_oidc=1(?:;|$)/.test(document.cookie);
-}
+const SSO_LOGOUT_PATH = "/api/auth/oidc/logout";
 
 export function AuthBar() {
   const [user, setUser] = useState<SessionUser | null>(null);
   const [loading, setLoading] = useState(true);
-  const [ssoLogoutPath, setSsoLogoutPath] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        void fetch("/api/auth-config")
-          .then((r) => r.json())
-          .then((cfg: { ssoLogoutPath?: string | null; oidc?: boolean }) => {
-            if (cancelled) return;
-            if (cfg?.oidc && cfg.ssoLogoutPath) {
-              setSsoLogoutPath(String(cfg.ssoLogoutPath));
-            }
-          })
-          .catch(() => {
-            /* ignore */
-          });
-
         const { data } = await authClient.getSession();
         if (cancelled) return;
-        if (data?.user) {
-          setUser(data.user);
-          setLoading(false);
-          return;
-        }
-
-        // Dev-only auto sign-in. Condition uses build-time env so production
-        // bundles (without NEXT_PUBLIC_DEV_AUTH) drop this import entirely.
-        if (
-          process.env.NODE_ENV !== "production" ||
-          process.env.NEXT_PUBLIC_DEV_AUTH === "1"
-        ) {
-          const { fetchDevAuthConfig, loginAsDevUser } = await import(
-            "@/components/DevAuthControls"
-          );
-          const cfg = await fetchDevAuthConfig();
-          // Match login page: null/empty defaultEmail → skip auto login-as.
-          const email = cfg.defaultEmail;
-          if (!cfg.enabled || !email) {
-            setLoading(false);
-            return;
-          }
-          const result = await loginAsDevUser({ email });
-          if (cancelled) return;
-          if (result.ok) {
-            const again = await authClient.getSession();
-            if (cancelled) return;
-            setUser(again.data?.user ?? null);
-          }
-        }
+        setUser(data?.user ?? null);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -105,45 +61,30 @@ export function AuthBar() {
   }, []);
 
   if (loading) {
-    return (
-      <div className="auth-bar auth-bar-loading" aria-busy="true">
-        <span className="auth-bar-muted">…</span>
-      </div>
-    );
+    return <div className="auth-bar auth-bar-loading" aria-hidden="true" />;
   }
 
   if (!user) {
     return (
       <div className="auth-bar">
-        {/* Hard nav — soft Link ↔ /login breaks the app.js home shell for guests */}
-        <a className="auth-bar-btn auth-bar-login" href="/login">
+        <Link className="auth-bar-btn auth-bar-primary" href="/login?next=/account">
           เข้าสู่ระบบ
-        </a>
+        </Link>
       </div>
     );
   }
 
-  const label = user.name || user.email || "บัญชี";
-  const paid = isPaidSessionUser(user);
-  const planLabel = planBadgeLabel(user);
-
   return (
     <div className="auth-bar">
-      <ProfileAvatar
-        image={user.image}
-        name={user.name}
-        email={user.email}
-        size={28}
-      />
-      <Link className="auth-bar-name" href="/account" title="บัญชี · พาสคีย์ · แผน">
-        {label}
-      </Link>
-      <Link
-        className={`auth-bar-plan ${paid ? "is-pro" : ""}`}
-        href="/account"
-        title={paid ? "แผนจ่ายแล้ว — ดูโควตาที่บัญชี" : "แผนฟรี — ดูโควตาที่บัญชี"}
-      >
-        {planLabel}
+      <Link className="auth-bar-user" href="/account" title={user.email || ""}>
+        <ProfileAvatar
+          name={user.name}
+          email={user.email}
+          image={user.image}
+          size={28}
+        />
+        <span className="auth-bar-name">{user.name || user.email || "บัญชี"}</span>
+        <span className="auth-bar-plan">{planBadgeLabel(user)}</span>
       </Link>
       {isSuperAdmin(user) ? (
         <Link className="auth-bar-btn auth-bar-ghost" href="/admin">
@@ -156,25 +97,14 @@ export function AuthBar() {
         onClick={() => {
           if (
             !window.confirm(
-              "ออกจากระบบ?\nจะออกจากบัญชีนี้บนเครื่องนี้ — งานในเครื่อง (ดราฟ/คีย์ท้องถิ่น) ยังอยู่",
+              "ออกจากระบบ?\nจะออกจากบัญชีนี้บนเครื่องนี้และที่ Keycloak",
             )
           ) {
             return;
           }
-          // Prefer RP-initiated OIDC logout when this browser used central SSO.
-          if (ssoLogoutPath && hasOidcSessionCookie()) {
-            // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- hard nav to IdP logout
-            window.location.assign(ssoLogoutPath);
-            return;
-          }
-          void authClient.signOut({
-            fetchOptions: {
-              onSuccess: () => {
-                // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- hard nav after sign-out
-                window.location.assign("/");
-              },
-            },
-          });
+          // Always RP-initiated OIDC logout (clears app session + IdP).
+          // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- hard nav to logout
+          window.location.assign(SSO_LOGOUT_PATH);
         }}
       >
         ออกจากระบบ

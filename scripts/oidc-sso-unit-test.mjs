@@ -182,11 +182,9 @@ function memoryDb() {
 }
 
 await check("SSO disabled when OIDC env missing (no throw)", async () => {
-  const { getOidcConfig, isOidcEnabled, isPasswordLoginEnabled } =
-    await loadConfig();
+  const { getOidcConfig, isOidcEnabled } = await loadConfig();
   assert.equal(getOidcConfig(), null);
   assert.equal(isOidcEnabled(), false);
-  assert.equal(isPasswordLoginEnabled(), false);
 });
 
 await check("SSO enabled when OIDC_* + public base URL set", async () => {
@@ -203,15 +201,19 @@ await check("SSO enabled when OIDC_* + public base URL set", async () => {
     cfg.redirectUri,
     "https://app.example.com/api/auth/oidc/callback",
   );
-  assert.equal(cfg.postLogoutRedirectUri, "https://app.example.com/login");
+  assert.equal(cfg.postLogoutRedirectUri, "https://app.example.com/logged-out");
   assert.deepEqual(cfg.scopes, ["openid", "email", "profile"]);
 });
 
-await check("password login opt-in via ENABLE_PASSWORD_LOGIN", async () => {
-  const { isPasswordLoginEnabled } = await loadConfig();
-  assert.equal(isPasswordLoginEnabled(), false);
-  process.env.ENABLE_PASSWORD_LOGIN = "1";
-  assert.equal(isPasswordLoginEnabled(), true);
+await check("OIDC post-logout URI is /logged-out (no auto-loop to /login)", async () => {
+  process.env.OIDC_ISSUER = ISSUER;
+  process.env.OIDC_CLIENT_ID = CLIENT_ID;
+  process.env.OIDC_CLIENT_SECRET = CLIENT_SECRET;
+  process.env.APP_BASE_URL = "https://app.example.com";
+  const { getOidcConfig } = await loadConfig();
+  const cfg = getOidcConfig();
+  assert.equal(cfg.postLogoutRedirectUri, "https://app.example.com/logged-out");
+  assert.doesNotMatch(cfg.postLogoutRedirectUri, /\/login$/);
 });
 
 await check("PKCE S256 challenge is stable for a verifier", async () => {

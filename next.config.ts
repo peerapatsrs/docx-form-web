@@ -24,7 +24,6 @@ const nextConfig: NextConfig = {
     "easy-template-x",
     "pg",
     "better-auth",
-    "@better-auth/passkey",
     "@cursor/sdk",
   ],
   async redirects() {

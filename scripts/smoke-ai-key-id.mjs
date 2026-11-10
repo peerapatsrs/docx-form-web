@@ -1,3 +1,4 @@
+/** OIDC-only: obtain a session via Keycloak (or mock OIDC); /api/auth/dev/login-as was removed. */
 #!/usr/bin/env node
 /**
  * Local smoke: X-Ai-Key-Id-only credentials, delete ownership, admin env flags,
@@ -80,18 +81,13 @@ const health = await fetch(`${BASE}/api/health`);
 ok("health", health.ok);
 
 const jar = { cookie: "" };
-// Dev auth login-as
-const login = await jarFetch("/api/auth/dev/login-as", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ email: "qa@example.com" }),
-  jar,
-});
-ok(
-  "dev login-as",
-  login.res.ok || login.res.status === 200 || login.res.status === 302,
-  `status=${login.res.status} body=${login.text.slice(0, 200)}`,
-);
+const sessionCookie = String(process.env.SESSION_COOKIE || "").trim();
+if (!sessionCookie) {
+  console.error("OIDC-only: set SESSION_COOKIE to a Better Auth session cookie (dev login-as removed).");
+  process.exit(2);
+}
+jar.cookie = sessionCookie;
+ok("OIDC session cookie provided", true);
 
 const me = await jarFetch("/api/me", { jar });
 ok("session /api/me", Boolean(me.json?.user?.id), JSON.stringify(me.json).slice(0, 200));

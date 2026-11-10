@@ -1,3 +1,4 @@
+/** OIDC-only: obtain a session via Keycloak (or mock OIDC); /api/auth/dev/login-as was removed. */
 #!/usr/bin/env node
 /**
  * Smoke: one real POST /api/batch-from-source against BASE_URL with a fixture doc.
@@ -65,14 +66,13 @@ if (!health.ok) {
 console.log("✓ health");
 
 const jar = { cookie: "" };
-const login = await jarFetch("/api/auth/dev/login-as", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ email: "qa@example.com" }),
-  jar,
-});
-console.log(
-  `login-as status=${login.res.status}${login.res.ok || login.res.status === 302 ? " ✓" : ""}`,
+const sessionCookie = String(process.env.SESSION_COOKIE || "").trim();
+if (!sessionCookie) {
+  console.error("OIDC-only: set SESSION_COOKIE to a Better Auth session cookie (dev login-as removed).");
+  process.exit(2);
+}
+jar.cookie = sessionCookie;
+ok("OIDC session cookie provided", true);
 );
 
 const status = await jarFetch("/api/ai/status", { jar });

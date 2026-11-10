@@ -354,43 +354,9 @@ export function createApi(options: {
   /** Public liveness — status only (no version / author / AI inventory). */
   api.get("/health", (c) => c.json({ ok: true, status: "ok" }));
 
-  /**
-   * DEV-only test-account panel (APP_ENV=dev + SHOW_TEST_ACCOUNTS=1).
-   * Contract: docs/FE-DEV-TEST-LOGIN.md · docs/DEV-TEST-ACCOUNTS.md
-   * 404 when gated off — FE hides the panel.
-   */
-  api.get("/dev/test-accounts", async (c) => {
-    const { getTestAccountsResponse, clientIpFromRequest } = await import(
-      "./dev-test-accounts"
-    );
-    const result = getTestAccountsResponse({
-      ip: clientIpFromRequest(c.req.raw),
-    });
-    return c.json(result.body, result.status);
-  });
-
-  api.post("/dev/test-login", async (c) => {
-    const { performTestLogin } = await import("./dev-test-accounts");
-    let body: { key?: unknown } = {};
-    try {
-      body = (await c.req.json()) as { key?: unknown };
-    } catch {
-      body = {};
-    }
-    const result = await performTestLogin(c.req.raw, body);
-    if (!result.ok) {
-      return c.json({ error: result.error }, result.status);
-    }
-    const res = c.json(
-      {
-        ok: true,
-        user: result.user,
-      },
-      200,
-    );
-    res.headers.append("Set-Cookie", result.setCookie);
-    return res;
-  });
+  /** Removed DEV test-login routes — always 404 (OIDC-only). */
+  api.get("/dev/test-accounts", (c) => c.json({ error: "ไม่พบ" }, 404));
+  api.post("/dev/test-login", (c) => c.json({ error: "ไม่พบ" }, 404));
 
   /**
    * Public plan/quota snapshot for the guest shell (no internal diagnostics).
@@ -965,13 +931,20 @@ export function createApi(options: {
 
   async function requireSessionUserId(req: Request): Promise<
     | { ok: true; userId: string }
-    | { ok: false; status: 401 | 500; error: string }
+    | { ok: false; status: 401 | 500; error: string; code?: string }
   > {
     try {
       const { auth } = await import("./auth");
       const session = await auth.api.getSession({ headers: req.headers });
       const userId = session?.user?.id ? String(session.user.id) : "";
-      if (!userId) return { ok: false, status: 401, error: "ต้องเข้าสู่ระบบก่อน" };
+      if (!userId) {
+        return {
+          ok: false,
+          status: 401,
+          error: "ต้องเข้าสู่ระบบก่อน",
+          code: "AUTH_REQUIRED",
+        };
+      }
       return { ok: true, userId };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -987,7 +960,10 @@ export function createApi(options: {
     const gate = await requireSessionUserId(c.req.raw);
     if (!gate.ok) {
       return c.json(
-        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        {
+          error: gate.error,
+          code: gate.code || "AUTH_REQUIRED",
+        },
         gate.status,
       );
     }

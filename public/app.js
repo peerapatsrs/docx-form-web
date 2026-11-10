@@ -2414,6 +2414,18 @@ async function pullServerAiKeys() {
     const res = await fetch("/api/ai/keys", { credentials: "include" });
     if (res.status === 401) {
       aiUserLoggedIn = false;
+      try {
+        const errBody = await res.clone().json().catch(() => ({}));
+        if (errBody?.code === "AUTH_REQUIRED" || errBody?.code === "AI_KEY_UNAUTHORIZED") {
+          const next = encodeURIComponent(
+            `${window.location.pathname}${window.location.search}` || "/",
+          );
+          window.location.assign(`/login?next=${next}`);
+          return;
+        }
+      } catch {
+        /* ignore */
+      }
       return;
     }
     if (!res.ok) return;

@@ -462,7 +462,7 @@ assert.ok(UNKNOWN_CLIENT_IP === "0.0.0.0"); // valid IP for Better Auth headers
 // POST body path: rebuild keeps method and does not throw
 {
   const req = withResolvedClientIpHeaders(
-    new Request("http://localhost/api/auth/dev/login-as", {
+    new Request("http://localhost/api/auth/oidc/login", {
       method: "POST",
       headers: {
         "content-type": "application/json",

@@ -184,6 +184,36 @@ await check("AIA add authorize URL has PKCE S256 + kc_action + openid scope", as
   assert.ok(url.searchParams.get("state"));
   assert.ok(url.searchParams.get("nonce"));
   assert.match(url.origin + url.pathname, /\/protocol\/openid-connect\/auth$/);
+  // AIA must not force re-auth — no prompt=login / max_age.
+  assert.equal(url.searchParams.get("prompt"), null);
+  assert.equal(url.searchParams.get("max_age"), null);
+  assert.doesNotMatch(result.url, /[?&]prompt=/);
+  assert.doesNotMatch(result.url, /[?&]max_age=/);
+});
+
+await check("AIA remove authorize also has no prompt=login / max_age", async () => {
+  enableOidc();
+  const discovery = await load("src/server/oidc-discovery.ts");
+  discovery.clearOidcDiscoveryCache();
+  const { buildOidcAuthorizationRedirect } = await load(
+    "src/server/oidc-flow.ts",
+  );
+  const { getOidcConfig } = await load("src/server/oidc-config.ts");
+  const result = await buildOidcAuthorizationRedirect({
+    returnTo: "/account",
+    kcAction: "delete_credential:cred_abc-123",
+    scopes: ["openid"],
+    config: getOidcConfig(),
+    fetchDiscovery: mockDiscoveryFetch(),
+    ensureSchema: async () => undefined,
+    saveState: async () => undefined,
+  });
+  assert.equal(result.ok, true);
+  const url = new URL(result.url);
+  assert.equal(url.searchParams.get("kc_action"), "delete_credential:cred_abc-123");
+  assert.equal(url.searchParams.get("prompt"), null);
+  assert.equal(url.searchParams.get("max_age"), null);
+  assert.equal(url.searchParams.get("code_challenge_method"), "S256");
 });
 
 await check("delete_credential kc_action is URL-encoded safely", async () => {

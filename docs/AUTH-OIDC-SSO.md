@@ -20,6 +20,8 @@ configure per environment via `OIDC_ISSUER`.
 | `OIDC_CLIENT_ID` | **yes** | Confidential client id |
 | `OIDC_CLIENT_SECRET` | **yes** | Client secret |
 | `OIDC_TRUST_IDP_EMAIL` | no | Default `true`. Link existing users by email without requiring app `emailVerified`. When `false`, require IdP `email_verified`; if unverified and an account already exists → clear error (no duplicate). |
+| `OIDC_SSO_COOLDOWN_SEC` | no | Seconds to suppress silent re-check after `login_required` (default `60`). Cookie `docx_sso_checked` stores a timestamp. |
+| `OIDC_SSO_HUB_ORIGINS` | no | Comma-separated absolute origins (e.g. `https://dev.tps18.space`) — Referer match bypasses cooldown so a hub login can silent-SSO immediately. No hardcoded hosts. |
 | `OIDC_PASSKEY_ADD_ACTION` | no | AIA for add passkey (default `webauthn-register-passwordless`) |
 | `OIDC_ADMIN_CLIENT_ID` | no | Service-account client to **list** own passkeys via Admin API |
 | `OIDC_ADMIN_CLIENT_SECRET` | no | Service-account secret (with admin client) |
@@ -53,28 +55,29 @@ Pattern: `https://auth.tps18.space/realms/tps18-{env}` where `{env}` is
 1. **Public pages** (home `/`, `/logged-out`, …) render logged-out with an
    **เข้าสู่ระบบ** button. Opening the app does **not** bounce to Keycloak’s
    interactive login.
-2. **Silent SSO** (once per browser session via `docx_sso_checked` session
-   cookie): middleware sends **top-level document** navigations without an app
-   session to `/api/auth/oidc/silent`, which starts authorize with `prompt=none`
-   (PKCE/state/nonce). Requires `Sec-Fetch-Dest: document` or
-   `Sec-Fetch-Mode: navigate`; skips RSC (`RSC: 1` / `_rsc`), prefetch
-   (`Next-Router-Prefetch` / `Purpose: prefetch`), and non-HTML `Accept`.
-   If Keycloak has a session → callback creates the app session and returns to
-   the opened URL (path + query). Any silent callback error
-   (`login_required`, `temporarily_unavailable`, token exchange failure, …)
-   → stay logged out quietly on the original page (server log only; no error
-   page). Skipped for APIs, static, health, OIDC routes, and after RP logout
-   (`docx_sso_skip` session cookie until interactive login or a new browser
-   session).
+2. **Silent SSO** (top-level redirect only — no iframes / third-party cookies;
+   Safari/ITP safe): middleware sends **document** navigations without an app
+   session to `/api/auth/oidc/silent` → authorize with `prompt=none` (same
+   `redirect_uri` / `client_id` / scopes / PKCE S256 as interactive). Requires
+   `Sec-Fetch-Dest: document` or `Sec-Fetch-Mode: navigate`; skips RSC /
+   prefetch / non-HTML `Accept`. PKCE/`state`/`nonce` live in server DB
+   (`oidc_login_state`); session cookies use **SameSite=Lax** (+ Secure in
+   prod) so WebKit accepts them on the top-level Keycloak → callback return.
+   Success → same linking + session as interactive. Any silent error → quiet
+   logged-out + short cooldown (`docx_sso_checked` timestamp,
+   `OIDC_SSO_COOLDOWN_SEC` default 60s). After cooldown (or hub Referer in
+   `OIDC_SSO_HUB_ORIGINS` / `?sso=1`) the next page load re-checks. RP logout
+   clears cooldown (no skip cookie) so a later hub login can silent-SSO.
+   Info logs: `[oidc] silent …` (no PII).
 3. **Protected pages** (`/account`, `/admin`, …) without a session → interactive
    `/login?next=…` preserving path + query (then Keycloak authorize **without**
    `prompt=none`).
 4. **`/login`** (button or direct) → interactive authorize via
-   `/api/auth/oidc/login` (clears `docx_sso_skip`).
+   `/api/auth/oidc/login` (clears cooldown).
 5. Callback validates ID token (JWKS), maps `(issuer, sub)` / email / create
    (see `OIDC_TRUST_IDP_EMAIL`) in one transaction with `ON CONFLICT`.
-6. Logout → RP-initiated logout + set `docx_sso_skip` (no silent check until
-   login click / new session) → `/logged-out`.
+6. Logout → RP-initiated logout (ends Keycloak session) + clear cooldown →
+   `/logged-out`. A later hub login can silent-check again.
 7. `/login?error=…` Thai error page + `docx_oidc_fail` loop guard (unchanged).
 
 ## Passkeys (Keycloak AIA)
@@ -104,7 +107,7 @@ Pattern: `https://auth.tps18.space/realms/tps18-{env}` where `{env}` is
 | GET | `/api/auth/oidc/login` | Interactive authorize (no `prompt`) |
 | GET | `/api/auth/oidc/silent` | Silent authorize (`prompt=none`) |
 | GET | `/api/auth/oidc/callback` | Code callback (+ optional `kc_action_status`) |
-| GET/POST | `/api/auth/oidc/logout` | RP logout (+ skip silent until login) |
+| GET/POST | `/api/auth/oidc/logout` | RP logout (clears silent cooldown) |
 | GET | `/api/auth/oidc/passkey/add` | AIA register passkey (session) |
 | GET | `/api/auth/oidc/passkey/remove` | AIA delete passkey (session) |
 | GET | `/api/auth/oidc/passkey` | List own passkeys (Admin API; optional) |

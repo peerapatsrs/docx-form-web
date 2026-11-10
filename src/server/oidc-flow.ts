@@ -28,8 +28,8 @@ import {
   parseOidcFailCookie,
 } from "./oidc-login-guard";
 import {
-  oidcSsoCheckedSetCookie,
-  oidcSsoSkipClearCookie,
+  oidcSsoCooldownClearCookie,
+  oidcSsoCooldownSetCookie,
 } from "./oidc-silent";
 import type { JSONWebKeySet } from "jose";
 
@@ -122,6 +122,7 @@ export async function buildOidcAuthorizationRedirect(input: {
     url.searchParams.set("nonce", secrets.nonce);
     url.searchParams.set("code_challenge", secrets.codeChallenge);
     url.searchParams.set("code_challenge_method", "S256");
+    // Never set max_age or prompt=login (would force re-auth / break AIA + silent SSO).
     if (input.prompt === "none") {
       url.searchParams.set("prompt", "none");
     }
@@ -278,11 +279,13 @@ export async function handleOidcCallback(input: {
   const state = String(input.state || "").trim();
 
   const quietSilentFail = (returnTo: string, error: string) => {
-    console.error("[oidc] silent SSO quiet fail:", error);
+    const outcome = String(error || "error").slice(0, 64);
+    console.info("[oidc] silent outcome", { outcome });
+    // Cooldown after login_required (and other quiet fails) — loop guard only.
     return {
       status: 302,
       redirectTo: safeOidcReturnTo(returnTo, "/"),
-      setCookies: [oidcSsoCheckedSetCookie(secure)],
+      setCookies: [oidcSsoCooldownSetCookie(secure)],
       error,
     };
   };
@@ -382,13 +385,14 @@ export async function handleOidcCallback(input: {
 
     const { userId } = await resolveUser(claims);
     const createSession = input.createSession ?? createAppSessionCookie;
+    // Session + side cookies: SameSite=Lax (+ Secure in prod) so WebKit accepts
+    // them on the top-level Keycloak → callback redirect (no Strict / 3P iframe).
     const session = await createSession(userId);
     const setCookies = [
       session.setCookie,
       ...buildOidcSideCookies(idToken, secure),
       oidcFailClearCookieHeader(secure),
-      oidcSsoCheckedSetCookie(secure),
-      oidcSsoSkipClearCookie(secure),
+      oidcSsoCooldownClearCookie(secure),
     ];
 
     let redirectTo = safeOidcReturnTo(pending.returnTo, "/");
@@ -397,6 +401,10 @@ export async function handleOidcCallback(input: {
         safeOidcReturnTo(pending.returnTo, "/account"),
         kcStatus,
       );
+    }
+
+    if (pending.silent) {
+      console.info("[oidc] silent outcome", { outcome: "success" });
     }
 
     return {

@@ -11,12 +11,14 @@ import {
 } from "@/lib/public-origin";
 import { isOidcEnabled } from "@/server/oidc-config";
 import {
+  getOidcSsoCooldownSec,
   isProtectedAppPath,
   isTopLevelDocumentNavigation,
-  OIDC_SSO_CHECKED_COOKIE,
-  OIDC_SSO_SKIP_COOKIE,
+  OIDC_SSO_COOLDOWN_COOKIE,
+  parseOidcSsoHubOrigins,
   safeAppReturnPath,
   shouldStartSilentSso,
+  stripSsoBypassParam,
 } from "@/server/oidc-silent";
 
 function applySecurityHeaders(response: NextResponse): NextResponse {
@@ -72,7 +74,7 @@ function maybeRedirectToHttps(request: NextRequest): NextResponse | null {
 /**
  * Network boundary: HTTPS redirect, security headers, auth gates, silent SSO.
  * Public pages render logged-out; protected pages → interactive /login.
- * Silent SSO (prompt=none) runs once per browser session on top-level loads.
+ * Silent SSO is a top-level prompt=none redirect (no iframes) on document loads.
  */
 export function proxy(request: NextRequest) {
   const httpsRedirect = maybeRedirectToHttps(request);
@@ -105,18 +107,23 @@ export function proxy(request: NextRequest) {
     search,
   });
 
-  // Silent SSO once per browser session — top-level document navigations only.
+  // Silent SSO — top-level document navigations only (Safari/ITP-safe).
   if (
     shouldStartSilentSso({
       pathname,
+      search,
       hasSession,
-      ssoChecked: Boolean(request.cookies.get(OIDC_SSO_CHECKED_COOKIE)?.value),
-      ssoSkip: Boolean(request.cookies.get(OIDC_SSO_SKIP_COOKIE)?.value),
+      cooldownCookie: request.cookies.get(OIDC_SSO_COOLDOWN_COOKIE)?.value,
+      cooldownSec: getOidcSsoCooldownSec(),
+      hubOrigins: parseOidcSsoHubOrigins(),
+      referer: request.headers.get("referer"),
       oidcEnabled: isOidcEnabled(),
       isDocumentNavigation: topLevelDoc,
     })
   ) {
-    const returnTo = safeAppReturnPath(pathname, search);
+    const returnTo = stripSsoBypassParam(
+      safeAppReturnPath(pathname, search),
+    );
     const silent = new URL(safeAppPathUrl("/api/auth/oidc/silent"));
     silent.searchParams.set("next", returnTo);
     const redirect = applySecurityHeaders(NextResponse.redirect(silent, 307));
@@ -129,7 +136,10 @@ export function proxy(request: NextRequest) {
   // Protected pages only — interactive login (not silent). Preserve query.
   if (isProtectedAppPath(pathname) && !hasSession) {
     const login = new URL(safeAppPathUrl("/login"));
-    login.searchParams.set("next", safeAppReturnPath(pathname, search));
+    login.searchParams.set(
+      "next",
+      stripSsoBypassParam(safeAppReturnPath(pathname, search)),
+    );
     const redirect = applySecurityHeaders(NextResponse.redirect(login, 307));
     redirect.headers.set("Cache-Control", documentCacheControl(pathname));
     return redirect;

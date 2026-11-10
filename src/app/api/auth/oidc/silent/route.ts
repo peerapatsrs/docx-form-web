@@ -9,15 +9,17 @@ import {
 } from "@/server/oidc-config";
 import { safeOidcReturnTo } from "@/server/oidc-identities";
 import {
-  oidcSsoCheckedSetCookie,
+  oidcSsoCooldownSetCookie,
 } from "@/server/oidc-silent";
 import { getAppBaseUrl } from "@/lib/app-base-url";
 
 export const dynamic = "force-dynamic";
 
 /**
- * Silent SSO start: authorize with prompt=none.
- * Sets docx_sso_checked immediately so a failed/cancelled check does not loop.
+ * Silent SSO start: top-level authorize with prompt=none (no iframe).
+ * Same redirect_uri / client_id / scopes / PKCE as interactive login.
+ * Cooldown cookie is set only after login_required (callback), not here —
+ * except when authorize cannot start (avoid tight local loops).
  */
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -26,14 +28,16 @@ export async function GET(request: Request) {
     "/",
   );
   const secure = process.env.NODE_ENV === "production";
-  const checked = oidcSsoCheckedSetCookie(secure);
+
+  console.info("[oidc] silent attempt", { returnTo });
 
   const config = getOidcConfig();
   if (!config) {
     logOidcNotConfigured("oidc-silent");
+    console.info("[oidc] silent outcome", { outcome: "disabled" });
     const home = new URL(returnTo, getAppBaseUrl());
     const headers = new Headers();
-    applyOidcSetCookies(headers, [checked]);
+    applyOidcSetCookies(headers, [oidcSsoCooldownSetCookie(secure)]);
     return NextResponse.redirect(home, { status: 302, headers });
   }
 
@@ -44,14 +48,17 @@ export async function GET(request: Request) {
     config,
   });
   if (!result.ok) {
-    console.error("[oidc] silent authorize failed:", result.error);
+    console.info("[oidc] silent outcome", {
+      outcome: "authorize_failed",
+      error: result.error,
+    });
     const home = new URL(returnTo, getAppBaseUrl());
     const headers = new Headers();
-    applyOidcSetCookies(headers, [checked]);
+    applyOidcSetCookies(headers, [oidcSsoCooldownSetCookie(secure)]);
     return NextResponse.redirect(home, { status: 302, headers });
   }
 
-  const headers = new Headers();
-  applyOidcSetCookies(headers, [checked]);
-  return NextResponse.redirect(result.url, { status: 302, headers });
+  console.info("[oidc] silent outcome", { outcome: "redirect_authorize" });
+  // Do not set cooldown yet — wait for IdP login_required / success.
+  return NextResponse.redirect(result.url, { status: 302 });
 }

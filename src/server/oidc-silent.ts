@@ -1,37 +1,116 @@
 /**
- * Silent SSO (prompt=none) session gates — cookies only, no secrets.
- * After one check (or after explicit logout), do not bounce the browser again.
+ * Silent SSO (prompt=none) — top-level authorize only (no iframes / 3P cookies).
+ * Cooldown cookie gates loops after login_required; hub Referer / ?sso=1 bypass.
  */
 
-export const OIDC_SSO_CHECKED_COOKIE = "docx_sso_checked";
-/** Set on RP logout — skip silent check until interactive login or new browser session. */
-export const OIDC_SSO_SKIP_COOKIE = "docx_sso_skip";
+export const OIDC_SSO_COOLDOWN_COOKIE = "docx_sso_checked";
+/** @deprecated alias — same cookie name (timestamp value). */
+export const OIDC_SSO_CHECKED_COOKIE = OIDC_SSO_COOLDOWN_COOKIE;
 
-export function oidcSsoCheckedSetCookie(secure: boolean): string {
-  const secureAttr = secure ? "; Secure" : "";
-  // Session cookie — no Max-Age so a logged-out visitor is not re-checked every few minutes.
-  return `${OIDC_SSO_CHECKED_COOKIE}=1; Path=/; HttpOnly; SameSite=Lax${secureAttr}`;
+export const DEFAULT_OIDC_SSO_COOLDOWN_SEC = 60;
+
+export function getOidcSsoCooldownSec(
+  envSource: NodeJS.ProcessEnv = process.env,
+): number {
+  const rawStr = String(envSource.OIDC_SSO_COOLDOWN_SEC || "").trim();
+  if (!rawStr) return DEFAULT_OIDC_SSO_COOLDOWN_SEC;
+  const raw = Number(rawStr);
+  if (Number.isFinite(raw) && raw >= 0) return Math.floor(raw);
+  return DEFAULT_OIDC_SSO_COOLDOWN_SEC;
 }
 
-export function oidcSsoCheckedClearCookie(secure: boolean): string {
-  const secureAttr = secure ? "; Secure" : "";
-  return `${OIDC_SSO_CHECKED_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureAttr}`;
+/** Comma-separated absolute origins (no hardcoded hosts). */
+export function parseOidcSsoHubOrigins(
+  envSource: NodeJS.ProcessEnv = process.env,
+): string[] {
+  return String(envSource.OIDC_SSO_HUB_ORIGINS || "")
+    .split(",")
+    .map((s) => s.trim().replace(/\/$/, ""))
+    .filter(Boolean)
+    .map((raw) => {
+      try {
+        return new URL(raw).origin;
+      } catch {
+        return "";
+      }
+    })
+    .filter(Boolean);
 }
 
-/** Session cookie — cleared when the browser session ends. */
-export function oidcSsoSkipSetCookie(secure: boolean): string {
-  const secureAttr = secure ? "; Secure" : "";
-  return `${OIDC_SSO_SKIP_COOKIE}=1; Path=/; HttpOnly; SameSite=Lax${secureAttr}`;
+export function refererMatchesHubOrigin(
+  referer: string | null | undefined,
+  hubOrigins: string[],
+): boolean {
+  if (!referer || hubOrigins.length === 0) return false;
+  try {
+    const origin = new URL(referer).origin;
+    return hubOrigins.includes(origin);
+  } catch {
+    return false;
+  }
 }
 
-export function oidcSsoSkipClearCookie(secure: boolean): string {
-  const secureAttr = secure ? "; Secure" : "";
-  return `${OIDC_SSO_SKIP_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureAttr}`;
+export function hasSsoBypassQuery(search: string): boolean {
+  const raw = String(search || "");
+  const q = raw.startsWith("?") ? raw.slice(1) : raw;
+  try {
+    return new URLSearchParams(q).get("sso") === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Drop ?sso=1 from returnTo so it does not stick after silent login. */
+export function stripSsoBypassParam(pathWithQuery: string): string {
+  const raw = String(pathWithQuery || "/");
+  const qIndex = raw.indexOf("?");
+  if (qIndex < 0) return raw || "/";
+  const path = raw.slice(0, qIndex) || "/";
+  const params = new URLSearchParams(raw.slice(qIndex + 1));
+  if (!params.has("sso")) return raw;
+  params.delete("sso");
+  const q = params.toString();
+  return q ? `${path}?${q}` : path;
 }
 
 /**
+ * Cooldown active when cookie holds a recent timestamp (ms since epoch).
+ * Legacy non-numeric values ("1") are ignored so hub login is not stuck.
+ */
+export function isOidcSsoCooldownActive(
+  cookieValue: string | null | undefined,
+  nowMs: number = Date.now(),
+  cooldownSec: number = getOidcSsoCooldownSec(),
+): boolean {
+  if (cooldownSec <= 0) return false;
+  const ts = Number(String(cookieValue || "").trim());
+  if (!Number.isFinite(ts) || ts <= 0) return false;
+  return nowMs - ts < cooldownSec * 1000;
+}
+
+/** Set after silent login_required (and other quiet fails) to prevent immediate loops. */
+export function oidcSsoCooldownSetCookie(
+  secure: boolean,
+  nowMs: number = Date.now(),
+  cooldownSec: number = getOidcSsoCooldownSec(),
+): string {
+  const secureAttr = secure ? "; Secure" : "";
+  const maxAge = Math.max(1, cooldownSec > 0 ? cooldownSec : 1);
+  return `${OIDC_SSO_COOLDOWN_COOKIE}=${Math.floor(nowMs)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secureAttr}`;
+}
+
+export function oidcSsoCooldownClearCookie(secure: boolean): string {
+  const secureAttr = secure ? "; Secure" : "";
+  return `${OIDC_SSO_COOLDOWN_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureAttr}`;
+}
+
+/** @deprecated use oidcSsoCooldownSetCookie */
+export const oidcSsoCheckedSetCookie = oidcSsoCooldownSetCookie;
+/** @deprecated use oidcSsoCooldownClearCookie */
+export const oidcSsoCheckedClearCookie = oidcSsoCooldownClearCookie;
+
+/**
  * Edge-safe same-origin path + query (no open redirects).
- * Used for silent + interactive returnTo from the proxy.
  */
 export function safeAppReturnPath(pathname: string, search = ""): string {
   const raw = `${pathname}${search}`;
@@ -53,12 +132,10 @@ export function shouldSkipSilentSsoPath(pathname: string): boolean {
   if (path === "/login" || path.startsWith("/login/")) return true;
   if (path === "/logged-out" || path.startsWith("/logged-out/")) return true;
   if (path.startsWith("/api/auth/oidc/")) return true;
-  // Static file extensions
   if (/\.[a-z0-9]{1,8}$/i.test(path)) return true;
   return false;
 }
 
-/** App pages that require an interactive login when unauthenticated. */
 export function isProtectedAppPath(pathname: string): boolean {
   const path = String(pathname || "").split("?")[0] || "/";
   return (
@@ -112,20 +189,42 @@ export function isTopLevelDocumentNavigation(input: {
 
 /**
  * Whether middleware should kick off a silent SSO check for this document request.
+ * Hub Referer / ?sso=1 bypass the post-login_required cooldown.
  */
 export function shouldStartSilentSso(input: {
   pathname: string;
+  search?: string;
   hasSession: boolean;
-  ssoChecked: boolean;
-  ssoSkip: boolean;
+  cooldownCookie?: string | null;
+  /** Absolute ms; defaults to Date.now(). */
+  nowMs?: number;
+  cooldownSec?: number;
+  hubOrigins?: string[];
+  referer?: string | null;
   oidcEnabled: boolean;
   isDocumentNavigation: boolean;
 }): boolean {
   if (!input.oidcEnabled) return false;
   if (!input.isDocumentNavigation) return false;
   if (input.hasSession) return false;
-  if (input.ssoChecked) return false;
-  if (input.ssoSkip) return false;
   if (shouldSkipSilentSsoPath(input.pathname)) return false;
+
+  const bypass =
+    hasSsoBypassQuery(input.search || "") ||
+    refererMatchesHubOrigin(
+      input.referer,
+      input.hubOrigins ?? parseOidcSsoHubOrigins(),
+    );
+  if (bypass) return true;
+
+  if (
+    isOidcSsoCooldownActive(
+      input.cooldownCookie,
+      input.nowMs ?? Date.now(),
+      input.cooldownSec ?? getOidcSsoCooldownSec(),
+    )
+  ) {
+    return false;
+  }
   return true;
 }

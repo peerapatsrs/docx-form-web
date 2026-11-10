@@ -529,10 +529,31 @@ export async function runWithSavedAiKeyAuthFallback<T>(
 }
 
 /**
+ * Cursor API keys commonly start with `crsr_` / `key_`.
+ * Never treat these as a Gemini/Google BYOK override — that made
+ * resolveEffectiveAiProvider keep admin default=google while the only
+ * shared secret was DOCX_FORM_CURSOR_API_KEY (AI_AUTH 400).
+ */
+export function looksLikeCursorApiKey(raw: string | null | undefined): boolean {
+  const k = String(raw || "").trim();
+  if (!k) return false;
+  return /^(crsr_|key_)/i.test(k);
+}
+
+/** Google AI Studio keys commonly start with `AIza`. */
+export function looksLikeGeminiApiKey(raw: string | null | undefined): boolean {
+  const k = String(raw || "").trim();
+  if (!k) return false;
+  return /^AIza/i.test(k);
+}
+
+/**
  * Resolve API key: per-request override → (if not BYOK) env/file.
+ * Override is ignored when it clearly belongs to another provider family.
  */
 export function getGeminiApiKey(override?: string | null): string | undefined {
-  if (override && String(override).trim()) return String(override).trim();
+  const o = override && String(override).trim() ? String(override).trim() : "";
+  if (o && !looksLikeCursorApiKey(o)) return o;
   if (isByokOnly()) return undefined;
 
   const fromEnv =
@@ -547,7 +568,8 @@ export function getGeminiApiKey(override?: string | null): string | undefined {
 
 /** Shared Cursor key (DOCX_FORM_CURSOR_API_KEY) when BYOK-only is off; BYOK override wins. */
 export function getCursorApiKey(override?: string | null): string | undefined {
-  if (override && String(override).trim()) return String(override).trim();
+  const o = override && String(override).trim() ? String(override).trim() : "";
+  if (o && !looksLikeGeminiApiKey(o)) return o;
   if (isByokOnly()) return undefined;
   const fromEnv = process.env[CURSOR_SERVER_KEY_ENV];
   if (fromEnv && String(fromEnv).trim()) return String(fromEnv).trim();

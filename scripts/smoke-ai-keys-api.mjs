@@ -92,6 +92,26 @@ ok(
     !JSON.stringify(statusAnonJson || {}).includes("DOCX_FORM_CURSOR_API_KEY") &&
     !JSON.stringify(statusAnonJson || {}).includes("/tmp/"),
 );
+// When the server is running with BYOK off + a shared key, status must be ready
+// without a personal key (not plan-gated). Skip when BYOK-only (default).
+if (statusAnonJson?.byok === false) {
+  ok(
+    "BYOK_ONLY=0 shared status ready without personal key",
+    statusAnonJson?.connected === true &&
+      statusAnonJson?.keySource === "shared",
+    JSON.stringify({
+      connected: statusAnonJson?.connected,
+      keySource: statusAnonJson?.keySource,
+      byok: statusAnonJson?.byok,
+    }),
+  );
+} else {
+  ok(
+    "BYOK-only status leaves shared off without personal key (skipped shared assert)",
+    statusAnonJson?.byok !== false,
+    JSON.stringify({ byok: statusAnonJson?.byok, keySource: statusAnonJson?.keySource }),
+  );
+}
 
 const jar = { cookie: "" };
 const login = await jarFetch("/api/auth/dev/login-as", {

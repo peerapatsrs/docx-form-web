@@ -43,14 +43,35 @@ Public-ish snapshot used by the header pill. Same effective provider/model resol
 
 | Field | Meaning |
 |-------|---------|
-| `keySource` | `user` (BYOK / vault) · `shared` (server env/file) · `none` |
+| `keySource` | `user` (BYOK / vault) · `shared` (server env/DB) · `none` |
 | `keyId` | Present only when `keySource=user` and vault id resolved |
+| `connected` | `true` when a usable key resolves (personal **or** shared) |
+| `byok` | Mirrors `DOCX_FORM_BYOK_ONLY` (default on) |
 | `effectiveProvider` / `effectiveModel` | What the server will actually call (same resolver as pill) |
 | `lastTest*` | From vault row when `keySource=user`; otherwise null |
 | `configStore` | `database` (or `browser` when BYOK-only) — **never** a filesystem path |
 | `configStoreLabel` | Human storage label — **never** a filesystem path |
 | `serverEnv*KeySource` | `"set via server"` or null — **never** raw env var names |
 | `upgradeUrl` | F37 deep link string; **`""` → Frontend hides** the upgrade CTA (**no hardcoded URL**; config-driven) |
+
+### Shared server key (`DOCX_FORM_BYOK_ONLY=0`)
+
+Default web mode is BYOK-only (`DOCX_FORM_BYOK_ONLY` unset/`1`): users must bring a personal key; `connected=false` / `keySource=none` without one.
+
+When **`DOCX_FORM_BYOK_ONLY=0`** (or `false`/`no`) and a shared key exists
+(`DOCX_FORM_CURSOR_API_KEY` and/or DB `ai_server` Gemini key / Gemini env), **any
+logged-in user without a personal key** resolves to that shared key:
+
+| Surface | Behaviour |
+|---------|-----------|
+| `GET /api/ai/status` | `connected=true`, `keySource=shared`, `byok=false` |
+| AI suggest / draft / batch-from-source | `resolveRouteAiCredentials` → shared key |
+| `GET /api/diagnostics` | Same coalesce + `keySource=shared` (superadmin) |
+
+This is **not** a premium/plan gate on the shared key. Plan quotas and
+`PREMIUM_ENFORCE` feature gates stay separate (`/api/entitlement`, upload limits).
+Frontend pill/draft must treat `keySource=shared` + `connected` as ready when
+`byok=false` (do not demand a personal key).
 
 **Not on `/api/ai/status`:** `uploadLimitText` lives on `GET /api/entitlement` / `GET /api/me` (`premium.uploadLimitText`) — see below.
 
@@ -274,6 +295,8 @@ Frontend should map these to TH/EN copy (see FIXES.md dialog strings).
 
 Env:
 
+- `DOCX_FORM_BYOK_ONLY` — default `1` (personal keys only). Set `0` to enable shared server key for users without a personal key (see above).
+- `DOCX_FORM_CURSOR_API_KEY` — shared Cursor key used when BYOK-only is off (and as vault-auth fallback).
 - `DOCX_FORM_AI_TIMEOUT_MS` — shared AI call budget (also caps key tests ≤ 20s)
 - `DOCX_FORM_AI_KEY_TEST_MOCK=ok\|401\|auth\|quota\|429\|hang` — local/CI mock for key probe
 

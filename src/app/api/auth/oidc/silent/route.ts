@@ -8,18 +8,15 @@ import {
   logOidcNotConfigured,
 } from "@/server/oidc-config";
 import { safeOidcReturnTo } from "@/server/oidc-identities";
-import {
-  oidcSsoCooldownSetCookie,
-} from "@/server/oidc-silent";
+import { oidcSsoCooldownSetCookie } from "@/server/oidc-silent";
 import { getAppBaseUrl } from "@/lib/app-base-url";
 
 export const dynamic = "force-dynamic";
 
 /**
  * Silent SSO start: top-level authorize with prompt=none (no iframe).
- * Same redirect_uri / client_id / scopes / PKCE as interactive login.
- * Cooldown cookie is set only after login_required (callback), not here —
- * except when authorize cannot start (avoid tight local loops).
+ * Marks cooldown as `pending` immediately so hub Referer cannot start a second
+ * attempt before the callback returns.
  */
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -28,6 +25,9 @@ export async function GET(request: Request) {
     "/",
   );
   const secure = process.env.NODE_ENV === "production";
+  const pendingCookie = oidcSsoCooldownSetCookie(secure, {
+    outcome: "pending",
+  });
 
   console.info("[oidc] silent attempt", { returnTo });
 
@@ -37,7 +37,10 @@ export async function GET(request: Request) {
     console.info("[oidc] silent outcome", { outcome: "disabled" });
     const home = new URL(returnTo, getAppBaseUrl());
     const headers = new Headers();
-    applyOidcSetCookies(headers, [oidcSsoCooldownSetCookie(secure)]);
+    headers.set("Referrer-Policy", "no-referrer");
+    applyOidcSetCookies(headers, [
+      oidcSsoCooldownSetCookie(secure, { outcome: "fail" }),
+    ]);
     return NextResponse.redirect(home, { status: 302, headers });
   }
 
@@ -54,11 +57,17 @@ export async function GET(request: Request) {
     });
     const home = new URL(returnTo, getAppBaseUrl());
     const headers = new Headers();
-    applyOidcSetCookies(headers, [oidcSsoCooldownSetCookie(secure)]);
+    headers.set("Referrer-Policy", "no-referrer");
+    applyOidcSetCookies(headers, [
+      oidcSsoCooldownSetCookie(secure, { outcome: "fail" }),
+    ]);
     return NextResponse.redirect(home, { status: 302, headers });
   }
 
   console.info("[oidc] silent outcome", { outcome: "redirect_authorize" });
-  // Do not set cooldown yet — wait for IdP login_required / success.
-  return NextResponse.redirect(result.url, { status: 302 });
+  const headers = new Headers();
+  // Consume bypass for this window before leaving for Keycloak.
+  applyOidcSetCookies(headers, [pendingCookie]);
+  headers.set("Referrer-Policy", "no-referrer");
+  return NextResponse.redirect(result.url, { status: 302, headers });
 }

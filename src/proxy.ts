@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { getSessionCookie } from "better-auth/cookies";
 import {
   documentCacheControl,
   securityHeaders,
@@ -20,6 +19,7 @@ import {
   shouldStartSilentSso,
   stripSsoBypassParam,
 } from "@/server/oidc-silent";
+import { resolveProxySession } from "@/server/oidc-session-edge";
 
 function applySecurityHeaders(response: NextResponse): NextResponse {
   const headers = securityHeaders();
@@ -28,6 +28,12 @@ function applySecurityHeaders(response: NextResponse): NextResponse {
   }
   response.headers.delete("x-powered-by");
   return response;
+}
+
+function applySetCookies(response: NextResponse, cookies: string[]): void {
+  for (const c of cookies) {
+    response.headers.append("Set-Cookie", c);
+  }
 }
 
 /** Broader than silent SSO — used only for Cache-Control on HTML-ish responses. */
@@ -76,7 +82,7 @@ function maybeRedirectToHttps(request: NextRequest): NextResponse | null {
  * Public pages render logged-out; protected pages → interactive /login.
  * Silent SSO is a top-level prompt=none redirect (no iframes) on document loads.
  */
-export function proxy(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const httpsRedirect = maybeRedirectToHttps(request);
   if (httpsRedirect) return httpsRedirect;
 
@@ -93,8 +99,8 @@ export function proxy(request: NextRequest) {
     return applySecurityHeaders(new NextResponse(null, { status: 404 }));
   }
 
-  const sessionToken = getSessionCookie(request);
-  const hasSession = Boolean(sessionToken);
+  const session = await resolveProxySession({ request });
+  const hasSession = session.hasSession;
   const htmlish = isHtmlishNavigation(request);
   const topLevelDoc = isTopLevelDocumentNavigation({
     accept: request.headers.get("accept"),
@@ -127,6 +133,8 @@ export function proxy(request: NextRequest) {
     const silent = new URL(safeAppPathUrl("/api/auth/oidc/silent"));
     silent.searchParams.set("next", returnTo);
     const redirect = applySecurityHeaders(NextResponse.redirect(silent, 307));
+    redirect.headers.set("Referrer-Policy", "no-referrer");
+    applySetCookies(redirect, session.clearCookies);
     if (htmlish) {
       redirect.headers.set("Cache-Control", documentCacheControl(pathname));
     }
@@ -141,12 +149,14 @@ export function proxy(request: NextRequest) {
       stripSsoBypassParam(safeAppReturnPath(pathname, search)),
     );
     const redirect = applySecurityHeaders(NextResponse.redirect(login, 307));
+    applySetCookies(redirect, session.clearCookies);
     redirect.headers.set("Cache-Control", documentCacheControl(pathname));
     return redirect;
   }
 
   const response = NextResponse.next();
   applySecurityHeaders(response);
+  applySetCookies(response, session.clearCookies);
   if (htmlish) {
     response.headers.set("Cache-Control", documentCacheControl(pathname));
   }

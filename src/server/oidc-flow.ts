@@ -28,6 +28,8 @@ import {
   parseOidcFailCookie,
 } from "./oidc-login-guard";
 import {
+  buildSilentLandPath,
+  normalizeSilentOutcome,
   oidcSsoCooldownClearCookie,
   oidcSsoCooldownSetCookie,
 } from "./oidc-silent";
@@ -254,6 +256,8 @@ export async function handleOidcCallback(input: {
   redirectTo: string;
   setCookies: string[];
   error?: string;
+  /** Set on silent quiet-fail responses. */
+  referrerPolicy?: "no-referrer" | "same-origin";
 }> {
   const { appendOidcPasskeyStatusParam, normalizeKcActionStatus } =
     await import("./oidc-passkey");
@@ -279,18 +283,19 @@ export async function handleOidcCallback(input: {
   const state = String(input.state || "").trim();
 
   const quietSilentFail = (returnTo: string, error: string) => {
-    const outcome = String(error || "error").slice(0, 64);
+    const outcome = normalizeSilentOutcome(error);
     console.info("[oidc] silent outcome", { outcome });
-    // Cooldown after login_required (and other quiet fails) — loop guard only.
+    // Same-origin land hop + cooldown outcome so hub Referer cannot re-bypass.
     return {
       status: 302,
-      redirectTo: safeOidcReturnTo(returnTo, "/"),
-      setCookies: [oidcSsoCooldownSetCookie(secure)],
+      redirectTo: buildSilentLandPath(safeOidcReturnTo(returnTo, "/")),
+      setCookies: [oidcSsoCooldownSetCookie(secure, { outcome })],
       error,
+      referrerPolicy: "no-referrer" as const,
     };
   };
 
-  // IdP error: silent (prompt=none) → stay logged out quietly; interactive → Thai error page.
+  // IdP error: silent (prompt=none) → never show error page; interactive → Thai page.
   if (input.error && !kcStatus) {
     if (state) {
       const pending = await consumeState(state).catch(() => null);
@@ -300,14 +305,17 @@ export async function handleOidcCallback(input: {
           String(input.error).slice(0, 128),
         );
       }
-      return {
-        status: 302,
-        redirectTo: `/login?error=oidc_${encodeURIComponent(String(input.error).slice(0, 64))}`,
-        setCookies: [failBumpCookie()],
-        error: String(input.error),
-      };
+      if (pending && !pending.silent) {
+        return {
+          status: 302,
+          redirectTo: `/login?error=oidc_${encodeURIComponent(String(input.error).slice(0, 64))}`,
+          setCookies: [failBumpCookie()],
+          error: String(input.error),
+        };
+      }
+      // Missing/expired state — never bounce IdP errors to /login?error=.
+      return quietSilentFail("/", String(input.error).slice(0, 128));
     }
-    // No state — cannot tell; land home quietly with checked cookie (no loop).
     return quietSilentFail("/", String(input.error).slice(0, 128));
   }
 

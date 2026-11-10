@@ -31,6 +31,13 @@ export async function GET(request: Request) {
   });
   const headers = new Headers();
   applyOidcSetCookies(headers, result.setCookies);
+  if (result.referrerPolicy) {
+    headers.set("Referrer-Policy", result.referrerPolicy);
+  } else {
+    // Prefer not leaking Keycloak URL as Referer into the app after success either.
+    headers.set("Referrer-Policy", "same-origin");
+  }
+  headers.set("Cache-Control", "private, no-store");
   return NextResponse.redirect(absoluteRedirect(result.redirectTo), {
     status: 302,
     headers,

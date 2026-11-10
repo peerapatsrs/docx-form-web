@@ -36,6 +36,9 @@ services:
       OIDC_ISSUER: ${OIDC_ISSUER:-}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      # Silent SSO cooldown (seconds) + hub Referer bypass origins (comma-separated).
+      OIDC_SSO_COOLDOWN_SEC: ${OIDC_SSO_COOLDOWN_SEC:-60}
+      OIDC_SSO_HUB_ORIGINS: ${OIDC_SSO_HUB_ORIGINS:-}
     depends_on:
       db:
         condition: service_healthy

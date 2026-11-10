@@ -20,7 +20,7 @@ export default function LoggedOutPage() {
           <Link className="auth-provider auth-provider-sso" href="/login">
             เข้าสู่ระบบด้วย TPS18 SSO
           </Link>
-          <Link className="auth-provider" href="/">
+          <Link className="auth-provider" href="/?sso=1">
             กลับหน้าหลัก
           </Link>
         </div>

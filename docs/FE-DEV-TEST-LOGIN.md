@@ -4,13 +4,14 @@ Frontend discovers one-click DEV accounts from Backend. **Passwords never reach
 the browser.** The login page shows the panel only when the list endpoint
 returns **200** with at least one account; **404** or any error hides it.
 
-Gate on Backend (not a Next public env):
+Gate on Backend (not a Next public env) — see Backend `docs/DEV-TEST-ACCOUNTS.md`:
 
-- `SHOW_TEST_ACCOUNTS=1`
-- `APP_ENV=dev`
+- `APP_ENV=dev` (hard allow; sit/uat/prod/unset refuse)
+- `SHOW_TEST_ACCOUNTS=1` (expose GET/POST `/api/dev/test-*`)
+- `SEED_TEST_USERS=1` (idempotent seed of user+admin — independent of show)
 
-Both must be true or the endpoints return **404**. Off by default; never enable
-on SIT / UAT / PROD.
+`SHOW_TEST_ACCOUNTS=1` **and** `APP_ENV=dev` must both be true or the endpoints
+return **404**. Off by default; never enable on SIT / UAT / PROD.
 
 ## Endpoints
 

@@ -15,7 +15,11 @@ import {
   listDisplayName,
 } from "./ui-labels.js";
 import { openAiKeyDialog } from "./ai-key-dialog.js";
-import { aiKeyAuthHeaders, maskAiKeyLocal } from "./ai-key-client.js";
+import {
+  aiKeyAuthHeaders,
+  mapFillError,
+  maskAiKeyLocal,
+} from "./ai-key-client.js";
 
 /** @typedef {{ name: string, type: 'text', aliases?: string[] }} TextField */
 /** @typedef {{ name: string, type: 'image', aliases?: string[] }} ImageField */
@@ -13285,6 +13289,9 @@ async function createAllTemplatesZip() {
     items.push({
       filename: slot.filename,
       values: buildValuesPayloadFrom(slot),
+      // Preferred contract: skip / rowSkip maps alongside values (API-AI-KEYS-AND-SKIP).
+      skip: slot.skip || {},
+      rowSkip: slot.rowSkip || {},
     });
   }
   fd.append("items", JSON.stringify(items));
@@ -13293,7 +13300,7 @@ async function createAllTemplatesZip() {
     const res = await fetch("/api/batch-fill", { method: "POST", body: fd });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      showBanner(data.error || "สร้างเอกสารทั้งหมดไม่สำเร็จ");
+      showBanner(mapFillError(data, res.status, undefined, "สร้างเอกสารทั้งหมดไม่สำเร็จ"));
       return;
     }
     if (data.zipBase64) {
@@ -13367,6 +13374,9 @@ async function onSubmit(e) {
   const fd = new FormData();
   fd.append("file", state.file);
   fd.append("values", JSON.stringify(values));
+  // Preferred contract: send skip / rowSkip maps (Backend runs toFillValues when present).
+  fd.append("skip", JSON.stringify(state.skip || {}));
+  fd.append("rowSkip", JSON.stringify(state.rowSkip || {}));
   for (const [name, file] of Object.entries(state.images)) {
     if (file && !state.skip[name]) {
       fd.append(`image:${name}`, file, file.name);
@@ -13379,7 +13389,7 @@ async function onSubmit(e) {
       let msg = "สร้างเอกสารไม่สำเร็จ";
       try {
         const data = await res.json();
-        if (data.error) msg = data.error;
+        msg = mapFillError(data, res.status, undefined, msg);
       } catch {
         /* ignore */
       }

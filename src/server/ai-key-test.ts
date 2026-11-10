@@ -11,7 +11,12 @@ import {
   isAiTimeoutError,
   withAiTimeout,
 } from "./ai-request";
-import { formatProviderHttpError, isAiCredentialAuthError } from "./ai-http-errors";
+import {
+  classifyProviderError,
+  formatProviderHttpError,
+  isAiCredentialAuthError,
+  type AiProviderErrorCode,
+} from "./ai-http-errors";
 
 export type AiKeyTestResult = {
   ok: boolean;
@@ -20,6 +25,52 @@ export type AiKeyTestResult = {
   provider: string;
   durationMs: number;
 };
+
+/** Map a probe failure onto the save/rotate rejection code. */
+export function saveRejectCodeFromTest(result: AiKeyTestResult): string {
+  if (result.ok) return "AI_KEY_TEST_OK";
+  if (
+    result.code === "AI_KEY_INVALID" ||
+    result.code === "AI_KEY_PROVIDER_AUTH" ||
+    result.code === "AI_KEY_UNAUTHORIZED"
+  ) {
+    return "AI_KEY_INVALID";
+  }
+  if (result.code === "AI_KEY_TEST_TIMEOUT" || result.code === "AI_PROVIDER_TIMEOUT") {
+    return "AI_PROVIDER_TIMEOUT";
+  }
+  if (
+    result.code === "AI_PROVIDER_QUOTA" ||
+    result.code === "AI_PROVIDER_RATE_LIMIT" ||
+    result.code === "AI_PROVIDER_UNAVAILABLE" ||
+    result.code === "AI_PROVIDER_BAD_REQUEST" ||
+    result.code === "AI_PROVIDER_ERROR"
+  ) {
+    return result.code;
+  }
+  if (result.code === "AI_KEY_INVALID_VALUE" || result.code === "AI_KEY_INVALID_PROVIDER") {
+    return result.code;
+  }
+  // Auth-shaped messages from older probes → stable invalid-key code.
+  if (isAiCredentialAuthError(result.message)) return "AI_KEY_INVALID";
+  return "AI_KEY_INVALID";
+}
+
+/**
+ * Live-validate a key before create/upsert/rotate. Does not persist.
+ * On failure returns a Classified-style result suitable for a 400 JSON body.
+ */
+export async function validateAiKeyForSave(opts: {
+  provider: string;
+  apiKey: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}): Promise<AiKeyTestResult> {
+  const result = await testAiProviderKey(opts);
+  if (result.ok) return result;
+  const code = saveRejectCodeFromTest(result);
+  return { ...result, code, ok: false };
+}
 
 const TEST_TIMEOUT_CAP_MS = 20_000;
 
@@ -165,8 +216,26 @@ export async function testAiProviderKey(opts: {
   if (mock === "401" || mock === "auth") {
     return {
       ok: false,
-      code: "AI_KEY_PROVIDER_AUTH",
+      code: "AI_KEY_INVALID",
       message: `${provider.label}: API key หรือสิทธิ์ไม่ถูกต้อง`,
+      provider: providerId,
+      durationMs: Date.now() - started,
+    };
+  }
+  if (mock === "quota") {
+    return {
+      ok: false,
+      code: "AI_PROVIDER_QUOTA",
+      message: `${provider.label}: เครดิต/โควต้าหมด — เติมที่คอนโซลของเจ้านี้ หรือเปลี่ยนคีย์`,
+      provider: providerId,
+      durationMs: Date.now() - started,
+    };
+  }
+  if (mock === "429" || mock === "rate") {
+    return {
+      ok: false,
+      code: "AI_PROVIDER_RATE_LIMIT",
+      message: `${provider.label}: เรียกถี่เกินไป — รอสักครู่แล้วลองใหม่`,
       provider: providerId,
       durationMs: Date.now() - started,
     };
@@ -192,7 +261,7 @@ export async function testAiProviderKey(opts: {
     } catch (err) {
       return {
         ok: false,
-        code: "AI_KEY_TEST_TIMEOUT",
+        code: "AI_PROVIDER_TIMEOUT",
         message: isAiTimeoutError(err)
           ? err instanceof Error
             ? err.message
@@ -238,7 +307,7 @@ export async function testAiProviderKey(opts: {
     if (isAiTimeoutError(err)) {
       return {
         ok: false,
-        code: "AI_KEY_TEST_TIMEOUT",
+        code: "AI_PROVIDER_TIMEOUT",
         message:
           err instanceof Error
             ? err.message
@@ -247,21 +316,24 @@ export async function testAiProviderKey(opts: {
         durationMs,
       };
     }
-    const message =
-      err instanceof Error ? err.message : String(err || "ทดสอบคีย์ไม่สำเร็จ");
-    if (isAiCredentialAuthError(err)) {
-      return {
-        ok: false,
-        code: "AI_KEY_PROVIDER_AUTH",
-        message,
-        provider: providerId,
-        durationMs,
-      };
-    }
+    const status =
+      typeof err === "object" && err && "status" in err
+        ? Number((err as { status?: unknown }).status)
+        : 0;
+    const classified = classifyProviderError({
+      providerLabel: provider.label,
+      status,
+      err,
+    });
+    // Prefer AI_KEY_INVALID for auth (save/rotate contract); keep provider codes otherwise.
+    const code: AiProviderErrorCode | string =
+      classified.code === "AI_KEY_INVALID"
+        ? "AI_KEY_INVALID"
+        : classified.code;
     return {
       ok: false,
-      code: "AI_KEY_PROVIDER_ERROR",
-      message,
+      code,
+      message: classified.message,
       provider: providerId,
       durationMs,
     };

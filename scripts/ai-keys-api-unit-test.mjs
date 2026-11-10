@@ -69,22 +69,34 @@ await check("docs list stable error codes", async () => {
     "AI_KEY_UNAUTHORIZED",
     "AI_KEY_NOT_FOUND",
     "AI_KEY_INVALID_ID",
+    "AI_KEY_INVALID",
     "AI_KEY_TEST_TIMEOUT",
     "AI_KEY_PROVIDER_AUTH",
+    "AI_PROVIDER_TIMEOUT",
+    "AI_PROVIDER_RATE_LIMIT",
+    "AI_PROVIDER_QUOTA",
+    "AI_PROVIDER_UNAVAILABLE",
+    "AI_PROVIDER_BAD_REQUEST",
+    "AI_PROVIDER_ERROR",
     "FILL_BAD_SKIP",
     "FILL_LIST_NOT_ARRAY",
+    "keySource",
+    "uploadLimitText",
   ]) {
     assert.match(doc, new RegExp(code));
   }
 });
 
-await check("api routes wire create/test/audit/replace", async () => {
+await check("api routes wire create/test/audit/replace + validate-on-save", async () => {
   const api = readFileSync(join(root, "src/server/api.ts"), "utf8");
   assert.match(api, /api\.get\("\/ai\/keys\/audit"/);
   assert.match(api, /api\.post\("\/ai\/keys"/);
   assert.match(api, /api\.post\("\/ai\/keys\/:id\/test"/);
   assert.match(api, /api\.put\("\/ai\/keys\/:id"/);
   assert.match(api, /api\.post\("\/ai\/key\/test"/);
+  assert.match(api, /rejectInvalidAiKey|validateAiKeyForSave/);
+  assert.match(api, /uploadLimitText/);
+  assert.match(api, /fromUserVault/);
   assert.match(api, /form\.get\("skip"\)/);
 });
 
@@ -164,7 +176,7 @@ await check("vault CRUD + ownership + audit + mask (Postgres)", async () => {
   assert.ok(afterDel.some((e) => e.action === "delete"));
 });
 
-await check("key test mock ok / 401 / timeout", async () => {
+await check("key test mock ok / 401 / timeout / quota", async () => {
   await withEnv({ DOCX_FORM_AI_KEY_TEST_MOCK: "ok" }, async () => {
     const { testAiProviderKey } = await loadFresh("src/server/ai-key-test.ts");
     const r = await testAiProviderKey({
@@ -175,13 +187,30 @@ await check("key test mock ok / 401 / timeout", async () => {
     assert.equal(r.code, "AI_KEY_TEST_OK");
   });
   await withEnv({ DOCX_FORM_AI_KEY_TEST_MOCK: "401" }, async () => {
-    const { testAiProviderKey } = await loadFresh("src/server/ai-key-test.ts");
+    const { testAiProviderKey, validateAiKeyForSave, saveRejectCodeFromTest } =
+      await loadFresh("src/server/ai-key-test.ts");
     const r = await testAiProviderKey({
       provider: "cursor",
       apiKey: "crsr_mock_bad",
     });
     assert.equal(r.ok, false);
-    assert.equal(r.code, "AI_KEY_PROVIDER_AUTH");
+    assert.equal(r.code, "AI_KEY_INVALID");
+    assert.equal(saveRejectCodeFromTest(r), "AI_KEY_INVALID");
+    const v = await validateAiKeyForSave({
+      provider: "cursor",
+      apiKey: "crsr_mock_bad",
+    });
+    assert.equal(v.ok, false);
+    assert.equal(v.code, "AI_KEY_INVALID");
+  });
+  await withEnv({ DOCX_FORM_AI_KEY_TEST_MOCK: "quota" }, async () => {
+    const { testAiProviderKey } = await loadFresh("src/server/ai-key-test.ts");
+    const r = await testAiProviderKey({
+      provider: "google",
+      apiKey: "AIzaSyMockQuota",
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, "AI_PROVIDER_QUOTA");
   });
   await withEnv({ DOCX_FORM_AI_KEY_TEST_MOCK: "hang" }, async () => {
     const { testAiProviderKey } = await loadFresh("src/server/ai-key-test.ts");
@@ -192,7 +221,7 @@ await check("key test mock ok / 401 / timeout", async () => {
       timeoutMs: 100,
     });
     assert.equal(r.ok, false);
-    assert.equal(r.code, "AI_KEY_TEST_TIMEOUT");
+    assert.equal(r.code, "AI_PROVIDER_TIMEOUT");
     assert.ok(Date.now() - t0 < 3000);
   });
 });

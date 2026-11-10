@@ -6,6 +6,74 @@ Base: same origin `/api`. Auth: session cookie (Better Auth). Unauthenticated �
 
 ---
 
+## AI status (pill)
+
+### `GET /api/ai/status`
+
+Public-ish snapshot used by the header pill. Same effective provider/model resolver as fill/tag.
+
+**Response 200 (extra fields for truthful pill — F19 / F31)**
+
+```json
+{
+  "connected": true,
+  "keySource": "user",
+  "keyId": "k-…",
+  "provider": "cursor",
+  "effectiveProvider": "cursor",
+  "effectiveProviderLabel": "Cursor",
+  "model": "composer-2.5",
+  "effectiveModel": "composer-2.5",
+  "defaultModel": "composer-2.5",
+  "adminDefaultModel": "gemini-3.8-flash",
+  "adminDefaultProvider": "google",
+  "lastTestStatus": "ok",
+  "lastTestOk": true,
+  "lastTestAt": "2026-11-10T12:00:00.000Z",
+  "lastTestCode": "AI_KEY_TEST_OK",
+  "lastTestMessage": "คีย์ใช้งานได้",
+  "configStore": "server-file",
+  "configStoreLabel": "เก็บบนเซิร์ฟเวอร์",
+  "serverEnvCursorKeySource": "set via server",
+  "serverEnvGeminiKeySource": null,
+  "aiTimeoutMs": 90000
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `keySource` | `user` (BYOK / vault) · `shared` (server env/file) · `none` |
+| `keyId` | Present only when `keySource=user` and vault id resolved |
+| `effectiveProvider` / `effectiveModel` | What the server will actually call (same resolver as pill) |
+| `lastTest*` | From vault row when `keySource=user`; otherwise null |
+| `configStoreLabel` | Human storage label — **never** a filesystem path |
+| `serverEnv*KeySource` | `"set via server"` or null — **never** raw env var names |
+
+Admin: `GET /api/admin/ai` returns the same effective fields plus `premiumEnforceLabel` (`บังคับแผนพรีเมียม` / `ไม่บังคับ`). No `configPath`, no env var names.
+
+---
+
+## Entitlement / upload quota (F02)
+
+### `GET /api/entitlement`
+
+```json
+{
+  "premium": {
+    "paid": true,
+    "plan": "pro",
+    "maxMultiTemplates": 10,
+    "freeMaxMulti": 2,
+    "paidMaxMulti": 10,
+    "uploadLimitText": "สูงสุด 10 ไฟล์ต่อครั้ง (จ่ายแล้ว)"
+  }
+}
+```
+
+`maxMultiTemplates` and `uploadLimitText` come from `getAppLimits()` + the user’s plan — never a fixed “ฟรีสูงสุด 2”.
+
+---
+
 ## AI keys (canonical: plural)
 
 ### `GET /api/ai/keys`
@@ -54,12 +122,15 @@ List the current user’s saved keys (masked meta only).
 ```
 
 - `id` optional (server generates `k-…` when omitted).
+- **Live validation (F30):** server runs a lightweight provider probe (timeout-capped) **before** encrypting/storing. Fake/invalid keys are rejected and **not stored**.
 - **201** `{ ok: true, entry: <public meta> }`
-- Errors: `AI_KEY_INVALID_PROVIDER`, `AI_KEY_INVALID_VALUE`, `AI_KEY_INVALID_ID`, `AI_KEY_EXISTS`, `AI_KEY_MISSING_FIELDS`
+- Errors: `AI_KEY_INVALID`, `AI_KEY_INVALID_PROVIDER`, `AI_KEY_INVALID_VALUE`, `AI_KEY_INVALID_ID`, `AI_KEY_EXISTS`, `AI_KEY_MISSING_FIELDS`, `AI_PROVIDER_TIMEOUT`, …
 
 ### `PUT /api/ai/keys` — upsert (compat)
 
 Body: `{ "entry": {…} }` or `{ "entries": […] }` (same fields as create; `id` + `apiKey` required).
+
+Validates each key with the same probe before writing any. Rejected → nothing stored for that request.
 
 **200** `{ ok: true, entries: [<public meta>] }`
 
@@ -72,6 +143,8 @@ Body: `{ "entry": {…} }` or `{ "entries": […] }` (same fields as create; `id
 ```json
 { "apiKey": "new-secret", "label": "optional", "model": "optional", "provider": "optional" }
 ```
+
+Same live validation as create. On reject the previous vault value is unchanged.
 
 **200** `{ ok: true, entry }` · **404** `AI_KEY_NOT_FOUND`
 
@@ -92,7 +165,7 @@ Optional body: `{ "timeoutMs": 15000 }` (capped). Runs a minimal live provider c
 }
 ```
 
-**400 / 504** when not ok — `code` is one of `AI_KEY_PROVIDER_AUTH`, `AI_KEY_PROVIDER_ERROR`, `AI_KEY_TEST_TIMEOUT`, …
+**400 / 504** when not ok — `code` is one of the provider / key codes below.
 
 Updates `lastTest*` and writes an audit `test` event. On success also refreshes `lastUsedAt`.
 
@@ -144,7 +217,7 @@ Never includes key material.
 | Method | Path | Behaviour |
 |--------|------|-----------|
 | GET | `/api/ai/key` | `?id=` → one entry; else `{ entry: first\|null, entries, connected }` |
-| PUT | `/api/ai/key` | create or replace primary / given `id` |
+| PUT | `/api/ai/key` | create or replace primary / given `id` (also validates before store) |
 | POST | `/api/ai/key/test` | saved (`id`) or plaintext |
 | DELETE | `/api/ai/key` | `?id=` / body.id / else first key |
 
@@ -152,7 +225,10 @@ Prefer plural endpoints for new UI work.
 
 ---
 
-## Error codes (AI keys)
+## Error codes (AI keys + provider)
+
+Shared mapper: `classifyProviderError` in `src/server/ai-http-errors.ts` (one place — fill/tag/models/test/save).  
+**Credits/quota only when the provider body actually says so** — never the default for 401/429.
 
 | Code | HTTP | Meaning |
 |------|------|---------|
@@ -161,6 +237,8 @@ Prefer plural endpoints for new UI work.
 | `AI_KEY_INVALID_ID` | 400 | Bad id format |
 | `AI_KEY_INVALID_PROVIDER` | 400 | Unknown provider |
 | `AI_KEY_INVALID_VALUE` | 400 | Missing / too-short key |
+| `AI_KEY_INVALID` | 400 | Provider rejected key (auth) — **save/rotate does not store** |
+| `AI_KEY_UNAUTHORIZED` | 401 | Session missing (keys routes) |
 | `AI_KEY_MISSING_FIELDS` | 400 | Body incomplete |
 | `AI_KEY_EXISTS` | 400 | Create with existing id |
 | `AI_KEY_CREATED` | — | Audit only |
@@ -168,9 +246,16 @@ Prefer plural endpoints for new UI work.
 | `AI_KEY_DELETED` | 200 | Delete ok / audit |
 | `AI_KEY_USED` | — | Audit when vault key used on AI routes |
 | `AI_KEY_TEST_OK` | 200 | Probe succeeded |
-| `AI_KEY_PROVIDER_AUTH` | 400 | Provider rejected key |
-| `AI_KEY_PROVIDER_ERROR` | 400 | Other provider failure |
-| `AI_KEY_TEST_TIMEOUT` | 504 | Probe timed out |
+| `AI_KEY_PROVIDER_AUTH` | 400 | Deprecated alias — prefer `AI_KEY_INVALID` |
+| `AI_KEY_PROVIDER_ERROR` | 400 | Legacy other failure — prefer `AI_PROVIDER_ERROR` |
+| `AI_KEY_TEST_TIMEOUT` | 504 | Legacy timeout — prefer `AI_PROVIDER_TIMEOUT` |
+| `AI_PROVIDER_AUTH` | 400 | Auth failure (alias of invalid key family) |
+| `AI_PROVIDER_RATE_LIMIT` | 429/400 | Rate limited (not quota unless body says so) |
+| `AI_PROVIDER_QUOTA` | 402/400 | Credits/quota **explicitly** exhausted by provider |
+| `AI_PROVIDER_TIMEOUT` | 504 | Probe / call timed out |
+| `AI_PROVIDER_UNAVAILABLE` | 502/503 | Provider down / 5xx |
+| `AI_PROVIDER_BAD_REQUEST` | 400 | Bad model / endpoint / request |
+| `AI_PROVIDER_ERROR` | 400 | Other provider failure |
 | `AI_KEY_SERVER_ERROR` | 500 | Unexpected |
 
 Frontend should map these to TH/EN copy (see FIXES.md dialog strings).
@@ -178,7 +263,7 @@ Frontend should map these to TH/EN copy (see FIXES.md dialog strings).
 Env:
 
 - `DOCX_FORM_AI_TIMEOUT_MS` — shared AI call budget (also caps key tests ≤ 20s)
-- `DOCX_FORM_AI_KEY_TEST_MOCK=ok\|401\|hang` — local/CI mock for key probe
+- `DOCX_FORM_AI_KEY_TEST_MOCK=ok\|401\|auth\|quota\|429\|hang` — local/CI mock for key probe
 
 ---
 

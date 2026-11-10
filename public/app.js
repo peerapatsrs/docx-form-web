@@ -266,6 +266,13 @@ function dropzoneMultiSubHtml() {
   return `หรือ <span class="linkish">เลือกไฟล์</span> — หลายเทมเพลตได้สูงสุด ${getMaxMultiTemplates()} ไฟล์ต่อครั้ง (${planQuotaLabel()})`;
 }
 
+/** Home dropzone limit line — always plan-aware (F02), never a fixed "ฟรีสูงสุด 2". */
+function dropzoneOrPickLabel() {
+  const max = getMaxMultiTemplates();
+  const plan = planQuotaLabel();
+  return `หรือเลือกไฟล์ · สูงสุด ${max} ไฟล์ต่อครั้ง (${plan})`;
+}
+
 function multiTabsQuotaLabel(slotCount) {
   const n = Math.max(1, Number(slotCount) || 1);
   const max = getMaxMultiTemplates();
@@ -282,14 +289,22 @@ function multiUploadOptHint() {
   return `ข้อความเป็นตัวอักษร ส่วนตัวแปรเป็นช่องว่างให้กรอก เหมือนใน Word · อัปโหลดหลาย .docx ได้สูงสุด ${getMaxMultiTemplates()} ไฟล์ต่อครั้ง (${planQuotaLabel()})`;
 }
 
-/** Refresh plan/quota copy after /api/health returns live entitlement. */
+/** Refresh plan/quota copy after /api/entitlement returns live limits (F02). */
 function refreshPlanQuotaUi() {
   const sub = document.querySelector("#dropzone .dropzone-sub");
   if (sub) {
     const text = sub.textContent || "";
     // Skip tagger / other empty states that reuse .dropzone-sub
-    if (!text.includes("ไฮไลต์") && text.includes("หลายเทมเพลต")) {
-      sub.innerHTML = dropzoneMultiSubHtml();
+    if (!text.includes("ไฮไลต์")) {
+      if (text.includes("หลายเทมเพลต")) {
+        sub.innerHTML = dropzoneMultiSubHtml();
+      } else if (
+        sub.classList.contains("home-upload-limit") ||
+        text.includes("เลือกไฟล์") ||
+        text.includes("ไฟล์ต่อครั้ง")
+      ) {
+        sub.textContent = dropzoneOrPickLabel();
+      }
     }
   }
   const label = document.querySelector(".multi-tabs-label");
@@ -2473,6 +2488,16 @@ function applyAiStatus(data) {
     models,
   );
   const aiTimeoutMs = Number(data.aiTimeoutMs);
+  const keySource =
+    clientKey || hasVaultRef
+      ? "user"
+      : data.keySource === "user" ||
+          data.keySource === "shared" ||
+          data.keySource === "none"
+        ? data.keySource
+        : data.connected
+          ? "shared"
+          : "none";
   aiStatus = {
     connected: !!clientKey || hasVaultRef || !!data.connected,
     maskedKey: entry ? maskAiEntry(entry) : data.maskedKey || null,
@@ -2486,12 +2511,18 @@ function applyAiStatus(data) {
     byok: data.byok !== false,
     provider,
     effectiveProvider: data.effectiveProvider || provider,
+    effectiveModel: data.effectiveModel || model,
     providerLabel:
       data.effectiveProviderLabel ||
       data.providerLabel ||
       providerLabel(provider),
     entryLabel: entry?.label || "",
     providers: aiProvidersCatalog,
+    keySource,
+    keyId: data.keyId || (hasVaultRef ? entry?.id : null) || null,
+    lastTestStatus: data.lastTestStatus || null,
+    lastTestOk:
+      typeof data.lastTestOk === "boolean" ? data.lastTestOk : null,
     aiTimeoutMs:
       Number.isFinite(aiTimeoutMs) && aiTimeoutMs >= 5000
         ? aiTimeoutMs
@@ -2503,9 +2534,22 @@ function applyAiStatus(data) {
 function updateStatusPillFromAi() {
   refreshShellElements();
   if (!statusText) return;
-  statusText.textContent = aiStatus.connected
-    ? `พร้อมใช้ · ${aiStatus.providerLabel || "AI"} · ${aiStatus.model || ""}`
-    : "พร้อมใช้";
+  const provider = aiStatus.providerLabel || "AI";
+  const model = aiStatus.effectiveModel || aiStatus.model || "";
+  const source = aiStatus.keySource;
+  if (source === "user" || (aiStatus.connected && (getActiveAiEntry()?.apiKey || getActiveAiEntry()?.id))) {
+    statusText.textContent = model
+      ? `พร้อมใช้ · ${provider} · ${model}`
+      : `พร้อมใช้ · ${provider}`;
+    return;
+  }
+  if (source === "shared" || (aiStatus.connected && source !== "none")) {
+    statusText.textContent = model
+      ? `คีย์เซิร์ฟเวอร์ · ${provider} · ${model}`
+      : `คีย์เซิร์ฟเวอร์ · ${provider}`;
+    return;
+  }
+  statusText.textContent = "ยังไม่มีคีย์ AI";
 }
 
 function bindStatusPillAiKeysOpener() {
@@ -3202,7 +3246,7 @@ function renderEmpty() {
       </details>
       <button type="button" class="dropzone dropzone-primary" id="dropzone" aria-label="${escapeAttr(UI_LABELS.dropzoneAriaUploadWord)}">
         <div class="dropzone-title">${escapeHtml(UI_LABELS.dropzoneDrag)}</div>
-        <div class="dropzone-sub home-upload-limit">${escapeHtml(UI_LABELS.dropzoneOrPick)}</div>
+        <div class="dropzone-sub home-upload-limit">${escapeHtml(dropzoneOrPickLabel())}</div>
         <span class="btn-primary dropzone-pick">${escapeHtml(UI_LABELS.dropzonePick)}</span>
       </button>
       <input class="sr-only" type="file" id="fileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="${escapeAttr(UI_LABELS.dropzoneAriaUploadTemplates)}" />

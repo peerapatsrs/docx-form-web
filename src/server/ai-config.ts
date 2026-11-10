@@ -482,6 +482,8 @@ export async function getGeminiModelAsync(
   }
 }
 
+export type AiKeySource = "user" | "shared" | "none";
+
 export function geminiStatus(opts?: {
   requestKey?: string | null;
   requestModel?: string | null;
@@ -490,6 +492,14 @@ export function geminiStatus(opts?: {
   /** Admin-configured default when file/env has none */
   adminDefaultModel?: string | null;
   adminDefaultProvider?: string | null;
+  /** Vault / header resolution hints for truthful pill status. */
+  fromUserVault?: boolean;
+  keyId?: string | null;
+  usedSharedEnvFallback?: boolean;
+  lastTestAt?: string | null;
+  lastTestOk?: boolean | null;
+  lastTestCode?: string | null;
+  lastTestMessage?: string | null;
 }) {
   const adminDefaultProvider = adminDefaultProviderFromSettings({
     defaultProvider: opts?.adminDefaultProvider,
@@ -502,14 +512,15 @@ export function geminiStatus(opts?: {
     adminDefaultProvider,
   });
   const provider = getAiProvider(providerId)!;
+  const requestKey = opts?.requestKey && String(opts.requestKey).trim()
+    ? String(opts.requestKey).trim()
+    : undefined;
   const key =
     provider.apiFamily === "gemini"
-      ? getGeminiApiKey(opts?.requestKey)
+      ? getGeminiApiKey(requestKey)
       : provider.apiFamily === "cursor"
-        ? getCursorApiKey(opts?.requestKey)
-        : opts?.requestKey && String(opts.requestKey).trim()
-          ? String(opts.requestKey).trim()
-          : undefined;
+        ? getCursorApiKey(requestKey)
+        : requestKey;
   const rawModel =
     opts?.requestModel ||
     (provider.apiFamily === "gemini"
@@ -522,12 +533,50 @@ export function geminiStatus(opts?: {
   // Same resolver the fill/tag paths use — pill must not show a cross-family
   // leftover like gemini-3.8-flash when effective provider is Cursor.
   const model = resolveEffectiveModelForProvider(providerId, rawModel);
+  const hasEnvGemini = !!(
+    process.env.DOCX_FORM_GEMINI_API_KEY ||
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY
+  );
+  const hasEnvCursor = hasServerEnvCursorKey();
+  const hasFileGemini = hasServerFileGeminiKey();
+  const fromVault = Boolean(opts?.fromUserVault && key);
+  const usedShared = Boolean(opts?.usedSharedEnvFallback);
+  let keySource: AiKeySource = "none";
+  if (fromVault || (requestKey && !usedShared)) {
+    keySource = "user";
+  } else if (key && (usedShared || hasEnvCursor || hasEnvGemini || hasFileGemini)) {
+    keySource = "shared";
+  } else if (key) {
+    // Server resolved a key without vault/header — treat as shared.
+    keySource = "shared";
+  }
+  const keyId =
+    keySource === "user" && opts?.keyId ? String(opts.keyId).trim() || null : null;
+  const lastTestOk =
+    typeof opts?.lastTestOk === "boolean" ? opts.lastTestOk : null;
+  const lastTestStatus: "ok" | "error" | "untested" | null =
+    keySource === "user"
+      ? lastTestOk === true
+        ? "ok"
+        : lastTestOk === false
+          ? "error"
+          : "untested"
+      : null;
+  const premiumEnforce =
+    String(process.env.PREMIUM_ENFORCE || "").trim() === "1" ||
+    String(process.env.PREMIUM_ENFORCE || "")
+      .trim()
+      .toLowerCase() === "true";
   return {
     connected: !!key,
     byok: isByokOnly(),
     provider: providerId,
     effectiveProvider: providerId,
     effectiveProviderLabel: provider.label,
+    /** Same value as `model` — alias for pill/admin agreement. */
+    effectiveModel: model,
     adminDefaultProvider,
     providerLabel: provider.label,
     apiFamily: provider.apiFamily,
@@ -535,22 +584,28 @@ export function geminiStatus(opts?: {
     /** Server AI call budget (DOCX_FORM_AI_TIMEOUT_MS); client should wait slightly longer. */
     aiTimeoutMs: getAiTimeoutMs(),
     models: provider.models,
+    /** Provider registry default for the effective provider (not admin setting). */
     defaultModel: provider.defaultModel,
     adminDefaultModel: normalizeGeminiModel(opts?.adminDefaultModel) || null,
-    maskedKey: key ? maskGeminiKey(key) : null,
-    hasServerEnvKey: !!(
-      process.env.DOCX_FORM_GEMINI_API_KEY ||
-      process.env.GEMINI_API_KEY ||
-      process.env.GOOGLE_API_KEY ||
-      process.env.GOOGLE_GENERATIVE_AI_API_KEY
-    ),
-    hasServerEnvCursorKey: hasServerEnvCursorKey(),
-    premiumEnforce:
-      String(process.env.PREMIUM_ENFORCE || "").trim() === "1" ||
-      String(process.env.PREMIUM_ENFORCE || "")
-        .trim()
-        .toLowerCase() === "true",
-    configPath: isByokOnly() ? "(browser session — not stored on server)" : CONFIG_PATH,
+    maskedKey: key && keySource === "user" ? maskGeminiKey(key) : keySource === "shared" ? null : null,
+    keySource,
+    keyId,
+    lastTestAt: keySource === "user" ? opts?.lastTestAt || null : null,
+    lastTestOk: keySource === "user" ? lastTestOk : null,
+    lastTestCode: keySource === "user" ? opts?.lastTestCode || null : null,
+    lastTestMessage: keySource === "user" ? opts?.lastTestMessage || null : null,
+    lastTestStatus,
+    hasServerEnvKey: hasEnvGemini,
+    hasServerEnvCursorKey: hasEnvCursor,
+    /** Human label only — never leak env var names. */
+    serverEnvGeminiKeySource: hasEnvGemini ? "set via server" : null,
+    serverEnvCursorKeySource: hasEnvCursor ? "set via server" : null,
+    premiumEnforce,
+    /** Human storage label — never leak filesystem paths. */
+    configStore: isByokOnly() ? "browser" : "server-file",
+    configStoreLabel: isByokOnly()
+      ? "เบราว์เซอร์ (ไม่เก็บบนเซิร์ฟเวอร์)"
+      : "เก็บบนเซิร์ฟเวอร์",
     studioUrl: provider.docsUrl,
     docsUrl: provider.docsUrl,
     providers: listAiProvidersPublic(),

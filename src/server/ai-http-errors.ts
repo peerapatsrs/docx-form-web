@@ -1,6 +1,8 @@
 /**
  * Short Thai-friendly AI provider HTTP errors for UI banners.
+ * Shared classifier → stable codes (one mapper for all AI routes).
  * Never dump raw JSON (e.g. DeepSeek 402 Insufficient Balance).
+ * Never blame credits/quota unless the provider message actually says so.
  */
 
 const UI_MSG_MAX = 90;
@@ -9,6 +11,24 @@ type ProviderErrorBody = {
   error?: string | { message?: string; code?: string | number; type?: string };
   message?: string;
   code?: string | number;
+};
+
+/** Stable codes for Frontend TH/EN maps. */
+export type AiProviderErrorCode =
+  | "AI_KEY_INVALID"
+  | "AI_KEY_UNAUTHORIZED"
+  | "AI_PROVIDER_AUTH"
+  | "AI_PROVIDER_RATE_LIMIT"
+  | "AI_PROVIDER_QUOTA"
+  | "AI_PROVIDER_TIMEOUT"
+  | "AI_PROVIDER_UNAVAILABLE"
+  | "AI_PROVIDER_BAD_REQUEST"
+  | "AI_PROVIDER_ERROR";
+
+export type ClassifiedProviderError = {
+  code: AiProviderErrorCode;
+  message: string;
+  statusHint?: number;
 };
 
 /** Pull a human message out of common OpenAI / Anthropic / DeepSeek / Google bodies. */
@@ -46,7 +66,7 @@ function looksInsufficientBalance(hay: string): boolean {
 }
 
 export function looksInvalidKey(hay: string): boolean {
-  return /invalid.?api.?key|incorrect api key|api key not valid|unauthorized|authentication|permission.?denied|invalid.?key|wrong api key|expired.?key|หมดอายุ|ไม่ถูกต้องหรือหมดอายุ/i.test(
+  return /invalid.?api.?key|incorrect api key|api key not valid|invalid user api key|unauthorized|authentication|permission.?denied|invalid.?key|wrong api key|expired.?key|หมดอายุ|ไม่ถูกต้องหรือหมดอายุ|ยังไม่ได้ใส่ API key/i.test(
     hay,
   );
 }
@@ -65,14 +85,19 @@ export function isAiCredentialAuthError(err: unknown): boolean {
       : typeof err === "string"
         ? err
         : String(err);
-  if (/API key หรือสิทธิ์ไม่ถูกต้อง|API key ไม่ถูกต้องหรือหมดอายุ/i.test(hay)) {
+  if (
+    /API key หรือสิทธิ์ไม่ถูกต้อง|API key ไม่ถูกต้องหรือหมดอายุ|AI_KEY_INVALID|AI_PROVIDER_AUTH/i.test(
+      hay,
+    )
+  ) {
     return true;
   }
   return looksInvalidKey(hay);
 }
 
-function looksQuota(hay: string): boolean {
-  return /quota|exceeded your current quota|free_tier|billing|generaterequestsperday|generate_requests|resource_exhausted|usage.?limit/i.test(
+function looksQuotaExhausted(hay: string): boolean {
+  // Only when the provider clearly says quota/credits are exhausted — not generic "billing".
+  return /exceeded your current quota|quota exceeded|free_tier.*exhaust|out of credits|no credits|insufficient[_\s-]?credits|insufficient[_\s-]?balance|resource_exhausted|usage.?limit.?exceeded|generaterequestsperday|generate_requests/i.test(
     hay,
   );
 }
@@ -89,6 +114,153 @@ function looksModelMissing(hay: string): boolean {
   );
 }
 
+function looksTimeout(hay: string): boolean {
+  return /timeout|timed?\s*out|AI_TIMEOUT|หมดเวลา|ETIMEDOUT|AbortError/i.test(hay);
+}
+
+function looksUnavailable(hay: string, status: number): boolean {
+  return (
+    status === 503 ||
+    status === 502 ||
+    status >= 500 ||
+    /unavailable|overloaded|service.?unavailable|server.?error|ECONNREFUSED|ENOTFOUND/i.test(
+      hay,
+    )
+  );
+}
+
+/**
+ * One shared mapper: HTTP status + body/message → stable code + Thai message.
+ * Credits/quota only when the provider text actually indicates exhaustion.
+ */
+export function classifyProviderError(opts: {
+  providerLabel?: string;
+  status?: number;
+  body?: string;
+  err?: unknown;
+}): ClassifiedProviderError {
+  const label = String(opts.providerLabel || "AI").trim() || "AI";
+  const status =
+    typeof opts.status === "number" && Number.isFinite(opts.status)
+      ? opts.status
+      : typeof opts.err === "object" &&
+          opts.err &&
+          "status" in opts.err &&
+          Number.isFinite(Number((opts.err as { status?: unknown }).status))
+        ? Number((opts.err as { status?: unknown }).status)
+        : 0;
+  const fromErr =
+    opts.err instanceof Error
+      ? opts.err.message
+      : typeof opts.err === "string"
+        ? opts.err
+        : "";
+  const msg = extractProviderErrorMessage(opts.body || "") || fromErr;
+  const hay = `${msg} ${status} ${fromErr}`.toLowerCase();
+  const detail = sanitizeDetail(opts.body || fromErr, 80);
+
+  if (looksTimeout(hay) || status === 504) {
+    return {
+      code: "AI_PROVIDER_TIMEOUT",
+      message: detail
+        ? `${label}: หมดเวลา — ${detail}`
+        : `${label}: หมดเวลารอผู้ให้บริการ — ลองใหม่ภายหลัง`,
+      statusHint: 504,
+    };
+  }
+
+  if (status === 402 || looksInsufficientBalance(hay) || looksQuotaExhausted(hay)) {
+    return {
+      code: "AI_PROVIDER_QUOTA",
+      message: detail
+        ? `${label}: เครดิต/โควต้าหมด — ${detail}`
+        : `${label}: เครดิต/โควต้าหมด — เติมที่คอนโซลของเจ้านี้ หรือเปลี่ยนคีย์`,
+      statusHint: status || 402,
+    };
+  }
+
+  if (status === 401 || status === 403 || looksInvalidKey(hay)) {
+    // Only mention credits when the body explicitly says so (not generic "billing").
+    if (looksInsufficientBalance(hay) || looksQuotaExhausted(hay)) {
+      return {
+        code: "AI_PROVIDER_QUOTA",
+        message: `${label}: คีย์ใช้ได้แต่เครดิต/โควต้าไม่พอ — เติมที่คอนโซลของเจ้านี้`,
+        statusHint: status || 403,
+      };
+    }
+    return {
+      code: "AI_KEY_INVALID",
+      message: `${label}: API key หรือสิทธิ์ไม่ถูกต้อง`,
+      statusHint: status || 401,
+    };
+  }
+
+  if (status === 429 || looksRateLimit(hay)) {
+    // 429 alone is rate-limit unless body clearly says quota exhausted.
+    if (looksQuotaExhausted(hay)) {
+      return {
+        code: "AI_PROVIDER_QUOTA",
+        message: detail
+          ? `${label}: เกินโควต้าแล้ว — ${detail}`
+          : `${label}: เกินโควต้าแล้ว — รอรีเซ็ตหรืออัปเกรดแผน`,
+        statusHint: 429,
+      };
+    }
+    return {
+      code: "AI_PROVIDER_RATE_LIMIT",
+      message: detail
+        ? `${label}: เรียกถี่เกินไป — ${detail}`
+        : `${label}: เรียกถี่เกินไป — รอสักครู่แล้วลองใหม่`,
+      statusHint: 429,
+    };
+  }
+
+  if (looksModelMissing(hay)) {
+    return {
+      code: "AI_PROVIDER_BAD_REQUEST",
+      message: `${label}: โมเดลนี้ไม่มีหรือเลิกใช้แล้ว — เปลี่ยนโมเดล`,
+      statusHint: status || 400,
+    };
+  }
+
+  if (status === 404) {
+    return {
+      code: "AI_PROVIDER_BAD_REQUEST",
+      message: `${label}: ไม่พบ API/endpoint นี้ — ผู้ให้บริการนี้อาจยังไม่รองรับการเรียกแบบนี้`,
+      statusHint: 404,
+    };
+  }
+
+  if (looksUnavailable(hay, status)) {
+    return {
+      code: "AI_PROVIDER_UNAVAILABLE",
+      message:
+        status === 503
+          ? `${label}: เซิร์ฟเวอร์โหลดสูงชั่วคราว — ลองใหม่หรือเปลี่ยนโมเดล`
+          : `${label}: เซิร์ฟเวอร์เจ้านี้มีปัญหาชั่วคราว (${status || "?"})`,
+      statusHint: status || 503,
+    };
+  }
+
+  if (status === 400) {
+    return {
+      code: "AI_PROVIDER_BAD_REQUEST",
+      message: detail
+        ? `${label}: คำขอไม่ถูกต้อง — ${detail}`
+        : `${label}: คำขอไม่ถูกต้อง — ตรวจโมเดลหรือขนาดไฟล์`,
+      statusHint: 400,
+    };
+  }
+
+  return {
+    code: "AI_PROVIDER_ERROR",
+    message: detail
+      ? `${label} ตอบไม่สำเร็จ (${status || "?"}) — ${detail}`
+      : `${label} ตอบไม่สำเร็จ (${status || "?"})`,
+    statusHint: status || 400,
+  };
+}
+
 /**
  * Map provider HTTP failures to a short Thai line for banners.
  * @param providerLabel e.g. "DeepSeek", "OpenAI", "Anthropic", "Google AI"
@@ -98,62 +270,24 @@ export function formatProviderHttpError(
   status: number,
   body: string,
 ): string {
-  const label = String(providerLabel || "AI").trim() || "AI";
-  const msg = extractProviderErrorMessage(body);
-  const hay = `${msg} ${status}`.toLowerCase();
-  const detail = sanitizeDetail(body, 80);
+  return classifyProviderError({ providerLabel, status, body }).message;
+}
 
-  if (status === 402 || looksInsufficientBalance(hay)) {
-    return `${label}: เครดิต/ยอดเงินไม่พอ — เติมที่คอนโซลของเจ้านี้ หรือเปลี่ยนคีย์`;
+/** Alias used by model-list / connect flows — same mapper, never invents credits. */
+export function formatModelsListError(
+  providerLabel: string,
+  status: number,
+  body: string,
+): string {
+  const classified = classifyProviderError({ providerLabel, status, body });
+  if (classified.code === "AI_KEY_INVALID") {
+    return `${String(providerLabel || "AI").trim() || "AI"}: คีย์ไม่มีสิทธิ์ดึงรายการโมเดล (ตรวจคีย์หรือสิทธิ์บัญชี)`;
   }
-
-  if (status === 401 || status === 403 || looksInvalidKey(hay)) {
-    if (looksInsufficientBalance(hay) || /credit|license|billing|quota|purchase|payment/i.test(hay)) {
-      return `${label}: คีย์ใช้ได้แต่ยังไม่มีเครดิต/สิทธิ์ — เติมที่คอนโซลของเจ้านี้`;
+  if (classified.code === "AI_PROVIDER_ERROR" && status && status < 500) {
+    const detail = sanitizeDetail(body, 90);
+    if (detail) {
+      return `${String(providerLabel || "AI").trim() || "AI"}: ดึงโมเดลไม่สำเร็จ — ${detail}`;
     }
-    return `${label}: API key หรือสิทธิ์ไม่ถูกต้อง`;
   }
-
-  if (status === 429 || looksRateLimit(hay) || looksQuota(hay)) {
-    if (looksRateLimit(hay) && !looksQuota(hay)) {
-      return detail
-        ? `${label}: เรียกถี่เกินไป — ${detail}`
-        : `${label}: เรียกถี่เกินไป — รอสักครู่แล้วลองใหม่`;
-    }
-    if (looksQuota(hay)) {
-      return detail
-        ? `${label}: เกินโควต้าแล้ว — ${detail}`
-        : `${label}: เกินโควต้าแล้ว — รอรีเซ็ตหรืออัปเกรดแผน`;
-    }
-    return detail
-      ? `${label}: จำกัดการเรียก (429) — ${detail}`
-      : `${label}: จำกัดการเรียก (429) — อาจเกินโควต้าหรือเรียกถี่เกินไป`;
-  }
-
-  // 404 alone is often a missing route (e.g. Cursor has no /v1/chat/completions),
-  // not a wrong model id — only blame the model when the body says so.
-  if (looksModelMissing(hay)) {
-    return `${label}: โมเดลนี้ไม่มีหรือเลิกใช้แล้ว — เปลี่ยนโมเดล`;
-  }
-  if (status === 404) {
-    return `${label}: ไม่พบ API/endpoint นี้ — ผู้ให้บริการนี้อาจยังไม่รองรับการเรียกแบบ chat completions`;
-  }
-
-  if (status === 503) {
-    return `${label}: เซิร์ฟเวอร์โหลดสูงชั่วคราว — ลองใหม่หรือเปลี่ยนโมเดล`;
-  }
-
-  if (status >= 500) {
-    return `${label}: เซิร์ฟเวอร์เจ้านี้มีปัญหาชั่วคราว (${status})`;
-  }
-
-  if (status === 400 && /model|context|token|length|too large|payload/i.test(hay)) {
-    return detail
-      ? `${label}: คำขอไม่ถูกต้อง — ${detail}`
-      : `${label}: คำขอไม่ถูกต้อง — ตรวจโมเดลหรือขนาดไฟล์`;
-  }
-
-  return detail
-    ? `${label} ตอบไม่สำเร็จ (${status || "?"}) — ${detail}`
-    : `${label} ตอบไม่สำเร็จ (${status || "?"})`;
+  return classified.message;
 }

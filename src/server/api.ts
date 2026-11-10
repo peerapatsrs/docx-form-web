@@ -362,15 +362,22 @@ export function createApi(options: {
     await ensureAdminSchema().catch(() => undefined);
     const ent = await canUseFeature(PremiumFeature.AiSourceMap, c.req.raw);
     const limits = await getAppLimits().catch(() => null);
+    const maxMulti = ent.entitlement.maxMultiTemplates;
+    const plan = ent.entitlement.plan || "unknown";
+    const paid = ent.entitlement.paid;
     return c.json({
       version: options.version || "0.0.0",
       premium: {
         enforce: String(process.env.PREMIUM_ENFORCE || "") === "1",
-        paid: ent.entitlement.paid,
-        plan: ent.entitlement.plan || "unknown",
-        maxMultiTemplates: ent.entitlement.maxMultiTemplates,
+        paid,
+        plan,
+        maxMultiTemplates: maxMulti,
         freeMaxMulti: limits?.freeMaxMulti,
         paidMaxMulti: limits?.paidMaxMulti,
+        /** Plan-aware upload quota copy for the guest/home dropzone (F02). */
+        uploadLimitText: paid
+          ? `สูงสุด ${maxMulti} ไฟล์ต่อครั้ง (${plan === "pro" || plan === "paid" || plan === "premium" ? "จ่ายแล้ว" : plan})`
+          : `สูงสุด ${maxMulti} ไฟล์ต่อครั้ง (ฟรี)`,
       },
     });
   });
@@ -546,11 +553,19 @@ export function createApi(options: {
       adminDefaultProvider,
     });
     const fileKeyPresent = hasServerFileGeminiKey();
+    // Strip internals — never leak env var names, filesystem paths, or raw
+    // configPath. Human labels only; effective* matches /ai/status pill resolver.
+    const {
+      configPath: _dropPath,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      ...safeStatus
+    } = status as typeof status & { configPath?: string };
+    void _dropPath;
     return c.json({
       settings: aiAdmin,
       status: {
-        ...status,
-        // Env keys: presence only (never value/mask). File key may show mask.
+        ...safeStatus,
+        // File key may show mask; env keys: presence label only.
         maskedKey: maskServerFileGeminiKey(),
         hasServerFileGeminiKey: fileKeyPresent,
         serverEnvCursorKeySource: status.hasServerEnvCursorKey
@@ -559,6 +574,17 @@ export function createApi(options: {
         serverEnvGeminiKeySource: status.hasServerEnvKey
           ? "set via server"
           : null,
+        effectiveProvider: status.effectiveProvider,
+        effectiveProviderLabel: status.effectiveProviderLabel,
+        effectiveModel: status.effectiveModel || status.model,
+        model: status.model,
+        adminDefaultModel: status.adminDefaultModel,
+        adminDefaultProvider: status.adminDefaultProvider,
+        defaultModel: status.defaultModel,
+        configStoreLabel: status.configStoreLabel,
+        premiumEnforceLabel: status.premiumEnforce
+          ? "บังคับแผนพรีเมียม"
+          : "ไม่บังคับ",
       },
     });
   });
@@ -582,13 +608,24 @@ export function createApi(options: {
       detail: settings,
     });
     const adminDefaultProvider = adminDefaultProviderFromSettings(settings);
+    const status = geminiStatus({
+      adminDefaultModel: settings.defaultModel,
+      adminDefaultProvider,
+    });
+    const { configPath: _dropPath, ...safeStatus } = status as typeof status & {
+      configPath?: string;
+    };
+    void _dropPath;
     return c.json({
       ok: true,
       settings,
-      status: geminiStatus({
-        adminDefaultModel: settings.defaultModel,
-        adminDefaultProvider,
-      }),
+      status: {
+        ...safeStatus,
+        premiumEnforceLabel: status.premiumEnforce
+          ? "บังคับแผนพรีเมียม"
+          : "ไม่บังคับ",
+        effectiveModel: status.effectiveModel || status.model,
+      },
     });
   });
 
@@ -717,22 +754,51 @@ export function createApi(options: {
     } catch {
       sessionUserId = null;
     }
-    const { resolveRequestAiCredentials } = await import("./ai-config");
-    const creds = await resolveRequestAiCredentials(
-      c.req.raw,
-      sessionUserId,
-    );
+    const { resolveRequestAiCredentials, coalesceAiCredentialsWithSharedEnv } =
+      await import("./ai-config");
+    let creds = await resolveRequestAiCredentials(c.req.raw, sessionUserId);
+    creds = coalesceAiCredentialsWithSharedEnv(creds);
+    let lastTestAt: string | null = null;
+    let lastTestOk: boolean | null = null;
+    let lastTestCode: string | null = null;
+    let lastTestMessage: string | null = null;
+    if (creds.fromUserVault && creds.keyId && sessionUserId) {
+      try {
+        const { getUserAiKey } = await import("./ai-key-vault");
+        const row = await getUserAiKey(sessionUserId, creds.keyId);
+        if (row) {
+          lastTestAt = row.lastTestAt || null;
+          lastTestOk =
+            typeof row.lastTestOk === "boolean" ? row.lastTestOk : null;
+          lastTestCode = row.lastTestCode || null;
+          lastTestMessage = row.lastTestMessage || null;
+        }
+      } catch {
+        /* ignore vault meta errors for status */
+      }
+    }
     const adminDefaultProvider = adminDefaultProviderFromSettings(aiAdmin);
-    return c.json(
-      geminiStatus({
-        requestKey: creds.apiKey,
-        requestModel: creds.model,
-        requestProvider: creds.provider,
-        explicitProvider: requestHasExplicitAiProvider(c.req.raw),
-        adminDefaultModel: aiAdmin.defaultModel,
-        adminDefaultProvider,
-      }),
-    );
+    const status = geminiStatus({
+      requestKey: creds.apiKey,
+      requestModel: creds.model,
+      requestProvider: creds.provider,
+      explicitProvider: requestHasExplicitAiProvider(c.req.raw),
+      adminDefaultModel: aiAdmin.defaultModel,
+      adminDefaultProvider,
+      fromUserVault: Boolean(creds.fromUserVault),
+      keyId: creds.keyId || null,
+      usedSharedEnvFallback: Boolean(creds.usedSharedEnvFallback),
+      lastTestAt,
+      lastTestOk,
+      lastTestCode,
+      lastTestMessage,
+    });
+    // Never leak filesystem paths on the public status endpoint.
+    const { configPath: _drop, ...safe } = status as typeof status & {
+      configPath?: string;
+    };
+    void _drop;
+    return c.json(safe);
   });
 
   const postAiConnect = async (c: Parameters<typeof requirePremium>[0] & {
@@ -910,7 +976,29 @@ export function createApi(options: {
     }
   });
 
-  /** Create one key (auto-id if omitted). */
+  /** Live-validate before persist (F30). Rejected keys are never stored. */
+  const rejectInvalidAiKey = async (opts: {
+    provider: string;
+    apiKey: string;
+    signal?: AbortSignal;
+  }) => {
+    const { validateAiKeyForSave } = await import("./ai-key-test");
+    const probe = await validateAiKeyForSave({
+      provider: opts.provider,
+      apiKey: opts.apiKey,
+      signal: opts.signal,
+    });
+    if (probe.ok) return null;
+    return {
+      error: probe.message,
+      code: probe.code || "AI_KEY_INVALID",
+      ok: false as const,
+      provider: probe.provider,
+      durationMs: probe.durationMs,
+    };
+  };
+
+  /** Create one key (auto-id if omitted). Validates with a live provider probe first. */
   api.post("/ai/keys", async (c) => {
     const gate = await requireSessionUserId(c.req.raw);
     if (!gate.ok) {
@@ -948,6 +1036,14 @@ export function createApi(options: {
           },
           400,
         );
+      }
+      const rejected = await rejectInvalidAiKey({
+        provider,
+        apiKey,
+        signal: c.req.raw.signal,
+      });
+      if (rejected) {
+        return c.json(rejected, rejected.code === "AI_PROVIDER_TIMEOUT" ? 504 : 400);
       }
       const { createUserAiKey, toPublicAiKey } = await import("./ai-key-vault");
       const saved = await createUserAiKey(gate.userId, {
@@ -1017,17 +1113,49 @@ export function createApi(options: {
           400,
         );
       }
+      const normalized = rawList.map((e) => ({
+        id: String(e.id || "").trim(),
+        provider: String(e.provider || "google").trim(),
+        label: String(e.label || "").trim(),
+        model: String(e.model || "").trim(),
+        apiKey: String(e.apiKey || "").trim(),
+      }));
+      // Validate every key before writing any — reject does not store.
+      for (const e of normalized) {
+        const provider = getAiProvider(e.provider)?.id;
+        if (!provider) {
+          return c.json(
+            {
+              error: "ผู้ให้บริการไม่รองรับ",
+              code: "AI_KEY_INVALID_PROVIDER",
+            },
+            400,
+          );
+        }
+        e.provider = provider;
+        if (!e.apiKey || e.apiKey.length < 8) {
+          return c.json(
+            {
+              error: "กรุณาใส่ API key ที่ถูกต้อง",
+              code: "AI_KEY_INVALID_VALUE",
+            },
+            400,
+          );
+        }
+        const rejected = await rejectInvalidAiKey({
+          provider,
+          apiKey: e.apiKey,
+          signal: c.req.raw.signal,
+        });
+        if (rejected) {
+          return c.json(
+            rejected,
+            rejected.code === "AI_PROVIDER_TIMEOUT" ? 504 : 400,
+          );
+        }
+      }
       const { upsertUserAiKeys, toPublicAiKey } = await import("./ai-key-vault");
-      const saved = await upsertUserAiKeys(
-        gate.userId,
-        rawList.map((e) => ({
-          id: String(e.id || "").trim(),
-          provider: String(e.provider || "google").trim(),
-          label: String(e.label || "").trim(),
-          model: String(e.model || "").trim(),
-          apiKey: String(e.apiKey || "").trim(),
-        })),
-      );
+      const saved = await upsertUserAiKeys(gate.userId, normalized);
       return c.json({
         ok: true,
         entries: saved.map((e) => toPublicAiKey(e)),
@@ -1060,10 +1188,18 @@ export function createApi(options: {
         timeoutMs: body.timeoutMs,
         signal: c.req.raw.signal,
       });
-      return c.json(result, result.ok ? 200 : result.code === "AI_KEY_TEST_TIMEOUT" ? 504 : 400);
+      return c.json(
+        result,
+        result.ok
+          ? 200
+          : result.code === "AI_KEY_TEST_TIMEOUT" ||
+              result.code === "AI_PROVIDER_TIMEOUT"
+            ? 504
+            : 400,
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: message, code: "AI_KEY_PROVIDER_ERROR", ok: false }, 400);
+      return c.json({ error: message, code: "AI_PROVIDER_ERROR", ok: false }, 400);
     }
   });
 
@@ -1131,6 +1267,29 @@ export function createApi(options: {
           400,
         );
       }
+      // Resolve provider for the probe (body override or existing row).
+      const existing = await (async () => {
+        const { getUserAiKey } = await import("./ai-key-vault");
+        return getUserAiKey(gate.userId, id);
+      })();
+      if (!existing) {
+        return c.json({ error: "ไม่พบคีย์", code: "AI_KEY_NOT_FOUND" }, 404);
+      }
+      const providerForProbe =
+        (body.provider && getAiProvider(body.provider)?.id) ||
+        existing.provider ||
+        "google";
+      const rejected = await rejectInvalidAiKey({
+        provider: providerForProbe,
+        apiKey,
+        signal: c.req.raw.signal,
+      });
+      if (rejected) {
+        return c.json(
+          rejected,
+          rejected.code === "AI_PROVIDER_TIMEOUT" ? 504 : 400,
+        );
+      }
       const saved = await replaceUserAiKey(gate.userId, id, {
         apiKey,
         provider: body.provider,
@@ -1190,7 +1349,12 @@ export function createApi(options: {
         ...result,
         entry: updated ? toPublicAiKey(updated) : null,
       },
-      result.ok ? 200 : result.code === "AI_KEY_TEST_TIMEOUT" ? 504 : 400,
+      result.ok
+        ? 200
+        : result.code === "AI_KEY_TEST_TIMEOUT" ||
+            result.code === "AI_PROVIDER_TIMEOUT"
+          ? 504
+          : 400,
     );
   });
 
@@ -1288,6 +1452,17 @@ export function createApi(options: {
             code: "AI_KEY_INVALID_VALUE",
           },
           400,
+        );
+      }
+      const rejected = await rejectInvalidAiKey({
+        provider,
+        apiKey,
+        signal: c.req.raw.signal,
+      });
+      if (rejected) {
+        return c.json(
+          rejected,
+          rejected.code === "AI_PROVIDER_TIMEOUT" ? 504 : 400,
         );
       }
       const {

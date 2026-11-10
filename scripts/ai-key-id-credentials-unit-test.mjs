@@ -65,21 +65,24 @@ await check("api.ts routes use resolveRequestAiCredentials / resolveRouteAiCrede
 });
 
 await check("shared dialog + account + pill wiring present", async () => {
-  const dialog = readFileSync(join(root, "public/ai-keys-dialog.js"), "utf8");
+  const dialog = readFileSync(join(root, "public/ai-key-dialog.js"), "utf8");
+  const shim = readFileSync(join(root, "public/ai-keys-dialog.js"), "utf8");
   const app = readFileSync(join(root, "public/app.js"), "utf8");
   const account = readFileSync(join(root, "src/app/account/page.tsx"), "utf8");
   const section = readFileSync(join(root, "src/components/AiKeysSection.tsx"), "utf8");
   const admin = readFileSync(join(root, "src/app/admin/ai/page.tsx"), "utf8");
+  assert.match(dialog, /export async function openAiKeyDialog/);
   assert.match(dialog, /export async function openAiKeysDialog/);
   assert.match(dialog, /ลบคีย์นี้\?/);
   assert.match(dialog, /ลบคีย์/);
-  assert.match(app, /from "\.\/ai-keys-dialog\.js"/);
+  assert.match(shim, /from "\.\/ai-key-dialog\.js"/);
+  assert.match(app, /from "\.\/ai-key-dialog\.js"/);
   assert.match(app, /bindStatusPillAiKeysOpener/);
-  assert.match(app, /openSharedAiKeysDialog/);
+  assert.match(app, /openSharedAiKeysDialog|openAiKeyDialog/);
   assert.match(app, /coerceClientAiModel/);
   assert.match(account, /AiKeysSection/);
   assert.match(section, /openAiKeysDialog/);
-  assert.match(section, /ai-keys-dialog\.js/);
+  assert.match(section, /ai-key-dialog\.js/);
   assert.match(admin, /set via server/);
   assert.match(admin, /\/api\/admin\/ai\/server-key/);
 });

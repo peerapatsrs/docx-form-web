@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -38,7 +38,12 @@ export type ResolvedRequestAiCredentials = RequestAiCredentials & {
   usedSharedEnvFallback?: boolean;
 };
 
-function resolveConfigDir(): string {
+/**
+ * Legacy on-disk path (may be under /tmp on some hosts). Kept only as a
+ * one-time read fallback when migrating into Postgres `app_settings`.
+ * New writes go to the DB — never depend on /tmp for admin AI config.
+ */
+function resolveLegacyConfigDir(): string {
   const fromEnv = String(process.env.DOCX_FORM_CONFIG_DIR || "").trim();
   if (fromEnv) return fromEnv;
 
@@ -59,8 +64,10 @@ function resolveConfigDir(): string {
   return join(tmpdir(), "docx-form");
 }
 
-const CONFIG_DIR = resolveConfigDir();
-const CONFIG_PATH = join(CONFIG_DIR, "config.json");
+const LEGACY_CONFIG_DIR = resolveLegacyConfigDir();
+const LEGACY_CONFIG_PATH = join(LEGACY_CONFIG_DIR, "config.json");
+const AI_SERVER_SETTINGS_KEY = "ai_server";
+
 export const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
 
 export const GEMINI_MODEL_OPTIONS: { id: string; label: string }[] = [
@@ -79,45 +86,120 @@ export function isByokOnly(): boolean {
   return v !== "0" && v !== "false" && v !== "no";
 }
 
+/** @deprecated Human-facing APIs must not expose filesystem paths. */
 export function getConfigPath(): string {
-  return CONFIG_PATH;
+  return "(database)";
 }
 
-export function readAiConfig(): AiConfig {
-  if (isByokOnly()) return {};
+function readLegacyFileConfig(): AiConfig {
   try {
-    if (!existsSync(CONFIG_PATH)) return {};
-    const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as AiConfig;
+    if (!existsSync(LEGACY_CONFIG_PATH)) return {};
+    const raw = JSON.parse(readFileSync(LEGACY_CONFIG_PATH, "utf-8")) as AiConfig;
     return raw && typeof raw === "object" ? raw : {};
   } catch {
     return {};
   }
 }
 
-export function writeAiConfig(patch: Partial<AiConfig>): AiConfig {
-  if (isByokOnly()) {
-    // Do not write user keys to disk in web BYOK mode.
-    return { ...readAiConfig(), ...patch, geminiApiKey: undefined };
-  }
-  const next: AiConfig = { ...readAiConfig(), ...patch };
-  // turbopackIgnore: CONFIG_DIR is dynamic (env/home/tmp); without it Turbopack
-  // traces the whole project into the server bundle.
-  if (!existsSync(/* turbopackIgnore: true */ CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { recursive: true });
-  }
-  writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2), "utf-8");
-  return next;
+/** In-memory cache of DB-backed server AI config (non-BYOK). */
+let aiServerCache: AiConfig | null = null;
+let aiServerLoad: Promise<void> | null = null;
+
+async function persistAiServerConfig(value: AiConfig): Promise<void> {
+  const { ensureAdminSchema } = await import("./admin-store");
+  const { getAuthPool } = await import("./auth-db");
+  await ensureAdminSchema();
+  const pool = getAuthPool();
+  await pool.query(
+    `INSERT INTO app_settings (key, value, "updatedAt")
+     VALUES ($1, $2::jsonb, NOW())
+     ON CONFLICT (key) DO UPDATE
+       SET value = EXCLUDED.value, "updatedAt" = NOW()`,
+    [AI_SERVER_SETTINGS_KEY, JSON.stringify(value || {})],
+  );
+  aiServerCache = { ...(value || {}) };
 }
 
-export function clearGeminiKey(): AiConfig {
-  if (isByokOnly()) return {};
-  const cur = readAiConfig();
-  delete cur.geminiApiKey;
-  if (!existsSync(/* turbopackIgnore: true */ CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { recursive: true });
+/**
+ * Load server AI config from Postgres; one-time migrate from legacy file
+ * (including /tmp) when the DB row is empty.
+ */
+export async function ensureAiServerConfigLoaded(): Promise<void> {
+  if (isByokOnly()) {
+    aiServerCache = {};
+    return;
   }
-  writeFileSync(CONFIG_PATH, JSON.stringify(cur, null, 2), "utf-8");
-  return cur;
+  if (aiServerCache !== null) return;
+  if (!aiServerLoad) {
+    aiServerLoad = (async () => {
+      try {
+        const { ensureAdminSchema } = await import("./admin-store");
+        const { getAuthPool } = await import("./auth-db");
+        await ensureAdminSchema();
+        const pool = getAuthPool();
+        const { rows } = await pool.query<{ value: AiConfig }>(
+          `SELECT value FROM app_settings WHERE key = $1 LIMIT 1`,
+          [AI_SERVER_SETTINGS_KEY],
+        );
+        let value =
+          rows[0]?.value && typeof rows[0].value === "object"
+            ? { ...rows[0].value }
+            : {};
+        const hasDb =
+          Boolean(String(value.geminiApiKey || "").trim()) ||
+          Boolean(String(value.geminiModel || "").trim());
+        if (!hasDb) {
+          const legacy = readLegacyFileConfig();
+          if (
+            String(legacy.geminiApiKey || "").trim() ||
+            String(legacy.geminiModel || "").trim()
+          ) {
+            value = { ...legacy };
+            await persistAiServerConfig(value);
+          } else {
+            aiServerCache = {};
+          }
+        } else {
+          aiServerCache = value;
+        }
+      } catch {
+        // DB unavailable — fall back to legacy file for this process only.
+        aiServerCache = readLegacyFileConfig();
+      } finally {
+        if (aiServerCache === null) aiServerCache = {};
+      }
+    })().finally(() => {
+      aiServerLoad = null;
+    });
+  }
+  await aiServerLoad;
+}
+
+export function readAiConfig(): AiConfig {
+  if (isByokOnly()) return {};
+  if (aiServerCache) return { ...aiServerCache };
+  // Cold path before async load: legacy file only (never write back to /tmp).
+  return readLegacyFileConfig();
+}
+
+export async function writeAiConfig(patch: Partial<AiConfig>): Promise<AiConfig> {
+  if (isByokOnly()) {
+    // Do not write user keys in web BYOK mode.
+    return { ...readAiConfig(), ...patch, geminiApiKey: undefined };
+  }
+  await ensureAiServerConfigLoaded();
+  const next: AiConfig = { ...readAiConfig(), ...patch };
+  await persistAiServerConfig(next);
+  return { ...next };
+}
+
+export async function clearGeminiKey(): Promise<AiConfig> {
+  if (isByokOnly()) return {};
+  await ensureAiServerConfigLoaded();
+  const cur = { ...readAiConfig() };
+  delete cur.geminiApiKey;
+  await persistAiServerConfig(cur);
+  return { ...cur };
 }
 
 /** True when a Gemini key is persisted in the server config file (not env). */
@@ -601,11 +683,11 @@ export function geminiStatus(opts?: {
     serverEnvGeminiKeySource: hasEnvGemini ? "set via server" : null,
     serverEnvCursorKeySource: hasEnvCursor ? "set via server" : null,
     premiumEnforce,
-    /** Human storage label — never leak filesystem paths. */
-    configStore: isByokOnly() ? "browser" : "server-file",
+    /** Human storage label — never leak filesystem paths (DB-backed, not /tmp). */
+    configStore: isByokOnly() ? "browser" : "database",
     configStoreLabel: isByokOnly()
       ? "เบราว์เซอร์ (ไม่เก็บบนเซิร์ฟเวอร์)"
-      : "เก็บบนเซิร์ฟเวอร์",
+      : "เก็บบนเซิร์ฟเวอร์ (ฐานข้อมูล)",
     studioUrl: provider.docsUrl,
     docsUrl: provider.docsUrl,
     providers: listAiProvidersPublic(),

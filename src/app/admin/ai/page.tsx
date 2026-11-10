@@ -141,22 +141,26 @@ export default function AdminAiPage() {
         <ul className="admin-kv">
           <li>
             <span>โหมดคีย์</span>
-            <strong>{status?.byok ? "BYOK (คีย์อยู่ที่เบราว์เซอร์)" : "เซิร์ฟเวอร์เก็บคีย์ได้"}</strong>
-          </li>
-          <li>
-            <span>คีย์ Gemini จากเซิร์ฟเวอร์</span>
             <strong>
-              {status?.hasServerEnvKey
-                ? status.serverEnvGeminiKeySource || "set via server"
-                : "ไม่มี"}
+              {status?.byok
+                ? "ใช้คีย์ของผู้ใช้ (เก็บในเบราว์เซอร์/บัญชี)"
+                : "เซิร์ฟเวอร์เก็บคีย์ได้"}
             </strong>
           </li>
           <li>
-            <span>คีย์ Cursor จากเซิร์ฟเวอร์</span>
+            <span>คีย์ Gemini ของเซิร์ฟเวอร์</span>
+            <strong>
+              {status?.hasServerEnvKey
+                ? status.serverEnvGeminiKeySource || "set via server"
+                : "ยังไม่ตั้ง"}
+            </strong>
+          </li>
+          <li>
+            <span>คีย์ Cursor ของเซิร์ฟเวอร์</span>
             <strong>
               {status?.hasServerEnvCursorKey
                 ? status.serverEnvCursorKeySource || "set via server"
-                : "ไม่มี"}
+                : "ยังไม่ตั้ง"}
             </strong>
           </li>
           <li>
@@ -225,7 +229,12 @@ export default function AdminAiPage() {
         </p>
         {status?.studioUrl ? (
           <p className="admin-muted">
-            <a href={status.studioUrl} target="_blank" rel="noreferrer">
+            <a
+              className="admin-link"
+              href={status.studioUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
               เอกสารผู้ให้บริการ
             </a>
           </p>

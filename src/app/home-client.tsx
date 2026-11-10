@@ -84,9 +84,9 @@ export function HomeClient({
         <BrandLockup versionId="appVersion" versionLabel={versionLabel} />
         <div className="topbar-end">
           <AuthBar />
-          <div className="status-pill" id="status">
+          <div className="status-pill" id="status" role="status">
             <span className="status-dot" id="statusDot" />
-            <span id="statusText">กำลังเชื่อมต่อ…</span>
+            <span id="statusText">ยังไม่มีไฟล์</span>
           </div>
         </div>
       </header>
@@ -103,12 +103,10 @@ export function HomeClient({
       <main className="shell" id="main-content" tabIndex={-1}>
         {/* Crawlable product summary — UI itself mounts into #app via app.js */}
         <section className="sr-only" aria-label={`เกี่ยวกับ ${SITE_NAME}`}>
-          <h1>
-            {SITE_NAME} — กรอกแบบฟอร์มเอกสาร Word จากเทมเพลต .docx
-          </h1>
+          <h1>{SITE_NAME} — กรอกแบบฟอร์ม Word ออนไลน์</h1>
           <p>
-            อัปโหลดเทมเพลตที่มีแท็ก {"{{ชื่อฟิลด์}}"} แล้วกรอกบนหน้าเว็บ ·
-            รองรับหลายเทมเพลต · JSON · AI (BYOK)
+            อัปโหลดไฟล์ Word แล้วกรอกช่องว่างบนเว็บนี้ จากนั้นดาวน์โหลดไฟล์ใหม่
+            โดยไม่แก้ไฟล์ต้นฉบับ
           </p>
           <p>{SITE_ABOUT}</p>
           <ul>
@@ -117,14 +115,28 @@ export function HomeClient({
             ))}
           </ul>
         </section>
-        <div className="sheet" id="app" />
+        {/* Skeleton so the first paint is never a blank sheet while app.js boots. */}
+        <div className="sheet" id="app">
+          <div className="home-card home-card-skeleton" aria-busy="true">
+            <h1 className="headline">กรอกแบบฟอร์ม Word ออนไลน์</h1>
+            <p className="subhead">
+              อัปโหลดไฟล์ Word แล้วกรอกช่องว่างบนเว็บนี้ จากนั้นดาวน์โหลดไฟล์ใหม่
+              โดยไม่แก้ไฟล์ต้นฉบับ
+            </p>
+            <div className="dropzone dropzone-primary" aria-hidden="true">
+              <div className="dropzone-title">ลากไฟล์ .docx มาวางที่นี่</div>
+              <div className="dropzone-sub home-upload-limit">
+                หรือเลือกไฟล์ · ฟรีสูงสุด 2 ไฟล์ต่อครั้ง
+              </div>
+            </div>
+          </div>
+        </div>
       </main>
 
       <footer className="credits" id="credits">
         <div className="credits-identity">
-          <p className="credits-name">Peerapat Surasing</p>
-          <a className="credits-email" href="mailto:peerapat.srs@gmail.com">
-            peerapat.srs@gmail.com
+          <a className="credits-email" href="mailto:support@tps18.space">
+            ติดต่อฝ่ายสนับสนุน
           </a>
         </div>
         <div className="credits-meta">

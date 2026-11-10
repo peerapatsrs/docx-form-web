@@ -13,6 +13,7 @@ import {
   getAppLimits,
   listAuditLogs,
   listUsersForAdmin,
+  resolveUpgradeUrl,
   setAiAdminSettings,
   setAppLimits,
   setUserBanned,
@@ -24,6 +25,7 @@ import {
   clearGeminiKey,
   adminDefaultProviderFromSettings,
   coalesceAiCredentialsWithSharedEnv,
+  ensureAiServerConfigLoaded,
   geminiStatus,
   getGeminiApiKey,
   getRequestAiProvider,
@@ -337,6 +339,7 @@ export function createApi(options: {
           maxMultiTemplates: ent.maxMultiTemplates,
           freeMaxMulti: limits.freeMaxMulti,
           paidMaxMulti: limits.paidMaxMulti,
+          upgradeUrl: resolveUpgradeUrl(limits) || "",
         },
         session: {
           id: session.session.id,
@@ -365,6 +368,7 @@ export function createApi(options: {
     const maxMulti = ent.entitlement.maxMultiTemplates;
     const plan = ent.entitlement.plan || "unknown";
     const paid = ent.entitlement.paid;
+    const upgradeUrl = resolveUpgradeUrl(limits);
     return c.json({
       version: options.version || "0.0.0",
       premium: {
@@ -378,6 +382,8 @@ export function createApi(options: {
         uploadLimitText: paid
           ? `สูงสุด ${maxMulti} ไฟล์ต่อครั้ง (${plan === "pro" || plan === "paid" || plan === "premium" ? "จ่ายแล้ว" : plan})`
           : `สูงสุด ${maxMulti} ไฟล์ต่อครั้ง (ฟรี)`,
+        /** F37: empty string → Frontend hides upgrade link (no hardcoded URL). */
+        upgradeUrl: upgradeUrl || "",
       },
     });
   });
@@ -520,7 +526,10 @@ export function createApi(options: {
     const gate = await requireSuperAdmin(c.req.raw);
     if (!gate.ok) return c.json({ error: gate.error }, gate.status);
     const limits = await getAppLimits();
-    return c.json({ limits });
+    return c.json({
+      limits,
+      upgradeUrl: resolveUpgradeUrl(limits) || "",
+    });
   });
 
   api.post("/admin/limits", async (c) => {
@@ -529,23 +538,30 @@ export function createApi(options: {
     const body = (await c.req.json().catch(() => ({}))) as {
       freeMaxMulti?: number;
       paidMaxMulti?: number;
+      upgradeUrl?: string;
     };
     const limits = await setAppLimits({
       freeMaxMulti: body.freeMaxMulti,
       paidMaxMulti: body.paidMaxMulti,
+      ...(body.upgradeUrl !== undefined ? { upgradeUrl: body.upgradeUrl } : {}),
     });
     await writeAuditLog({
       actorId: gate.userId,
       actorEmail: gate.email,
       action: "limits.update",
-      detail: limits,
+      detail: { ...limits, upgradeUrl: limits.upgradeUrl || "" },
     });
-    return c.json({ ok: true, limits });
+    return c.json({
+      ok: true,
+      limits,
+      upgradeUrl: resolveUpgradeUrl(limits) || "",
+    });
   });
 
   api.get("/admin/ai", async (c) => {
     const gate = await requireSuperAdmin(c.req.raw);
     if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    await ensureAiServerConfigLoaded().catch(() => undefined);
     const aiAdmin = await getAiAdminSettings();
     const adminDefaultProvider = adminDefaultProviderFromSettings(aiAdmin);
     const status = geminiStatus({
@@ -599,7 +615,7 @@ export function createApi(options: {
     if (!model) return c.json({ error: "โมเดลไม่ถูกต้อง" }, 400);
     const settings = await setAiAdminSettings({ defaultModel: model });
     if (!isByokOnly()) {
-      writeAiConfig({ geminiModel: model });
+      await writeAiConfig({ geminiModel: model });
     }
     await writeAuditLog({
       actorId: gate.userId,
@@ -639,12 +655,12 @@ export function createApi(options: {
         400,
       );
     }
-    clearGeminiKey();
+    await clearGeminiKey();
     await writeAuditLog({
       actorId: gate.userId,
       actorEmail: gate.email,
       action: "ai.clear_server_key",
-      detail: { kind: "file-gemini" },
+      detail: { kind: "db-gemini" },
     });
     const aiAdmin = await getAiAdminSettings();
     return c.json({
@@ -798,7 +814,12 @@ export function createApi(options: {
       configPath?: string;
     };
     void _drop;
-    return c.json(safe);
+    const limits = await getAppLimits().catch(() => null);
+    return c.json({
+      ...safe,
+      /** F37: empty → hide upgrade CTA (no hardcoded URL). */
+      upgradeUrl: resolveUpgradeUrl(limits) || "",
+    });
   });
 
   const postAiConnect = async (c: Parameters<typeof requirePremium>[0] & {
@@ -871,7 +892,7 @@ export function createApi(options: {
       if (patch.geminiModel && !patch.geminiApiKey && !getGeminiApiKey()) {
         return c.json({ error: "ต้องเชื่อมต่อ API key ก่อนเปลี่ยนโมเดล" }, 401);
       }
-      writeAiConfig(patch);
+      await writeAiConfig(patch);
       return c.json({ ok: true, ...geminiStatus({ requestProvider: "google" }) });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -883,17 +904,17 @@ export function createApi(options: {
   api.post("/ai/google", (c) => postAiConnect(c));
 
   const deleteAiConnect = async (c: Parameters<typeof requirePremium>[0]) => {
-    // Clearing the shared file-stored server key is superadmin-only.
+    // Clearing the shared DB-stored server key is superadmin-only.
     // BYOK mode is a no-op clear (client-side disconnect status only).
     if (!isByokOnly()) {
       const gate = await requireSuperAdmin(c.req.raw);
       if (!gate.ok) return c.json({ error: gate.error }, gate.status);
-      clearGeminiKey();
+      await clearGeminiKey();
       await writeAuditLog({
         actorId: gate.userId,
         actorEmail: gate.email,
         action: "ai.clear_server_key",
-        detail: { kind: "file-gemini", via: "ai/connect" },
+        detail: { kind: "db-gemini", via: "ai/connect" },
       });
     }
     return c.json({

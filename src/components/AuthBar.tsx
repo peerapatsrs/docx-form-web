@@ -136,6 +136,13 @@ export function AuthBar() {
         type="button"
         className="auth-bar-btn auth-bar-ghost"
         onClick={() => {
+          if (
+            !window.confirm(
+              "ออกจากระบบ?\nจะออกจากบัญชีนี้บนเครื่องนี้ — งานในเครื่อง (ดราฟ/คีย์ท้องถิ่น) ยังอยู่",
+            )
+          ) {
+            return;
+          }
           void authClient.signOut({
             fetchOptions: {
               onSuccess: () => {
@@ -146,7 +153,7 @@ export function AuthBar() {
           });
         }}
       >
-        ออก
+        ออกจากระบบ
       </button>
     </div>
   );

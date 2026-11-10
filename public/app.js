@@ -232,37 +232,7 @@ let sourceMapSession = null;
 /** @type {AbortController | null} */
 let sourceMapAbort = null;
 /** @type {{ connected: boolean, maskedKey?: string|null, model?: string, models?: {id:string,label:string}[], defaultModel?: string, studioUrl?: string }} */
-let aiStatus = {
-    // Do not treat shared env / server "connected" as the user's own key (F19/F31).
-    connected: !!clientKey || hasVaultRef || hasClientAiCredentials(),
-    maskedKey: entry ? maskAiEntry(entry) : data.maskedKey || null,
-    model,
-    models,
-    defaultModel:
-      data.defaultModel ||
-      coerceClientAiModel(provider, "", models) ||
-      model,
-    studioUrl: data.docsUrl || data.studioUrl || providerDocs(provider),
-    byok: data.byok !== false,
-    provider,
-    effectiveProvider: data.effectiveProvider || provider,
-    effectiveModel: data.effectiveModel || model,
-    providerLabel:
-      data.effectiveProviderLabel ||
-      data.providerLabel ||
-      providerLabel(provider),
-    entryLabel: entry?.label || "",
-    providers: aiProvidersCatalog,
-    keySource,
-    keyId: data.keyId || (hasVaultRef ? entry?.id : null) || null,
-    lastTestStatus: data.lastTestStatus || null,
-    lastTestOk:
-      typeof data.lastTestOk === "boolean" ? data.lastTestOk : null,
-    aiTimeoutMs:
-      Number.isFinite(aiTimeoutMs) && aiTimeoutMs >= 5000
-        ? aiTimeoutMs
-        : 90_000,
-  };
+let aiStatus = { connected: false, models: [], defaultModel: "gemini-3.8-flash" };
 
 /**
  * Entitlement for multi-template caps (from /api/health).
@@ -2662,8 +2632,15 @@ function applyAiStatus(data) {
           ? "shared"
           : "none";
   aiStatus = {
-    // Do not treat shared env / server "connected" as the user's own key (F19/F31).
-    connected: !!clientKey || hasVaultRef || hasClientAiCredentials(),
+    // When BYOK-only is off, trust server connected / keySource=shared
+    // (env DOCX_FORM_CURSOR_API_KEY or DB server key). Not a plan gate —
+    // quotas stay on /api/entitlement. When byok=true, BE leaves connected
+    // false without a personal key, so this stays personal-key-only.
+    connected:
+      !!clientKey ||
+      hasVaultRef ||
+      hasClientAiCredentials() ||
+      !!data.connected,
     maskedKey: entry ? maskAiEntry(entry) : data.maskedKey || null,
     model,
     models,
@@ -3419,7 +3396,7 @@ function countUnfilledFields() {
   }
 }
 
-/** Status pill copy: never claim "ready · Cursor · model" without the user's key / file. */
+/** Status pill copy: personal key → ready; shared server key → คีย์เซิร์ฟเวอร์; else no key. */
 function syncAiStatusPill() {
   if (!statusText || !statusDot) return;
   const pill = document.getElementById("status");
@@ -3441,8 +3418,12 @@ function syncAiStatusPill() {
     }
   }
   const hasFile = !!(state.file || taggerSession);
-  const hasKey = hasClientAiCredentials();
-  if (!hasKey) {
+  const hasPersonalKey = hasClientAiCredentials();
+  const sharedReady =
+    !hasPersonalKey &&
+    !!aiStatus.connected &&
+    (aiStatus.keySource === "shared" || aiStatus.byok === false);
+  if (!hasPersonalKey && !sharedReady) {
     statusText.textContent = UI_LABELS.aiStatusNoKey;
     statusDot.classList.remove("ok");
     statusDot.classList.add("bad");
@@ -3450,6 +3431,15 @@ function syncAiStatusPill() {
   }
   statusDot.classList.add("ok");
   statusDot.classList.remove("bad");
+  if (sharedReady && !hasPersonalKey) {
+    const provider =
+      aiStatus.providerLabel || providerLabel(getClientAiProvider());
+    const model = aiStatus.effectiveModel || aiStatus.model || "";
+    statusText.textContent = model
+      ? `คีย์เซิร์ฟเวอร์ · ${provider} · ${model}`
+      : `คีย์เซิร์ฟเวอร์ · ${provider}`;
+    return;
+  }
   if (!hasFile) {
     statusText.textContent = UI_LABELS.aiStatusNoFile;
     return;

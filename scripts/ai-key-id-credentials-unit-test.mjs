@@ -60,6 +60,10 @@ await check("api.ts routes use resolveRequestAiCredentials / resolveRouteAiCrede
   assert.match(api, /resolveRouteAiCredentials/);
   assert.match(api, /runWithSavedAiKeyAuthFallback/);
   assert.match(api, /coalesceAiCredentialsWithSharedEnv/);
+  // Diagnostics must coalesce shared keys the same way as /ai/status.
+  const diagIdx = api.indexOf('api.get("/diagnostics"');
+  const diagSlice = api.slice(diagIdx, diagIdx + 900);
+  assert.match(diagSlice, /coalesceAiCredentialsWithSharedEnv/);
   assert.match(api, /api\.delete\("\/ai\/keys\/:id"/);
   assert.match(api, /api\.delete\("\/admin\/ai\/server-key"/);
 });
@@ -80,6 +84,10 @@ await check("shared dialog + account + pill wiring present", async () => {
   // FE tip opens the dialog via openAiKeyDialog (pill / googleAiBtn), not the old binder name.
   assert.match(app, /openAiKeyDialog|openAiKeysManager|bindStatusPillAiKeysOpener/);
   assert.match(app, /googleAiBtn/);
+  // Shared-key ready when BYOK off: trust server connected / keySource=shared.
+  assert.match(app, /!!data\.connected/);
+  assert.match(app, /aiStatus\.keySource === "shared"/);
+  assert.match(app, /คีย์เซิร์ฟเวอร์/);
   assert.match(account, /AiKeysSection/);
   assert.match(section, /openAiKeysDialog/);
   assert.match(section, /ai-key-dialog\.js/);
@@ -237,6 +245,73 @@ await check("missing vault key error / coalesce to shared env", async () => {
       assert.equal(coalesced.usedSharedEnvFallback, true);
       assert.equal(coalesced.provider, "cursor");
       assert.equal(coalesced.apiKey, "crsr_shared_only_abcdef");
+    },
+  );
+});
+
+await check("BYOK_ONLY=0 coalesces shared key with no personal key / no keyId", async () => {
+  await withEnv(
+    {
+      DOCX_FORM_BYOK_ONLY: "0",
+      DOCX_FORM_CURSOR_API_KEY: "crsr_shared_any_user_abcdef",
+    },
+    async () => {
+      const {
+        coalesceAiCredentialsWithSharedEnv,
+        geminiStatus,
+        isByokOnly,
+      } = await loadFresh("../src/server/ai-config.ts");
+      assert.equal(isByokOnly(), false);
+      const empty = {
+        provider: "google",
+        apiKey: "",
+        model: "",
+        fromUserVault: false,
+      };
+      const coalesced = coalesceAiCredentialsWithSharedEnv(empty);
+      assert.equal(coalesced.usedSharedEnvFallback, true);
+      assert.equal(coalesced.provider, "cursor");
+      assert.equal(coalesced.apiKey, "crsr_shared_any_user_abcdef");
+      const status = geminiStatus({
+        requestKey: coalesced.apiKey,
+        requestProvider: coalesced.provider,
+        usedSharedEnvFallback: true,
+        adminDefaultProvider: "google",
+      });
+      assert.equal(status.connected, true);
+      assert.equal(status.keySource, "shared");
+      assert.equal(status.byok, false);
+    },
+  );
+});
+
+await check("BYOK_ONLY=1 does not coalesce shared key without keyId", async () => {
+  await withEnv(
+    {
+      DOCX_FORM_BYOK_ONLY: "1",
+      DOCX_FORM_CURSOR_API_KEY: "crsr_shared_blocked_by_byok_xx",
+    },
+    async () => {
+      const { coalesceAiCredentialsWithSharedEnv, geminiStatus, isByokOnly } =
+        await loadFresh("../src/server/ai-config.ts");
+      assert.equal(isByokOnly(), true);
+      const empty = {
+        provider: "google",
+        apiKey: "",
+        model: "",
+        fromUserVault: false,
+      };
+      const coalesced = coalesceAiCredentialsWithSharedEnv(empty);
+      assert.equal(coalesced.usedSharedEnvFallback, undefined);
+      assert.equal(Boolean(coalesced.apiKey), false);
+      const status = geminiStatus({
+        requestKey: coalesced.apiKey,
+        requestProvider: coalesced.provider,
+        adminDefaultProvider: "google",
+      });
+      assert.equal(status.connected, false);
+      assert.equal(status.keySource, "none");
+      assert.equal(status.byok, true);
     },
   );
 });

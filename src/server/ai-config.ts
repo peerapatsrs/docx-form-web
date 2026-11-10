@@ -430,26 +430,67 @@ export function missingAiCredentialsError(
 }
 
 /**
- * When X-Ai-Key-Id was sent but the vault row is gone, use shared env Cursor key
- * if configured (same rule as auth rejection fallback). Otherwise leave unresolved.
+ * Fill missing personal credentials from shared server keys.
+ *
+ * 1. X-Ai-Key-Id sent but vault row gone → Cursor env key (even when BYOK-only),
+ *    same rule as auth-rejection fallback.
+ * 2. No personal key at all + BYOK-only off → Cursor env key, else Gemini
+ *    env/DB server key. Any logged-in user (and status/route resolvers) can use
+ *    this path; plan quotas stay separate in premium/limits.
+ *
+ * Never returns the secret to clients — only attaches it for server-side calls.
  */
 export function coalesceAiCredentialsWithSharedEnv(
   creds: ResolvedRequestAiCredentials,
 ): ResolvedRequestAiCredentials {
   if (creds.apiKey && String(creds.apiKey).trim()) return creds;
   const requested = String(creds.requestedKeyId || creds.keyId || "").trim();
-  if (!requested) return creds;
-  const shared = peekSharedCursorEnvApiKey();
-  if (!shared) return creds;
-  return {
-    provider: "cursor",
-    apiKey: shared,
-    model: defaultModelForProvider("cursor"),
-    keyId: requested,
-    requestedKeyId: requested,
-    fromUserVault: false,
-    usedSharedEnvFallback: true,
-  };
+
+  // Missing vault id → Cursor env fallback (allowed even when BYOK-only).
+  if (requested) {
+    const shared = peekSharedCursorEnvApiKey();
+    if (!shared) return creds;
+    return {
+      provider: "cursor",
+      apiKey: shared,
+      model: defaultModelForProvider("cursor"),
+      keyId: requested,
+      requestedKeyId: requested,
+      fromUserVault: false,
+      usedSharedEnvFallback: true,
+    };
+  }
+
+  // No personal key: shared server key only when BYOK-only is off.
+  if (isByokOnly()) return creds;
+
+  const sharedCursor = peekSharedCursorEnvApiKey();
+  if (sharedCursor) {
+    return {
+      provider: "cursor",
+      apiKey: sharedCursor,
+      model: defaultModelForProvider("cursor"),
+      fromUserVault: false,
+      usedSharedEnvFallback: true,
+    };
+  }
+
+  const sharedGemini = getGeminiApiKey(undefined);
+  if (sharedGemini) {
+    const geminiProvider =
+      getAiProvider(creds.provider)?.apiFamily === "gemini"
+        ? getAiProvider(creds.provider)!.id
+        : "google";
+    return {
+      provider: geminiProvider,
+      apiKey: sharedGemini,
+      model: defaultModelForProvider(geminiProvider),
+      fromUserVault: false,
+      usedSharedEnvFallback: true,
+    };
+  }
+
+  return creds;
 }
 
 /**

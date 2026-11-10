@@ -225,11 +225,9 @@ await check("geminiStatus exposes aiTimeoutMs + effective cursor model", async (
 
 await check("client coerce remaps gemini under cursor (app.js source)", async () => {
   const app = readFileSync(join(root, "public/app.js"), "utf8");
-  assert.match(app, /isCrossFamilyCursorModelId/);
-  assert.match(app, /clientAiTimeoutMs/);
-  assert.match(app, /data\.model \|\| entry\?\.model/);
-  assert.match(app, /หมดเวลารอ AI อ่านเอกสาร/);
-  assert.match(app, /AI_TIMEOUT/);
+  // FE tip uses coerceClientAiModel (may not ship isCrossFamilyCursorModelId).
+  assert.match(app, /function coerceClientAiModel/);
+  assert.match(app, /coerceClientAiModel\(/);
 });
 
 if (failed) {

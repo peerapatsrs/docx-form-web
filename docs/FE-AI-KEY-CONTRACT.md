@@ -1,141 +1,103 @@
 # FE ↔ BE AI Key API contract
 
 Assumed by Frontend branch `fe/ux-confusing-2026-11-10`. Aligns with Backend
-`fix/ai-key-id-credentials` / integration `dev-integration-2026-11-10`.
-Session cookie auth; **401** when logged out for vault routes.
+`docs/API-AI-KEYS-AND-SKIP.md` on `dev-integration-2026-11-10` @ `27daee6` /
+`fix/ai-key-id-credentials` @ `0cb2060`.
 
-Frontend never displays or logs the full secret after save. AI feature calls
-send **`X-Ai-Key-Id` only** (no raw key header) when the key is stored on the
-server. Guest / local-only keys stay on-device until the user logs in and syncs.
+Session cookie auth; **401** + `AI_KEY_UNAUTHORIZED` when logged out for vault
+routes. Frontend never displays or logs the full secret after save. AI feature
+calls send **`X-Ai-Key-Id` only** (no raw key header) when the key is stored on
+the server. Guest / local-only keys stay on-device until the user logs in and
+syncs.
 
-## Endpoints
+Canonical Backend doc: `docs/API-AI-KEYS-AND-SKIP.md` (Backend branches).  
+DEV one-click login: `docs/FE-DEV-TEST-LOGIN.md` + Backend `docs/DEV-TEST-ACCOUNTS.md`.
 
-### `GET /api/ai/keys`
+## Endpoints (FE uses)
 
-List the current user's keys (masked only).
+| Method | Path | FE usage |
+|--------|------|----------|
+| GET | `/api/ai/keys` | List masked entries |
+| PUT | `/api/ai/keys` | Create / upsert (`{ entry }` or `{ entries }`) — live-validated |
+| PUT | `/api/ai/keys/:id` | Replace / rotate value — live-validated |
+| DELETE | `/api/ai/keys/:id` | Delete |
+| POST | `/api/ai/keys/:id/test` | Test saved vault key (`AI_KEY_TEST_ENABLED=true`) |
+| POST | `/api/ai/keys/test` | Test plaintext before save (no persist) |
+| GET | `/api/ai/keys/audit` | Own audit events (client helper ready) |
+| GET | `/api/ai/status` | Header pill / providers |
+| POST | `/api/fill` | Generate — sends `values` + `skip` + `rowSkip` |
+| POST | `/api/batch-fill` | Multi generate — each item may include `skip` / `rowSkip` |
 
-**200**
+Prefer **plural** routes. Singular `/api/ai/key*` aliases exist on Backend but
+are not used by the dialog.
 
-```json
-{
-  "entries": [
-    {
-      "id": "k-…",
-      "provider": "google",
-      "label": "Google Gemini",
-      "model": "gemini-3.8-flash",
-      "maskedKey": "••••…abcd",
-      "hasKey": true,
-      "storeOnServer": true
-    }
-  ]
-}
-```
-
-- Never includes plaintext `apiKey`.
-- **401** `{ "error": "…", "code": "AI_KEY_UNAUTHORIZED" }` when there is no session.
-
-### `PUT /api/ai/keys`
-
-Upsert one or many entries. Body is either:
+### Create / upsert body
 
 ```json
 { "entry": { "id": "k-…?", "provider": "google", "label": "…", "model": "…", "apiKey": "…" } }
 ```
 
-or
+- **201/200** `{ ok: true, entry|entries: <masked> }` — FE clears plaintext.
+- Invalid / provider rejection → **400** `{ "error": "…", "code": "AI_KEY_INVALID"|… }` — **not stored**.
 
-```json
-{ "entries": [ { "id": "…", "provider": "…", "label": "…", "model": "…", "apiKey": "…" } ] }
-```
+### Test saved key
 
-**200**
+`POST /api/ai/keys/:id/test` optional `{ "timeoutMs": 15000 }`  
+**200** `{ ok: true, code: "AI_KEY_TEST_OK", message, entry?, durationMs }`
 
-```json
-{ "ok": true, "entries": [ /* same masked shape as GET */ ] }
-```
+### Errors & success codes
 
-- Missing `entry` / `entries` → **400** `{ "error": "<Thai>", "code": "AI_KEY_MISSING_FIELDS" }`
-- Empty / too-short key → **400** `{ "error": "<Thai>", "code": "AI_KEY_INVALID_VALUE" }` (or `AI_KEY_MISSING`)
-- Fake / unauthorized key (live probe) → **400** `{ "error": "<Thai>", "code": "AI_KEY_INVALID" }` — **not stored**
-- Provider timeout / quota / rate-limit → matching `AI_PROVIDER_*` codes (see `docs/API-AI-KEYS-AND-SKIP.md`)
-- **401** `{ "error": "…", "code": "AI_KEY_UNAUTHORIZED" }` when logged out
+Bodies are `{ "error": "<message>", "code": "<CODE>" }` (and success/info may
+use `message` + `code`). FE maps via `mapAiKeyError` / `mapAiKeySuccess` /
+`mapFillError` in `public/ai-key-client.js` (TH default, EN when locale/`navigator` is English).
 
-After a successful PUT the FE clears any in-memory / local plaintext copy for
-that id and keeps only the masked metadata (+ `storeOnServer: true`).
+**AI key / provider:**  
+`AI_KEY_UNAUTHORIZED`, `AI_KEY_NOT_FOUND`, `AI_KEY_INVALID_ID`,
+`AI_KEY_INVALID_PROVIDER`, `AI_KEY_INVALID_VALUE`, `AI_KEY_MISSING`,
+`AI_KEY_INVALID`, `AI_KEY_MISSING_FIELDS`, `AI_KEY_EXISTS`,
+`AI_KEY_PROVIDER_AUTH`, `AI_KEY_PROVIDER_ERROR`, `AI_KEY_TEST_TIMEOUT`,
+`AI_KEY_SERVER_ERROR`, `AI_PROVIDER_AUTH`, `AI_PROVIDER_RATE_LIMIT`,
+`AI_PROVIDER_QUOTA`, `AI_PROVIDER_TIMEOUT`, `AI_PROVIDER_UNAVAILABLE`,
+`AI_PROVIDER_BAD_REQUEST`, `AI_PROVIDER_ERROR`
 
-### `POST /api/ai/keys/:id/test`
+**Success / info (toasts):**  
+`AI_KEY_CREATED`, `AI_KEY_REPLACED`, `AI_KEY_DELETED`, `AI_KEY_USED`,
+`AI_KEY_TEST_OK`
 
-Live probe of a saved vault key. FE shows the button when `AI_KEY_TEST_ENABLED`
-is true (`public/ai-key-client.js`).
+**Fill / generate:**  
+`FILL_MISSING_FILE`, `FILL_INVALID_FILE`, `FILL_MISSING_VALUES`, `FILL_BAD_JSON`,
+`FILL_BAD_SKIP`, `FILL_BAD_ROW_SKIP`, `FILL_LIST_NOT_ARRAY`,
+`FILL_IMAGE_TOO_LARGE`, `FILL_IMAGE_INVALID`
 
-**200** `{ "ok": true, "code": "AI_KEY_TEST_OK", "message": "…", "entry": {…} }`  
-**400/504** `{ "ok": false, "code": "AI_KEY_INVALID" | "AI_PROVIDER_*", "message": "…" }`
+Fallback order: mapped `code` → `error`/`message` text → generic Thai/EN.
 
-### `DELETE /api/ai/keys/:id`
+## Skip / loop tables on generate
 
-**200** `{ "ok": true, "removed": true, "code": "AI_KEY_DELETED" }`  
-**400** bad id (`AI_KEY_INVALID_ID`)  
-**404** unknown id or another user's key (`AI_KEY_NOT_FOUND`)  
-**401** logged out (`AI_KEY_UNAUTHORIZED`)
+Preferred multipart fields on `POST /api/fill`:
 
-### Admin (not used by the AI-key dialog)
+| Field | Meaning |
+|-------|---------|
+| `file` | Template `.docx` |
+| `values` | JSON object (FE currently still sends skip-transformed empties for legacy compat) |
+| `skip` | `{ "<field>": true }` |
+| `rowSkip` | `{ "<list>": [ { "<item>": true }, … ] }` |
+| `image:<name>` | Omitted when `skip[name]` |
 
-`DELETE /api/admin/ai/server-key` — superadmin only (**403** otherwise). The env
-key appears on `/admin/ai` as presence-only (“set via server”). Admin AI
-settings (`defaultModel`) and optional server Gemini key persist in Postgres
-`app_settings` — not under `/tmp`.
+`POST /api/batch-fill` items may include the same `skip` / `rowSkip` keys.
+
+Empty / skipped tables are valid server-side — required-row UX stays Frontend-only.
 
 ## AI feature calls
 
-When the active vault entry is stored on the server, every AI request includes:
+When the active vault entry is stored on the server:
 
 ```http
 X-Ai-Key-Id: <id>
 ```
 
-and **must not** send `X-Ai-Api-Key` / `X-Gemini-Api-Key`.
+Do **not** send `X-Ai-Api-Key` / `X-Gemini-Api-Key` in that case.
 
-Guest / local-only BYOK (not yet synced) may still send the local key header
-until Backend rejects that path; the dialog copy tells the user the key lives
-on this device until they sign in.
+## Client modules
 
-## Errors
-
-All AI-key vault errors use:
-
-```json
-{ "error": "<Thai message>", "code": "AI_KEY_INVALID" }
-```
-
-FE maps via `mapAiKeyError()` (prefers `code`, falls back to Thai `error`).
-
-Reserved / shipped codes (full table in `docs/API-AI-KEYS-AND-SKIP.md`):
-
-| Code | Typical use |
-|------|-------------|
-| `AI_KEY_INVALID` | Fake / unauthorized key on save or test |
-| `AI_KEY_MISSING` / `AI_KEY_INVALID_VALUE` | Empty / too-short key |
-| `AI_KEY_UNAUTHORIZED` | Not logged in |
-| `AI_KEY_NOT_FOUND` | Missing or not owned |
-| `AI_KEY_MISSING_FIELDS` | Body incomplete |
-| `AI_PROVIDER_RATE_LIMIT` | Rate limited |
-| `AI_PROVIDER_QUOTA` | Credits/quota **explicitly** exhausted |
-| `AI_PROVIDER_TIMEOUT` | Probe timed out |
-| `AI_PROVIDER_UNAVAILABLE` | Provider 5xx |
-| `AI_PROVIDER_BAD_REQUEST` | Bad model / request |
-| `AI_PROVIDER_ERROR` | Other provider failure |
-
-## Upgrade deep link (F37)
-
-`upgradeUrl` on `/api/entitlement`, `/api/ai/status`, `/api/me`, `/api/admin/limits`.
-Empty → FE hides the link. Source: admin `limits.upgradeUrl` or env
-`DOCX_FORM_UPGRADE_URL`. **No payments UI on Backend; no hardcoded URL.**
-
-## Fill skip / empty loops
-
-Documented in `docs/API-AI-KEYS-AND-SKIP.md` (`skip` / `rowSkip` on
-`POST /api/fill` and `POST /api/batch-fill`). Empty tables are valid.
-
-Client module: `public/ai-key-client.js`  
-Dialog module: `public/ai-key-dialog.js` (shim: `public/ai-keys-dialog.js`)
+- `public/ai-key-client.js` — typed client + mappers (`AI_KEY_TEST_ENABLED = true`)
+- `public/ai-key-dialog.js` — empty / saved / test / replace / delete UI

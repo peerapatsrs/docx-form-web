@@ -8,8 +8,11 @@ import {
   deleteAiKey,
   listAiKeys,
   mapAiKeyError,
+  mapAiKeySuccess,
   maskAiKeyLocal,
+  replaceAiKey,
   testAiKey,
+  testAiKeyPlaintext,
   upsertAiKeys,
 } from "./ai-key-client.js";
 
@@ -286,14 +289,20 @@ export async function openAiKeyDialog(opts = {}) {
         const mask =
           entry?.maskedKey ||
           (entry?.apiKey ? maskAiKeyLocal(entry.apiKey) : "••••");
-        const lastUsed = formatLastUsed(entry?.lastUsedAt) || "ยังไม่เคยทดสอบจากหน้านี้";
+        const lastUsed = formatLastUsed(entry?.lastUsedAt) || "ยังไม่เคยใช้จากหน้านี้";
+        const lastTest =
+          entry?.lastTestStatus === "ok"
+            ? `ทดสอบล่าสุด: ผ่าน${entry.lastTestAt ? ` · ${formatLastUsed(entry.lastTestAt)}` : ""}`
+            : entry?.lastTestStatus === "error"
+              ? `ทดสอบล่าสุด: ไม่ผ่าน${entry.lastTestMessage ? ` — ${entry.lastTestMessage}` : ""}`
+              : "ยังไม่เคยทดสอบจากหน้านี้";
         overlay.innerHTML = `
           <div class="dialog-card ai-key-dialog-card">
             <h2 class="dialog-title" id="aiKeyDlgTitle">คีย์ AI ของท่าน</h2>
             <p class="dialog-body" id="aiKeyDlgBody">ใช้คีย์นี้เมื่อกดช่วยกรอกหรือแนะนำช่อง ท่านสามารถ${AI_KEY_TEST_ENABLED ? "ทดสอบ " : ""}เปลี่ยน หรือลบได้ตลอด</p>
             <div class="ai-key-saved-card">
               <div class="ai-key-masked" aria-label="คีย์ที่บังแล้ว">${escapeHtml(mask)}</div>
-              <p class="ai-key-meta">ผู้ให้บริการ: ${escapeHtml(providerLabel(entry?.provider))}<br />${escapeHtml(lastUsed)}</p>
+              <p class="ai-key-meta">ผู้ให้บริการ: ${escapeHtml(providerLabel(entry?.provider))}<br />${escapeHtml(lastUsed)}<br />${escapeHtml(lastTest)}</p>
             </div>
             <div class="ai-key-row-actions">
               ${
@@ -465,20 +474,31 @@ export async function openAiKeyDialog(opts = {}) {
 
       try {
         if (loggedIn) {
-          const result = await upsertAiKeys({
-            entry: { id, provider, label, model, apiKey },
-          });
+          const result =
+            replaceMode && existing?.id
+              ? await replaceAiKey(existing.id, {
+                  apiKey,
+                  provider,
+                  label,
+                  model,
+                })
+              : await upsertAiKeys({
+                  entry: { id, provider, label, model, apiKey },
+                });
           // Wipe the input immediately — never leave plaintext in the DOM.
           if (again) again.value = "";
           if (!result.ok) {
-            errorMsg = result.error.error || mapAiKeyError({ code: "AI_KEY_INVALID" });
+            errorMsg =
+              result.error.error || mapAiKeyError({ code: "AI_KEY_INVALID" });
             busy = false;
             mode = "empty";
             paint();
             return;
           }
           const masked =
-            result.entries.find((e) => e.id === id) || result.entries[0];
+            "entry" in result && result.entry
+              ? result.entry
+              : result.entries?.find((e) => e.id === id) || result.entries?.[0];
           const vault = readVault();
           const next = {
             id: masked?.id || id,
@@ -489,7 +509,12 @@ export async function openAiKeyDialog(opts = {}) {
             storeOnServer: true,
             hasKey: true,
             maskedKey: masked?.maskedKey || maskAiKeyLocal(apiKey),
-            lastUsedAt: new Date().toISOString(),
+            lastUsedAt: masked?.lastUsedAt || new Date().toISOString(),
+            lastTestAt: masked?.lastTestAt || null,
+            lastTestOk: masked?.lastTestOk ?? null,
+            lastTestCode: masked?.lastTestCode || null,
+            lastTestMessage: masked?.lastTestMessage || null,
+            lastTestStatus: masked?.lastTestStatus || null,
           };
           const idx = vault.entries.findIndex((e) => e.id === next.id);
           if (idx >= 0) vault.entries[idx] = next;
@@ -522,10 +547,16 @@ export async function openAiKeyDialog(opts = {}) {
           }
           writeVault(vault);
         }
+        const wasReplace = replaceMode;
         busy = false;
         replaceMode = false;
         mode = "saved";
-        opts.onBanner?.("บันทึกคีย์แล้ว", "success");
+        opts.onBanner?.(
+          mapAiKeySuccess({
+            code: wasReplace ? "AI_KEY_REPLACED" : "AI_KEY_CREATED",
+          }),
+          "success",
+        );
         paint();
         opts.onChange?.();
       } catch {
@@ -540,44 +571,73 @@ export async function openAiKeyDialog(opts = {}) {
     async function onTest() {
       if (busy || !AI_KEY_TEST_ENABLED) return;
       const entry = getActiveEntry();
-      if (!entry?.id) return;
-      if (!loggedIn || !entry.storeOnServer) {
-        opts.onBanner?.(
-          "ทดสอบคีย์บนเซิร์ฟเวอร์ได้เมื่อล็อกอินและซิงก์คีย์แล้ว",
-          "warn",
-        );
-        return;
-      }
+      if (!entry) return;
       busy = true;
+      errorMsg = "";
       paint();
       try {
-        const result = await testAiKey(entry.id);
-        busy = false;
-        if (!result.ok) {
-          opts.onBanner?.(result.error.error || mapAiKeyError(result.error), "error");
+        let result;
+        if (loggedIn && entry.storeOnServer && entry.id) {
+          result = await testAiKey(entry.id);
+        } else if (String(entry.apiKey || "").trim()) {
+          result = await testAiKeyPlaintext({
+            provider: entry.provider || "google",
+            apiKey: entry.apiKey,
+          });
+        } else {
+          busy = false;
+          opts.onBanner?.(
+            mapAiKeyError({ code: "AI_KEY_MISSING" }),
+            "error",
+          );
+          mode = "saved";
           paint();
           return;
         }
-        if (result.entry?.lastUsedAt || result.entry) {
+        busy = false;
+        if (!result.ok) {
+          opts.onBanner?.(result.error.error, "error");
+          mode = "saved";
+          paint();
+          return;
+        }
+        if (result.entry) {
+          const vault = readVault();
+          const idx = vault.entries.findIndex((e) => e.id === result.entry.id);
+          if (idx >= 0) {
+            vault.entries[idx] = {
+              ...vault.entries[idx],
+              ...result.entry,
+              apiKey: vault.entries[idx].apiKey || "",
+            };
+            writeVault(vault);
+          }
+        } else if (entry.id) {
           const vault = readVault();
           const idx = vault.entries.findIndex((e) => e.id === entry.id);
           if (idx >= 0) {
             vault.entries[idx] = {
               ...vault.entries[idx],
-              maskedKey:
-                result.entry?.maskedKey || vault.entries[idx].maskedKey,
-              lastUsedAt: new Date().toISOString(),
+              lastTestStatus: "ok",
+              lastTestOk: true,
+              lastTestCode: result.code,
+              lastTestMessage: result.message,
+              lastTestAt: new Date().toISOString(),
             };
             writeVault(vault);
           }
         }
-        showToast(result.message || "คีย์ใช้งานได้");
-        opts.onBanner?.(result.message || "คีย์ใช้งานได้", "success");
-        opts.onChange?.();
+        opts.onBanner?.(
+          mapAiKeySuccess({ code: result.code, message: result.message }),
+          "success",
+        );
+        mode = "saved";
         paint();
+        opts.onChange?.();
       } catch {
         busy = false;
         opts.onBanner?.("ทดสอบคีย์ไม่สำเร็จ", "error");
+        mode = "saved";
         paint();
       }
     }
@@ -610,7 +670,9 @@ export async function openAiKeyDialog(opts = {}) {
         }
         writeVault(vault);
         busy = false;
-        showToast("ลบคีย์แล้ว — ฟังก์ชัน AI จะใช้ได้อีกเมื่อเพิ่มคีย์ใหม่");
+        showToast(
+          `${mapAiKeySuccess({ code: "AI_KEY_DELETED" })} — ฟังก์ชัน AI จะใช้ได้อีกเมื่อเพิ่มคีย์ใหม่`,
+        );
         opts.onChange?.();
         // Keep dialog open so the empty state matches the header pill (F31).
         replaceMode = false;

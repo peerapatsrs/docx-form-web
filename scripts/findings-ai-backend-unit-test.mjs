@@ -212,12 +212,49 @@ await check("F02 entitlement uploadLimitText + client plan-aware dropzone", asyn
   assert.match(api, /getAppLimits/);
 
   const app = readFileSync(join(root, "public/app.js"), "utf8");
-  assert.match(app, /dropzoneOrPickLabel/);
+  // FE tip: plan-aware copy via planQuotaLabel / dropzoneMultiSubHtml / UI_LABELS helpers.
+  assert.match(
+    app,
+    /dropzoneOrPickLabel|dropzoneMultiSubHtml|planQuotaLabel|dropzoneOrPickPaid|dropzoneOrPickFree/,
+  );
   assert.match(app, /getMaxMultiTemplates\(\)/);
   assert.doesNotMatch(app, /ฟรีสูงสุด 2 ไฟล์ต่อครั้ง/);
 
   const labels = readFileSync(join(root, "public/ui-labels.js"), "utf8");
   assert.doesNotMatch(labels, /ฟรีสูงสุด 2 ไฟล์ต่อครั้ง/);
+});
+
+await check("F37 upgradeUrl resolver + API exposure (no hardcoded URL)", async () => {
+  const { sanitizeUpgradeUrl, resolveUpgradeUrl } = await loadFresh(
+    "src/server/admin-store.ts",
+  );
+  assert.equal(sanitizeUpgradeUrl("not a url"), "");
+  assert.equal(sanitizeUpgradeUrl("ftp://x"), "");
+  assert.equal(sanitizeUpgradeUrl("https://example.com/upgrade"), "https://example.com/upgrade");
+  await withEnv({ DOCX_FORM_UPGRADE_URL: "https://pay.example/up" }, async () => {
+    const { resolveUpgradeUrl: resolve } = await loadFresh("src/server/admin-store.ts");
+    assert.equal(resolve(null), "https://pay.example/up");
+    assert.equal(
+      resolve({ upgradeUrl: "https://admin.example/go" }),
+      "https://admin.example/go",
+    );
+  });
+  void resolveUpgradeUrl;
+  const api = readFileSync(join(root, "src/server/api.ts"), "utf8");
+  assert.match(api, /upgradeUrl/);
+  assert.match(api, /resolveUpgradeUrl/);
+  assert.doesNotMatch(api, /https:\/\/stripe\.com|https:\/\/billing\./);
+});
+
+await check("Admin AI config uses DB ai_server (not /tmp writes)", async () => {
+  const cfg = readFileSync(join(root, "src/server/ai-config.ts"), "utf8");
+  assert.match(cfg, /ai_server/);
+  assert.match(cfg, /ensureAiServerConfigLoaded/);
+  assert.match(cfg, /persistAiServerConfig|app_settings/);
+  assert.doesNotMatch(cfg, /writeFileSync/);
+  const admin = readFileSync(join(root, "src/server/admin-store.ts"), "utf8");
+  assert.match(admin, /getAiAdminSettings/);
+  assert.match(admin, /app_settings/);
 });
 
 await check("docs document every new provider error code", async () => {

@@ -19,11 +19,13 @@ import {
   setUserPlan,
   setUserRole,
   writeAuditLog,
+  resolveUpgradeUrl,
 } from "./admin-store";
 import {
   clearGeminiKey,
   adminDefaultProviderFromSettings,
   coalesceAiCredentialsWithSharedEnv,
+  ensureAiServerConfigLoaded,
   geminiStatus,
   getGeminiApiKey,
   getRequestAiProvider,
@@ -337,6 +339,7 @@ export function createApi(options: {
           maxMultiTemplates: ent.maxMultiTemplates,
           freeMaxMulti: limits.freeMaxMulti,
           paidMaxMulti: limits.paidMaxMulti,
+          upgradeUrl: resolveUpgradeUrl(limits) || "",
         },
         session: {
           id: session.session.id,
@@ -403,6 +406,7 @@ export function createApi(options: {
     const maxMulti = ent.entitlement.maxMultiTemplates;
     const plan = ent.entitlement.plan || "unknown";
     const paid = ent.entitlement.paid;
+    const upgradeUrl = resolveUpgradeUrl(limits);
     return c.json({
       version: options.version || "0.0.0",
       premium: {
@@ -416,6 +420,8 @@ export function createApi(options: {
         uploadLimitText: paid
           ? `สูงสุด ${maxMulti} ไฟล์ต่อครั้ง (${String(plan) === "pro" || String(plan) === "paid" || String(plan) === "premium" ? "จ่ายแล้ว" : plan})`
           : `สูงสุด ${maxMulti} ไฟล์ต่อครั้ง (ฟรี)`,
+        /** F37: empty string → Frontend hides upgrade link (no hardcoded URL). */
+        upgradeUrl: upgradeUrl || "",
       },
     });
   });
@@ -558,7 +564,10 @@ export function createApi(options: {
     const gate = await requireSuperAdmin(c.req.raw);
     if (!gate.ok) return c.json({ error: gate.error }, gate.status);
     const limits = await getAppLimits();
-    return c.json({ limits });
+    return c.json({
+      limits,
+      upgradeUrl: resolveUpgradeUrl(limits) || "",
+    });
   });
 
   api.post("/admin/limits", async (c) => {
@@ -567,23 +576,30 @@ export function createApi(options: {
     const body = (await c.req.json().catch(() => ({}))) as {
       freeMaxMulti?: number;
       paidMaxMulti?: number;
+      upgradeUrl?: string;
     };
     const limits = await setAppLimits({
       freeMaxMulti: body.freeMaxMulti,
       paidMaxMulti: body.paidMaxMulti,
+      ...(body.upgradeUrl !== undefined ? { upgradeUrl: body.upgradeUrl } : {}),
     });
     await writeAuditLog({
       actorId: gate.userId,
       actorEmail: gate.email,
       action: "limits.update",
-      detail: limits,
+      detail: { ...limits, upgradeUrl: limits.upgradeUrl || "" },
     });
-    return c.json({ ok: true, limits });
+    return c.json({
+      ok: true,
+      limits,
+      upgradeUrl: resolveUpgradeUrl(limits) || "",
+    });
   });
 
   api.get("/admin/ai", async (c) => {
     const gate = await requireSuperAdmin(c.req.raw);
     if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    await ensureAiServerConfigLoaded().catch(() => undefined);
     const aiAdmin = await getAiAdminSettings();
     const adminDefaultProvider = adminDefaultProviderFromSettings(aiAdmin);
     const status = geminiStatus({
@@ -836,7 +852,12 @@ export function createApi(options: {
       configPath?: string;
     };
     void _drop;
-    return c.json(safe);
+    const limits = await getAppLimits().catch(() => null);
+    return c.json({
+      ...safe,
+      /** F37: empty → hide upgrade CTA (no hardcoded URL). */
+      upgradeUrl: resolveUpgradeUrl(limits) || "",
+    });
   });
 
   const postAiConnect = async (c: Parameters<typeof requirePremium>[0] & {

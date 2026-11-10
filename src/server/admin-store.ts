@@ -7,6 +7,11 @@ export const DEFAULT_PAID_MAX_MULTI = 10;
 export type AppLimits = {
   freeMaxMulti: number;
   paidMaxMulti: number;
+  /**
+   * Optional upgrade / payment deep link (F37).
+   * Empty or unset → Frontend hides the link. Never hardcode a URL in the app.
+   */
+  upgradeUrl?: string;
 };
 
 export type AuditRow = {
@@ -106,19 +111,43 @@ function clampLimit(n: unknown, fallback: number): number {
   return Math.min(50, Math.max(1, Math.floor(v)));
 }
 
+/** Allow only http(s) absolute URLs; empty → hidden. */
+export function sanitizeUpgradeUrl(raw: unknown): string {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  try {
+    const u = new URL(s);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "";
+    return u.toString();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Effective upgrade deep link (F37): admin `limits.upgradeUrl` if set,
+ * else `DOCX_FORM_UPGRADE_URL` env, else empty (FE hides the control).
+ */
+export function resolveUpgradeUrl(limits?: AppLimits | null): string {
+  const fromLimits = sanitizeUpgradeUrl(limits?.upgradeUrl);
+  if (fromLimits) return fromLimits;
+  return sanitizeUpgradeUrl(process.env.DOCX_FORM_UPGRADE_URL);
+}
+
 export async function getAppLimits(): Promise<AppLimits> {
   await ensureAdminSchema();
   if (limitsCache && Date.now() - limitsCache.at < 5_000) {
     return limitsCache.value;
   }
   const pool = getAuthPool();
-  const { rows } = await pool.query<{ value: { freeMaxMulti?: number; paidMaxMulti?: number } }>(
-    `SELECT value FROM app_settings WHERE key = 'limits' LIMIT 1`,
-  );
+  const { rows } = await pool.query<{
+    value: { freeMaxMulti?: number; paidMaxMulti?: number; upgradeUrl?: string };
+  }>(`SELECT value FROM app_settings WHERE key = 'limits' LIMIT 1`);
   const raw = rows[0]?.value || {};
   const value: AppLimits = {
     freeMaxMulti: clampLimit(raw.freeMaxMulti, DEFAULT_FREE_MAX_MULTI),
     paidMaxMulti: clampLimit(raw.paidMaxMulti, DEFAULT_PAID_MAX_MULTI),
+    upgradeUrl: sanitizeUpgradeUrl(raw.upgradeUrl) || undefined,
   };
   if (value.paidMaxMulti < value.freeMaxMulti) {
     value.paidMaxMulti = value.freeMaxMulti;
@@ -132,9 +161,14 @@ export async function setAppLimits(
 ): Promise<AppLimits> {
   await ensureAdminSchema();
   const cur = await getAppLimits();
+  const nextUrl =
+    next.upgradeUrl !== undefined
+      ? sanitizeUpgradeUrl(next.upgradeUrl)
+      : cur.upgradeUrl || "";
   const value: AppLimits = {
     freeMaxMulti: clampLimit(next.freeMaxMulti ?? cur.freeMaxMulti, cur.freeMaxMulti),
     paidMaxMulti: clampLimit(next.paidMaxMulti ?? cur.paidMaxMulti, cur.paidMaxMulti),
+    upgradeUrl: nextUrl || undefined,
   };
   if (value.paidMaxMulti < value.freeMaxMulti) {
     value.paidMaxMulti = value.freeMaxMulti;

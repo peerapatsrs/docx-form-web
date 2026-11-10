@@ -63,6 +63,7 @@ npm run dev
 - เซสชันเก็บในคุกกี้ HttpOnly · PostgreSQL ผ่าน `DATABASE_URL` (ดู `docker compose` service `db`)
 - Superadmin: อีเมลใน `SUPERADMIN_EMAILS` (ค่าเริ่มต้น `peerapat.srs@gmail.com`) ได้ role `superadmin` อัตโนมัติ
 - Dev / SIT / UAT (`DEV_AUTH=1`): ระบบ seed ผู้ใช้จาก `DEV_AUTH_DEFAULT_EMAIL` (หรืออีเมลแรกใน `SUPERADMIN_EMAILS`) แบบ idempotent ตอน `auth:migrate` / บูตแอป เพื่อให้ `login-as` ใช้ได้โดยไม่ต้อง OAuth ก่อน — รันซ้ำด้วย `npm run auth:seed-qa`
+- **บัญชีทดสอบ (เฉพาะ DEV)** — Backend เปิดด้วย `SHOW_TEST_ACCOUNTS=1` และ `APP_ENV=dev` เท่านั้น (ค่าเริ่มต้นปิด; ห้ามเปิดบน SIT/UAT/PROD). FE เรียก `GET /api/dev/test-accounts` แล้วแสดงปุ่ม one-click เมื่อได้ 200; 404/error = ซ่อนแผง. ล็อกอินด้วย `POST /api/dev/test-login { key }` — รหัสผ่านไม่ถึงเบราว์เซอร์ (ดู `docs/FE-DEV-TEST-LOGIN.md` และ placeholders ใน `.env.example`)
 - บังคับล็อกอินทั้งแอป: ตั้ง `AUTH_REQUIRED=1`
 
 ### Google OAuth (จำเป็นสำหรับเริ่มใช้)

@@ -2,13 +2,13 @@
 
 This app is prepared as a standard **OIDC Relying Party** of the TPS18 central Keycloak SSO.
 
-Issuer hosts realms under `https://auth.tps18.space` (`dev` / `sit` / `uat` / `prod`). **Never hardcode** the issuer or realm in application code — configure per environment via env vars.
+Issuer hosts realms under `https://auth.tps18.space` named `tps18-dev` / `tps18-sit` / `tps18-uat` / `tps18-prod`. **Never hardcode** the issuer or realm in application code — configure per environment via `OIDC_ISSUER`.
 
 ## Environment variables
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `OIDC_ISSUER` | for SSO | e.g. `https://auth.tps18.space/realms/dev` |
+| `OIDC_ISSUER` | for SSO | e.g. `https://auth.tps18.space/realms/tps18-dev` |
 | `OIDC_CLIENT_ID` | for SSO | Confidential client id in that realm |
 | `OIDC_CLIENT_SECRET` | for SSO | Client secret |
 | `APP_BASE_URL` (or `NEXT_PUBLIC_APP_URL` / `BETTER_AUTH_URL` / `RENDER_EXTERNAL_URL`) | yes for correct redirects | Public base URL used to build redirect URIs |
@@ -32,10 +32,12 @@ Compute from the public base URL of each deploy:
 
 Matching Keycloak realm issuers (examples — set exactly via `OIDC_ISSUER`):
 
-- DEV → `https://auth.tps18.space/realms/dev`
-- SIT → `https://auth.tps18.space/realms/sit`
-- UAT → `https://auth.tps18.space/realms/uat`
-- PROD → `https://auth.tps18.space/realms/prod`
+- DEV → `https://auth.tps18.space/realms/tps18-dev`
+- SIT → `https://auth.tps18.space/realms/tps18-sit`
+- UAT → `https://auth.tps18.space/realms/tps18-uat`
+- PROD → `https://auth.tps18.space/realms/tps18-prod`
+
+Pattern: `https://auth.tps18.space/realms/tps18-{env}` where `{env}` is `dev` | `sit` | `uat` | `prod`.
 
 ## Keycloak client settings
 

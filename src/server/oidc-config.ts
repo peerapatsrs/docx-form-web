@@ -19,6 +19,7 @@ function trimSlash(url: string): string {
 
 /**
  * Central Keycloak SSO as a standard OIDC RP.
+ * Issuer comes only from OIDC_ISSUER (e.g. …/realms/tps18-{env}) — never hardcode realms.
  * Enabled only when OIDC_ISSUER + OIDC_CLIENT_ID + OIDC_CLIENT_SECRET are set.
  * Missing env → SSO disabled (no throw).
  */

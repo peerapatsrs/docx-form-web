@@ -74,7 +74,7 @@ async function loadFlow() {
   return import(`../src/server/oidc-flow.ts?t=${Date.now()}-${Math.random()}`);
 }
 
-const ISSUER = "https://auth.tps18.space/realms/dev";
+const ISSUER = "https://auth.tps18.space/realms/tps18-dev";
 const CLIENT_ID = "docx-form-web";
 const CLIENT_SECRET = "test-secret";
 

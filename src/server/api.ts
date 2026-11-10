@@ -354,6 +354,44 @@ export function createApi(options: {
   api.get("/health", (c) => c.json({ ok: true, status: "ok" }));
 
   /**
+   * DEV-only test-account panel (APP_ENV=dev + SHOW_TEST_ACCOUNTS=1).
+   * Contract: docs/FE-DEV-TEST-LOGIN.md · docs/DEV-TEST-ACCOUNTS.md
+   * 404 when gated off — FE hides the panel.
+   */
+  api.get("/dev/test-accounts", async (c) => {
+    const { getTestAccountsResponse, clientIpFromRequest } = await import(
+      "./dev-test-accounts"
+    );
+    const result = getTestAccountsResponse({
+      ip: clientIpFromRequest(c.req.raw),
+    });
+    return c.json(result.body, result.status);
+  });
+
+  api.post("/dev/test-login", async (c) => {
+    const { performTestLogin } = await import("./dev-test-accounts");
+    let body: { key?: unknown } = {};
+    try {
+      body = (await c.req.json()) as { key?: unknown };
+    } catch {
+      body = {};
+    }
+    const result = await performTestLogin(c.req.raw, body);
+    if (!result.ok) {
+      return c.json({ error: result.error }, result.status);
+    }
+    const res = c.json(
+      {
+        ok: true,
+        user: result.user,
+      },
+      200,
+    );
+    res.headers.append("Set-Cookie", result.setCookie);
+    return res;
+  });
+
+  /**
    * Public plan/quota snapshot for the guest shell (no internal diagnostics).
    * Admin limit changes are reflected here for the fill UI.
    * `version` is package.json only — not author / AI inventory.

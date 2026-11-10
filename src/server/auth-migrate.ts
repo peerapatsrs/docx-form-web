@@ -3,6 +3,7 @@ import { ensureAdminSchema } from "./admin-store";
 import { auth } from "./auth";
 import { seedQaUser } from "./auth-seed-qa";
 import { ensureSuperAdmins } from "./auth-superadmin";
+import { seedTestUsers } from "./dev-test-accounts";
 
 let ran = false;
 
@@ -27,6 +28,13 @@ export async function migrateAuth(): Promise<void> {
   const seeded = await seedQaUser();
   if (seeded.status === "created") {
     console.info("[auth] seeded QA login-as user");
+  }
+  // DEV test users: only when SEED_TEST_USERS=1 and APP_ENV=dev (see docs/DEV-TEST-ACCOUNTS.md).
+  const testUsers = await seedTestUsers();
+  if (testUsers.status === "seeded") {
+    console.info(
+      `[auth] seeded DEV test users (created=${testUsers.created.join(",") || "-"} updated=${testUsers.updated.join(",") || "-"})`,
+    );
   }
   ran = true;
 }

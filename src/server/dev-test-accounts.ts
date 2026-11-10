@@ -117,7 +117,8 @@ export function getConfiguredTestAccounts(): DevTestAccountDef[] {
     {
       key: "admin",
       label: "แอดมินทดสอบ",
-      role: "admin",
+      // APP_ENV=dev seed only — superadmin via normal DB role path (no SUPERADMIN_EMAILS).
+      role: "superadmin",
       plan: "pro",
       email: adminEmail.toLowerCase(),
       password: adminPassword,

@@ -2499,6 +2499,10 @@ function applyAiStatus(data) {
           ? "shared"
           : "none";
   aiStatus = {
+    // When BYOK-only is off, trust server `connected` / keySource=shared
+    // (env DOCX_FORM_CURSOR_API_KEY or DB server key). Not a plan gate —
+    // quotas stay on /api/entitlement. When byok=true, BE leaves connected
+    // false without a personal key, so this stays personal-key-only.
     connected: !!clientKey || hasVaultRef || !!data.connected,
     maskedKey: entry ? maskAiEntry(entry) : data.maskedKey || null,
     model,

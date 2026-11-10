@@ -251,7 +251,7 @@ await check("public list has no passwords/emails", async () => {
   assert.deepEqual(list[1], {
     key: "admin",
     label: "แอดมินทดสอบ",
-    role: "admin",
+    role: "superadmin",
   });
   const blob = JSON.stringify(list);
   assert.equal(blob.includes("secret"), false);
@@ -335,7 +335,60 @@ await check("seed creates user+admin when enabled", async () => {
   assert.equal(store.users.size, 2);
   assert.equal(store.accounts.size, 2);
   assert.equal(store.users.get("tu@example.com").role, "user");
+  assert.equal(store.users.get("ta@example.com").role, "superadmin");
+});
+
+await check("seed upgrades existing admin row to superadmin (idempotent)", async () => {
+  setEnv({
+    APP_ENV: "dev",
+    SEED_TEST_USERS: "1",
+    TEST_LOGIN_USER_EMAIL: "tu@example.com",
+    TEST_LOGIN_ADMIN_EMAIL: "ta@example.com",
+    TEST_LOGIN_USER_PASSWORD: "pw-user",
+    TEST_LOGIN_ADMIN_PASSWORD: "pw-admin",
+  });
+  const mod = await freshImport("../src/server/dev-test-accounts.ts");
+  const store = makeMemoryStore([
+    { id: "u1", email: "tu@example.com", role: "user", plan: "free" },
+    // Legacy DEV seed left role=admin — must be promoted on every boot.
+    { id: "a1", email: "ta@example.com", role: "admin", plan: "pro" },
+  ]);
+  let id = 10;
+  const result = await mod.seedTestUsers({
+    query: store.query,
+    hashPassword: async (p) => `hash:${p}`,
+    generateId: () => `id-${++id}`,
+  });
+  assert.equal(result.status, "seeded");
+  assert.deepEqual(result.updated.sort(), ["admin", "user"]);
+  assert.equal(result.created.length, 0);
+  assert.equal(store.users.get("ta@example.com").role, "superadmin");
+  assert.equal(store.users.get("ta@example.com").plan, "pro");
+  assert.equal(store.users.get("tu@example.com").role, "user");
+  assert.equal(store.insertUserCalls, 0);
+});
+
+await check("existing admin row stays untouched when APP_ENV != dev", async () => {
+  setEnv({
+    APP_ENV: "prod",
+    SEED_TEST_USERS: "1",
+    TEST_LOGIN_ADMIN_EMAIL: "ta@example.com",
+  });
+  const mod = await freshImport("../src/server/dev-test-accounts.ts");
+  const store = makeMemoryStore([
+    { id: "a1", email: "ta@example.com", role: "admin", plan: "pro" },
+  ]);
+  const warnings = [];
+  const result = await mod.seedTestUsers({
+    query: store.query,
+    warn: (m) => warnings.push(m),
+    hashPassword: async (p) => `hash:${p}`,
+  });
+  assert.equal(result.status, "skipped");
+  assert.equal(result.reason, "not_dev");
   assert.equal(store.users.get("ta@example.com").role, "admin");
+  assert.equal(store.insertUserCalls, 0);
+  assert.ok(warnings.some((w) => /APP_ENV=prod/.test(w)));
 });
 
 await check("login rejects when feature off", async () => {
@@ -384,7 +437,7 @@ await check("login only works for configured seeded key", async () => {
   mod.resetDevTestAccountsRateLimit();
   const store = makeMemoryStore([
     { id: "u1", email: "tu@example.com", role: "user", plan: "free" },
-    { id: "a1", email: "ta@example.com", role: "admin", plan: "pro" },
+    { id: "a1", email: "ta@example.com", role: "superadmin", plan: "pro" },
   ]);
   const audits = [];
   const result = await mod.performTestLogin(
@@ -403,7 +456,7 @@ await check("login only works for configured seeded key", async () => {
           id: userId,
           email: "ta@example.com",
           name: "admin",
-          role: "admin",
+          role: "superadmin",
           plan: "pro",
         },
       }),
@@ -415,7 +468,7 @@ await check("login only works for configured seeded key", async () => {
   assert.equal(result.ok, true);
   assert.equal(result.status, 200);
   assert.ok(String(result.setCookie).includes("better-auth.session_token"));
-  assert.equal(result.user.role, "admin");
+  assert.equal(result.user.role, "superadmin");
   assert.equal(audits.length, 1);
   assert.equal(audits[0].action, "dev.test_login");
 });
@@ -440,6 +493,8 @@ await check("docs cover gates and FE contract shapes", async () => {
   assert.match(doc, /POST \/api\/dev\/test-login/);
   assert.match(doc, /\/admin/);
   assert.match(doc, /better-auth\.session_token/);
+  assert.match(doc, /role=superadmin/);
+  assert.match(doc, /ensureSuperAdmins/);
 });
 
 restoreEnv();

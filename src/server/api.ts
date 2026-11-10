@@ -431,13 +431,15 @@ export function createApi(options: {
     const gate = await requireSuperAdmin(c.req.raw);
     if (!gate.ok) return c.json({ error: gate.error }, gate.status);
     await ensureAdminSchema().catch(() => undefined);
-    const aiCreds = await resolveRequestAiCredentials(
+    let aiCreds = await resolveRequestAiCredentials(
       c.req.raw,
       gate.userId,
     );
+    aiCreds = coalesceAiCredentialsWithSharedEnv(aiCreds);
     const aiAdmin = await getAiAdminSettings().catch(() => ({
       defaultModel: "gemini-3.8-flash",
     }));
+    const adminDefaultProvider = adminDefaultProviderFromSettings(aiAdmin);
     return c.json({
       ok: true,
       name: "docx-form-web",
@@ -450,6 +452,10 @@ export function createApi(options: {
         requestModel: aiCreds.model,
         requestProvider: aiCreds.provider,
         adminDefaultModel: aiAdmin.defaultModel,
+        adminDefaultProvider,
+        fromUserVault: Boolean(aiCreds.fromUserVault),
+        keyId: aiCreds.keyId || null,
+        usedSharedEnvFallback: Boolean(aiCreds.usedSharedEnvFallback),
       }),
     });
   });

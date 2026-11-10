@@ -19,6 +19,7 @@ configure per environment via `OIDC_ISSUER`.
 | `OIDC_ISSUER` | **yes** | e.g. `https://auth.tps18.space/realms/tps18-dev` |
 | `OIDC_CLIENT_ID` | **yes** | Confidential client id |
 | `OIDC_CLIENT_SECRET` | **yes** | Client secret |
+| `OIDC_TRUST_IDP_EMAIL` | no | Default `true`. Link existing users by email without requiring app `emailVerified`. When `false`, require IdP `email_verified`; if unverified and an account already exists → clear error (no duplicate). |
 | `OIDC_PASSKEY_ADD_ACTION` | no | AIA for add passkey (default `webauthn-register-passwordless`) |
 | `OIDC_ADMIN_CLIENT_ID` | no | Service-account client to **list** own passkeys via Admin API |
 | `OIDC_ADMIN_CLIENT_SECRET` | no | Service-account secret (with admin client) |
@@ -52,13 +53,18 @@ Pattern: `https://auth.tps18.space/realms/tps18-{env}` where `{env}` is
 1. Visit `/login` (or any gated page/API that sends the user to login) → **302**
    straight to Keycloak `authorization_endpoint` with PKCE S256, `state`, `nonce`.
 2. Callback validates ID token (JWKS), maps `(issuer, sub)` in `identities`,
-   optionally links by `email_verified`, creates Better Auth session.
+   else links by case-insensitive email (see `OIDC_TRUST_IDP_EMAIL`), else
+   creates a user — all in one transaction with `ON CONFLICT` (no duplicate-key
+   loops). Sets `user.emailVerified=true` on link; keeps role/plan/superadmin.
 3. API calls without a session return **401** with `code: "AUTH_REQUIRED"`;
    the FE navigates to `/login?next=<current path>` (open redirects rejected by
    `safeOidcReturnTo`).
 4. Logout → `GET|POST /api/auth/oidc/logout` clears the app session, then
    RP-initiated logout at `end_session_endpoint` with `id_token_hint` and
    `post_logout_redirect_uri={APP_BASE_URL}/logged-out`.
+5. `/login?error=…` shows a Thai error page with retry + Keycloak logout links
+   and **never** auto-redirects. A `docx_oidc_fail` cookie stops auto-redirect
+   after 2+ failures within 60s (loop breaker).
 
 ## Passkeys (Keycloak AIA)
 

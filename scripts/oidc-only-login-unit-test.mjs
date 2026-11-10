@@ -73,18 +73,52 @@ function memoryDb() {
       return { rows: row ? [row] : [], rowCount: row ? 1 : 0 };
     }
     if (s.includes('FROM "user"') && s.includes("lower(email)")) {
+      const email = String(params[0]).toLowerCase();
+      for (const u of users.values()) {
+        if (String(u.email).toLowerCase() === email) {
+          return { rows: [{ id: u.id }], rowCount: 1 };
+        }
+      }
       return { rows: [], rowCount: 0 };
+    }
+    if (s.includes('UPDATE "user"') && s.includes('"emailVerified" = true')) {
+      const u = users.get(params[0]);
+      if (u) {
+        u.emailVerified = true;
+        users.set(u.id, u);
+      }
+      return { rows: [], rowCount: u ? 1 : 0 };
     }
     if (s.includes('INSERT INTO "user"')) {
       const [id, name, email, emailVerified, image, role, plan] = params;
-      users.set(id, { id, name, email, emailVerified, image, role, plan });
-      return { rows: [], rowCount: 1 };
+      const emailKey = String(email).toLowerCase();
+      for (const u of users.values()) {
+        if (String(u.email).toLowerCase() === emailKey) {
+          return { rows: [], rowCount: 0 };
+        }
+      }
+      users.set(id, { id, name, email: emailKey, emailVerified, image, role, plan });
+      return { rows: [{ id }], rowCount: 1 };
+    }
+    if (s.includes("INSERT INTO identities") && s.includes("ON CONFLICT")) {
+      const [id, issuer, subject, userId, email, emailVerified] = params;
+      const key = `${issuer}|${subject}`;
+      const row = {
+        id: identities.get(key)?.id || id,
+        issuer,
+        subject,
+        userId,
+        email,
+        emailVerified,
+      };
+      identities.set(key, row);
+      return { rows: [row], rowCount: 1 };
     }
     if (s.includes("INSERT INTO identities")) {
       const [id, issuer, subject, userId, email, emailVerified] = params;
       const row = { id, issuer, subject, userId, email, emailVerified };
       identities.set(`${issuer}|${subject}`, row);
-      return { rows: [], rowCount: 1 };
+      return { rows: [row], rowCount: 1 };
     }
     if (s.includes("UPDATE identities")) {
       return { rows: [], rowCount: 1 };
@@ -142,6 +176,7 @@ await check("login page is server OIDC redirect (no chooser / SSO button)", asyn
   const login = readFileSync(join(root, "src/app/login/page.tsx"), "utf8");
   assert.match(login, /buildOidcAuthorizationRedirect/);
   assert.match(login, /SSO not configured/);
+  assert.match(login, /LoginErrorPanel|shouldBlockOidcAutoRedirect/);
   assert.doesNotMatch(login, /เข้าด้วย TPS18 SSO/);
   assert.doesNotMatch(login, /signInSocial|passkey|test-accounts|DevPicker/);
   assert.doesNotMatch(login, /"use client"/);

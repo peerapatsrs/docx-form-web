@@ -104,27 +104,53 @@ function memoryDb() {
     if (s.includes('FROM "user"') && s.includes("lower(email)")) {
       const email = String(params[0]).toLowerCase();
       for (const u of users.values()) {
-        if (
-          String(u.email).toLowerCase() === email &&
-          u.emailVerified === true
-        ) {
+        if (String(u.email).toLowerCase() === email) {
           return { rows: [{ id: u.id }], rowCount: 1 };
         }
       }
       return { rows: [], rowCount: 0 };
     }
+    if (s.includes('UPDATE "user"') && s.includes('"emailVerified" = true')) {
+      const u = users.get(params[0]);
+      if (u) {
+        u.emailVerified = true;
+        users.set(u.id, u);
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }
     if (s.includes('INSERT INTO "user"')) {
       const [id, name, email, emailVerified, image, role, plan] = params;
+      const emailKey = String(email).toLowerCase();
+      for (const u of users.values()) {
+        if (String(u.email).toLowerCase() === emailKey) {
+          return { rows: [], rowCount: 0 };
+        }
+      }
       users.set(id, {
         id,
         name,
-        email,
+        email: emailKey,
         emailVerified,
         image,
         role,
         plan,
       });
-      return { rows: [], rowCount: 1 };
+      return { rows: [{ id }], rowCount: 1 };
+    }
+    if (s.includes("INSERT INTO identities") && s.includes("ON CONFLICT")) {
+      const [id, issuer, subject, userId, email, emailVerified] = params;
+      const key = `${issuer}|${subject}`;
+      const row = {
+        id: identities.get(key)?.id || id,
+        issuer,
+        subject,
+        userId,
+        email,
+        emailVerified,
+      };
+      identities.set(key, row);
+      return { rows: [row], rowCount: 1 };
     }
     if (s.includes("INSERT INTO identities")) {
       const [id, issuer, subject, userId, email, emailVerified] = params;
@@ -137,7 +163,7 @@ function memoryDb() {
         emailVerified,
       };
       identities.set(`${issuer}|${subject}`, row);
-      return { rows: [], rowCount: 1 };
+      return { rows: [row], rowCount: 1 };
     }
     if (s.includes("UPDATE identities")) {
       const [userId, email, emailVerified, id] = params;
@@ -340,7 +366,7 @@ await check("JWKS validates id_token nonce/aud/iss", async () => {
   );
 });
 
-await check("identities: link by verified email only when email_verified", async () => {
+await check("identities: trust IdP email links without app emailVerified", async () => {
   const {
     resolveUserForOidcClaims,
     resetOidcIdentitiesSchemaGate,
@@ -351,53 +377,37 @@ await check("identities: link by verified email only when email_verified", async
   db.users.set("u-existing", {
     id: "u-existing",
     email: "bob@example.com",
-    emailVerified: true,
+    emailVerified: false,
   });
 
-  // Unverified email must NOT link — creates a new user.
-  const created = await resolveUserForOidcClaims(
+  // Default trust: IdP unverified still links existing user (no duplicate).
+  const linkedUnverified = await resolveUserForOidcClaims(
     {
       iss: ISSUER,
-      sub: "sub-new",
+      sub: "sub-bob-a",
       aud: CLIENT_ID,
       exp: Math.floor(Date.now() / 1000) + 600,
       email: "bob@example.com",
       email_verified: false,
       name: "Bob",
     },
-    { query: db.query },
+    { query: db.query, trustIdpEmail: true },
   );
-  assert.equal(created.linkedBy, "created");
-  assert.notEqual(created.userId, "u-existing");
-
-  // Verified email links existing user.
-  resetOidcIdentitiesSchemaGate();
-  const linked = await resolveUserForOidcClaims(
-    {
-      iss: ISSUER,
-      sub: "sub-bob",
-      aud: CLIENT_ID,
-      exp: Math.floor(Date.now() / 1000) + 600,
-      email: "bob@example.com",
-      email_verified: true,
-      name: "Bob",
-    },
-    { query: db.query },
-  );
-  assert.equal(linked.linkedBy, "email");
-  assert.equal(linked.userId, "u-existing");
+  assert.equal(linkedUnverified.linkedBy, "email");
+  assert.equal(linkedUnverified.userId, "u-existing");
+  assert.equal(db.users.get("u-existing").emailVerified, true);
 
   // Second login hits identity map.
   const again = await resolveUserForOidcClaims(
     {
       iss: ISSUER,
-      sub: "sub-bob",
+      sub: "sub-bob-a",
       aud: CLIENT_ID,
       exp: Math.floor(Date.now() / 1000) + 600,
       email: "bob@example.com",
       email_verified: true,
     },
-    { query: db.query },
+    { query: db.query, trustIdpEmail: true },
   );
   assert.equal(again.linkedBy, "identity");
   assert.equal(again.userId, "u-existing");

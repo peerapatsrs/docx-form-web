@@ -15,11 +15,18 @@ import {
 } from "./oidc-id-token";
 import {
   consumeOidcLoginState,
+  OidcEmailUnverifiedError,
   resolveUserForOidcClaims,
   safeOidcReturnTo,
   saveOidcLoginState,
   ensureOidcIdentitiesSchema,
 } from "./oidc-identities";
+import {
+  bumpOidcFailState,
+  oidcFailClearCookieHeader,
+  oidcFailSetCookieHeader,
+  parseOidcFailCookie,
+} from "./oidc-login-guard";
 import type { JSONWebKeySet } from "jose";
 
 export const OIDC_ID_TOKEN_COOKIE = "docx_oidc_id_token";
@@ -226,6 +233,8 @@ export async function handleOidcCallback(input: {
   consumeState?: typeof consumeOidcLoginState;
   /** Test seam — defaults to resolveUserForOidcClaims. */
   resolveUser?: typeof resolveUserForOidcClaims;
+  /** Current docx_oidc_fail cookie (loop breaker). */
+  failCookieRaw?: string | null;
 }): Promise<{
   status: number;
   redirectTo: string;
@@ -239,11 +248,16 @@ export async function handleOidcCallback(input: {
   const kcStatus = normalizeKcActionStatus(input.kcActionStatus);
   const consumeState = input.consumeState ?? consumeOidcLoginState;
   const resolveUser = input.resolveUser ?? resolveUserForOidcClaims;
+  const failBumpCookie = () =>
+    oidcFailSetCookieHeader(
+      bumpOidcFailState(parseOidcFailCookie(input.failCookieRaw)),
+      secure,
+    );
   if (!config) {
     return {
       status: 404,
       redirectTo: "/login?error=oidc_disabled",
-      setCookies: [],
+      setCookies: [failBumpCookie()],
       error: "OIDC_DISABLED",
     };
   }
@@ -251,7 +265,7 @@ export async function handleOidcCallback(input: {
     return {
       status: 302,
       redirectTo: `/login?error=oidc_${encodeURIComponent(String(input.error).slice(0, 64))}`,
-      setCookies: [],
+      setCookies: [failBumpCookie()],
       error: String(input.error),
     };
   }
@@ -280,7 +294,7 @@ export async function handleOidcCallback(input: {
     return {
       status: 302,
       redirectTo: "/login?error=oidc_missing_code",
-      setCookies: [],
+      setCookies: [failBumpCookie()],
       error: "OIDC_MISSING_CODE",
     };
   }
@@ -291,7 +305,7 @@ export async function handleOidcCallback(input: {
       return {
         status: 302,
         redirectTo: "/login?error=oidc_state_invalid",
-        setCookies: [],
+        setCookies: [failBumpCookie()],
         error: "OIDC_STATE_INVALID",
       };
     }
@@ -326,6 +340,7 @@ export async function handleOidcCallback(input: {
     const setCookies = [
       session.setCookie,
       ...buildOidcSideCookies(idToken, secure),
+      oidcFailClearCookieHeader(secure),
     ];
 
     let redirectTo = safeOidcReturnTo(pending.returnTo, "/");
@@ -345,18 +360,27 @@ export async function handleOidcCallback(input: {
     console.error("[oidc] callback failed:", summarizeOidcError(err));
     // Avoid leaking token material even in truncated form.
     void redactTokenForLog;
+    const failCookie = failBumpCookie();
+    if (err instanceof OidcEmailUnverifiedError || (err as { code?: string })?.code === "OIDC_EMAIL_UNVERIFIED") {
+      return {
+        status: 302,
+        redirectTo: "/login?error=oidc_email_unverified",
+        setCookies: [...clearOidcSideCookies(secure), failCookie],
+        error: "OIDC_EMAIL_UNVERIFIED",
+      };
+    }
     if (kcStatus) {
       return {
         status: 302,
         redirectTo: appendOidcPasskeyStatusParam("/account", "error"),
-        setCookies: clearOidcSideCookies(secure),
+        setCookies: [...clearOidcSideCookies(secure), failCookie],
         error: summarizeOidcError(err),
       };
     }
     return {
       status: 302,
       redirectTo: "/login?error=oidc_callback_failed",
-      setCookies: clearOidcSideCookies(secure),
+      setCookies: [...clearOidcSideCookies(secure), failCookie],
       error: summarizeOidcError(err),
     };
   }

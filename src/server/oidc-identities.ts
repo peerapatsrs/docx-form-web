@@ -14,10 +14,23 @@ export type IdentityRow = {
   emailVerified: boolean;
 };
 
-type QueryFn = <T extends QueryResultRow = QueryResultRow>(
+export type QueryFn = <T extends QueryResultRow = QueryResultRow>(
   sql: string,
   params?: unknown[],
 ) => Promise<{ rows: T[]; rowCount: number | null }>;
+
+export type WithTransactionFn = <T>(
+  fn: (query: QueryFn) => Promise<T>,
+) => Promise<T>;
+
+/** Thrown when OIDC_TRUST_IDP_EMAIL=false and IdP email is unverified but an app user already exists. */
+export class OidcEmailUnverifiedError extends Error {
+  readonly code = "OIDC_EMAIL_UNVERIFIED";
+  constructor(message = "OIDC_EMAIL_UNVERIFIED") {
+    super(message);
+    this.name = "OidcEmailUnverifiedError";
+  }
+}
 
 let schemaReady: Promise<void> | null = null;
 
@@ -92,6 +105,46 @@ function defaultQuery(): QueryFn {
   };
 }
 
+/**
+ * Keycloak Trust Email: app trusts IdP identity by default.
+ * Set OIDC_TRUST_IDP_EMAIL=0|false|no|off to require IdP email_verified for linking.
+ */
+export function isOidcTrustIdpEmail(
+  envSource: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const raw = String(envSource.OIDC_TRUST_IDP_EMAIL ?? "true")
+    .trim()
+    .toLowerCase();
+  if (!raw) return true;
+  return !(raw === "0" || raw === "false" || raw === "no" || raw === "off");
+}
+
+async function withAuthTransaction<T>(
+  fn: (query: QueryFn) => Promise<T>,
+): Promise<T> {
+  const pool = getAuthPool();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const q: QueryFn = async <TRow extends QueryResultRow = QueryResultRow>(
+      sql: string,
+      params?: unknown[],
+    ) => client.query<TRow>(sql, params);
+    const result = await fn(q);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      /* ignore */
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 export async function findIdentityByIssuerSub(
   issuer: string,
   subject: string,
@@ -127,7 +180,8 @@ export async function findIdentityByIssuerAndUserId(
   return rows[0] ?? null;
 }
 
-export async function findUserIdByVerifiedEmail(
+/** Case-insensitive email lookup — does NOT require app emailVerified. */
+export async function findUserIdByEmail(
   email: string,
   query: QueryFn = defaultQuery(),
 ): Promise<string | null> {
@@ -135,17 +189,37 @@ export async function findUserIdByVerifiedEmail(
   if (!normalized) return null;
   const { rows } = await query<{ id: string }>(
     `SELECT id FROM "user"
-     WHERE lower(email) = $1 AND "emailVerified" = true
+     WHERE lower(email) = $1
      LIMIT 1`,
     [normalized],
   );
   return rows[0]?.id ?? null;
 }
 
+/** @deprecated use findUserIdByEmail — kept for callers that still import the name. */
+export async function findUserIdByVerifiedEmail(
+  email: string,
+  query: QueryFn = defaultQuery(),
+): Promise<string | null> {
+  return findUserIdByEmail(email, query);
+}
+
+async function markUserEmailVerified(
+  userId: string,
+  query: QueryFn,
+): Promise<void> {
+  await query(
+    `UPDATE "user"
+     SET "emailVerified" = true, "updatedAt" = NOW()
+     WHERE id = $1 AND "emailVerified" IS DISTINCT FROM true`,
+    [userId],
+  );
+}
+
 export async function createAppUserFromOidc(
   claims: OidcIdTokenClaims,
   query: QueryFn = defaultQuery(),
-): Promise<string> {
+): Promise<{ userId: string; created: boolean }> {
   const id = randomUUID();
   const email =
     typeof claims.email === "string" && claims.email.trim()
@@ -156,7 +230,8 @@ export async function createAppUserFromOidc(
     (claims.preferred_username && claims.preferred_username.trim()) ||
     email.split("@")[0] ||
     "User";
-  const emailVerified = claims.email_verified === true;
+  // Linked / created via trusted IdP → mark verified in app.
+  const emailVerified = true;
   const role = isSuperAdminEmail(email) ? "superadmin" : "user";
   const plan = role === "superadmin" ? "pro" : "free";
   const image =
@@ -164,16 +239,28 @@ export async function createAppUserFromOidc(
       ? claims.picture.trim()
       : null;
 
-  await query(
+  const inserted = await query<{ id: string }>(
     `INSERT INTO "user" (
        id, name, email, "emailVerified", image,
        "createdAt", "updatedAt", role, plan
      ) VALUES (
        $1, $2, $3, $4, $5, NOW(), NOW(), $6, $7
-     )`,
+     )
+     ON CONFLICT (email) DO NOTHING
+     RETURNING id`,
     [id, name, email, emailVerified, image, role, plan],
   );
-  return id;
+  if (inserted.rows[0]?.id) {
+    return { userId: inserted.rows[0].id, created: true };
+  }
+
+  // Race: another request created the same email — link to that row (no duplicate).
+  const existingId = await findUserIdByEmail(email, query);
+  if (existingId) {
+    await markUserEmailVerified(existingId, query);
+    return { userId: existingId, created: false };
+  }
+  throw new Error("OIDC_USER_CREATE_CONFLICT");
 }
 
 export async function upsertIdentity(input: {
@@ -186,39 +273,19 @@ export async function upsertIdentity(input: {
 }): Promise<IdentityRow> {
   const query = input.query ?? defaultQuery();
   const issuer = input.issuer.replace(/\/$/, "");
-  const existing = await findIdentityByIssuerSub(
-    issuer,
-    input.subject,
-    query,
-  );
-  if (existing) {
-    await query(
-      `UPDATE identities
-       SET "userId" = $1,
-           email = $2,
-           "emailVerified" = $3,
-           "updatedAt" = NOW()
-       WHERE id = $4`,
-      [
-        input.userId,
-        input.email ?? null,
-        input.emailVerified,
-        existing.id,
-      ],
-    );
-    return {
-      ...existing,
-      userId: input.userId,
-      email: input.email ?? null,
-      emailVerified: input.emailVerified,
-    };
-  }
   const id = randomUUID();
-  await query(
+  const { rows } = await query<IdentityRow>(
     `INSERT INTO identities (
        id, issuer, subject, "userId", email, "emailVerified",
        "createdAt", "updatedAt"
-     ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
+     ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+     ON CONFLICT (issuer, subject) DO UPDATE SET
+       "userId" = EXCLUDED."userId",
+       email = EXCLUDED.email,
+       "emailVerified" = EXCLUDED."emailVerified",
+       "updatedAt" = NOW()
+     RETURNING id, issuer, subject, "userId" as "userId", email,
+               "emailVerified" as "emailVerified"`,
     [
       id,
       issuer,
@@ -228,66 +295,111 @@ export async function upsertIdentity(input: {
       input.emailVerified,
     ],
   );
-  return {
-    id,
-    issuer,
-    subject: input.subject,
-    userId: input.userId,
-    email: input.email ?? null,
-    emailVerified: input.emailVerified,
-  };
+  const row = rows[0];
+  if (!row) {
+    throw new Error("OIDC_IDENTITY_UPSERT_FAILED");
+  }
+  return row;
 }
 
 /**
- * Resolve app user for validated ID-token claims:
+ * Resolve app user for validated ID-token claims (single transaction):
  * 1) existing (issuer, sub) identity
- * 2) else link by email only when email_verified === true
- * 3) else create a new user (roles remain in app DB)
+ * 2) case-insensitive email match (no app emailVerified required;
+ *    IdP email_verified gate controlled by OIDC_TRUST_IDP_EMAIL, default true)
+ * 3) create new user (ON CONFLICT email → link existing)
+ * Keeps role/plan/superadmin; sets emailVerified=true on link (update only).
  */
 export async function resolveUserForOidcClaims(
   claims: OidcIdTokenClaims,
-  deps: { query?: QueryFn } = {},
-): Promise<{ userId: string; linkedBy: "identity" | "email" | "created" }> {
-  const query = deps.query ?? defaultQuery();
-  await ensureOidcIdentitiesSchema(query);
+  deps: {
+    query?: QueryFn;
+    withTransaction?: WithTransactionFn;
+    trustIdpEmail?: boolean;
+  } = {},
+): Promise<{
+  userId: string;
+  linkedBy: "identity" | "email" | "created";
+}> {
+  const trustIdpEmail =
+    deps.trustIdpEmail ?? isOidcTrustIdpEmail();
+  const runTx =
+    deps.withTransaction ??
+    (deps.query
+      ? async <T>(fn: (q: QueryFn) => Promise<T>) => fn(deps.query!)
+      : withAuthTransaction);
 
-  const issuer = claims.iss.replace(/\/$/, "");
-  const existing = await findIdentityByIssuerSub(issuer, claims.sub, query);
-  if (existing) {
+  return runTx(async (query) => {
+    await ensureOidcIdentitiesSchema(query);
+
+    const issuer = claims.iss.replace(/\/$/, "");
+    const emailRaw =
+      typeof claims.email === "string" && claims.email.trim()
+        ? claims.email.trim()
+        : null;
+    const emailNorm = emailRaw ? emailRaw.toLowerCase() : null;
+    const idpVerified = claims.email_verified === true;
+
+    const existing = await findIdentityByIssuerSub(
+      issuer,
+      claims.sub,
+      query,
+    );
+    if (existing) {
+      await upsertIdentity({
+        issuer,
+        subject: claims.sub,
+        userId: existing.userId,
+        email: emailNorm,
+        emailVerified: true,
+        query,
+      });
+      await markUserEmailVerified(existing.userId, query);
+      return { userId: existing.userId, linkedBy: "identity" as const };
+    }
+
+    const mayLinkByEmail = Boolean(emailNorm) && (trustIdpEmail || idpVerified);
+
+    if (emailNorm && !mayLinkByEmail) {
+      // Trust off + IdP unverified: never create a duplicate of an existing account.
+      const conflictId = await findUserIdByEmail(emailNorm, query);
+      if (conflictId) {
+        throw new OidcEmailUnverifiedError();
+      }
+    }
+
+    if (mayLinkByEmail && emailNorm) {
+      const byEmail = await findUserIdByEmail(emailNorm, query);
+      if (byEmail) {
+        await markUserEmailVerified(byEmail, query);
+        await upsertIdentity({
+          issuer,
+          subject: claims.sub,
+          userId: byEmail,
+          email: emailNorm,
+          emailVerified: true,
+          query,
+        });
+        return { userId: byEmail, linkedBy: "email" as const };
+      }
+    }
+
+    const created = await createAppUserFromOidc(claims, query);
     await upsertIdentity({
       issuer,
       subject: claims.sub,
-      userId: existing.userId,
-      email: claims.email ?? null,
-      emailVerified: claims.email_verified === true,
+      userId: created.userId,
+      email: emailNorm,
+      emailVerified: true,
       query,
     });
-    return { userId: existing.userId, linkedBy: "identity" };
-  }
+    await markUserEmailVerified(created.userId, query);
 
-  let userId: string | null = null;
-  let linkedBy: "email" | "created" = "created";
-
-  if (claims.email_verified === true && claims.email) {
-    userId = await findUserIdByVerifiedEmail(claims.email, query);
-    if (userId) linkedBy = "email";
-  }
-
-  if (!userId) {
-    userId = await createAppUserFromOidc(claims, query);
-    linkedBy = "created";
-  }
-
-  await upsertIdentity({
-    issuer,
-    subject: claims.sub,
-    userId,
-    email: claims.email ?? null,
-    emailVerified: claims.email_verified === true,
-    query,
+    return {
+      userId: created.userId,
+      linkedBy: created.created ? ("created" as const) : ("email" as const),
+    };
   });
-
-  return { userId, linkedBy };
 }
 
 export async function saveOidcLoginState(input: {

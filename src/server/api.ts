@@ -418,7 +418,7 @@ export function createApi(options: {
         paidMaxMulti: limits?.paidMaxMulti,
         /** Plan-aware upload quota copy for the guest/home dropzone (F02). */
         uploadLimitText: paid
-          ? `สูงสุด ${maxMulti} ไฟล์ต่อครั้ง (${plan === "pro" || plan === "paid" || plan === "premium" ? "จ่ายแล้ว" : plan})`
+          ? `สูงสุด ${maxMulti} ไฟล์ต่อครั้ง (${String(plan) === "pro" || String(plan) === "paid" || String(plan) === "premium" ? "จ่ายแล้ว" : plan})`
           : `สูงสุด ${maxMulti} ไฟล์ต่อครั้ง (ฟรี)`,
         /** F37: empty string → Frontend hides upgrade link (no hardcoded URL). */
         upgradeUrl: upgradeUrl || "",

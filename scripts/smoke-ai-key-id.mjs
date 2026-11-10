@@ -3,8 +3,21 @@
  * Local smoke: X-Ai-Key-Id-only credentials, delete ownership, admin env flags,
  * and shared dialog asset. Mocks AI by exercising resolve path without a live
  * provider call where possible.
+ *
+ * Requires DOCX_FORM_AI_KEY_TEST_MOCK=ok on the **server** (and this process as a
+ * reminder) so PUT /api/ai/keys with a fake Google key passes F30 validate-on-save.
+ *
+ *   DOCX_FORM_AI_KEY_TEST_MOCK=ok BASE_URL=http://127.0.0.1:3000 node scripts/smoke-ai-key-id.mjs
  */
 import assert from "node:assert/strict";
+
+const MOCK = String(process.env.DOCX_FORM_AI_KEY_TEST_MOCK || "").trim();
+if (!MOCK) {
+  console.error(
+    "smoke-ai-key-id: set DOCX_FORM_AI_KEY_TEST_MOCK=ok (server + this process) before running — fake Google keys need mock validate-on-save",
+  );
+  process.exit(1);
+}
 
 const BASE = (process.env.BASE_URL || "http://127.0.0.1:3000").replace(/\/$/, "");
 let failed = 0;

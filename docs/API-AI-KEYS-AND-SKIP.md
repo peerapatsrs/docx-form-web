@@ -64,9 +64,12 @@ logged-in user without a personal key** resolves to that shared key:
 
 | Surface | Behaviour |
 |---------|-----------|
-| `GET /api/ai/status` | `connected=true`, `keySource=shared`, `byok=false` |
-| AI suggest / draft / batch-from-source | `resolveRouteAiCredentials` → shared key |
+| `GET /api/ai/status` | `connected=true`, `keySource=shared`, `byok=false`, **`effectiveProvider` matches the provider that owns the key** (Cursor key → `cursor`, not admin-default Google) |
+| AI suggest / draft / batch-from-source | `resolveRouteAiCredentials` → shared key for **that** provider |
 | `GET /api/diagnostics` | Same coalesce + `keySource=shared` (superadmin) |
+
+A Cursor shared key must never be accepted as a Gemini override (and vice versa), or
+`resolveEffectiveAiProvider` keeps `google` while calling with a Cursor secret → `AI_AUTH`.
 
 This is **not** a premium/plan gate on the shared key. Plan quotas and
 `PREMIUM_ENFORCE` feature gates stay separate (`/api/entitlement`, upload limits).
@@ -299,6 +302,57 @@ Env:
 - `DOCX_FORM_CURSOR_API_KEY` — shared Cursor key used when BYOK-only is off (and as vault-auth fallback).
 - `DOCX_FORM_AI_TIMEOUT_MS` — shared AI call budget (also caps key tests ≤ 20s)
 - `DOCX_FORM_AI_KEY_TEST_MOCK=ok\|401\|auth\|quota\|429\|hang` — local/CI mock for key probe
+
+---
+
+## Template fields — non-loop table cells
+
+`POST /api/template/fields` (with `includeContent=1`) returns:
+
+```json
+{
+  "fields": [
+    {
+      "name": "ชื่อผู้ติดต่อ",
+      "type": "text",
+      "location": { "tableIndex": 0, "rowIndexInTable": 0, "cellIndex": 1 }
+    },
+    {
+      "name": "เบอร์โทร",
+      "type": "text",
+      "location": { "tableIndex": 0, "rowIndexInTable": 1, "cellIndex": 1 }
+    }
+  ],
+  "layout": [
+    {
+      "type": "table",
+      "headerRows": [],
+      "templateCells": [],
+      "staticRows": [
+        [
+          { "text": "ชื่อ" },
+          {
+            "text": "{{ชื่อผู้ติดต่อ}}",
+            "fieldName": "ชื่อผู้ติดต่อ",
+            "tags": ["ชื่อผู้ติดต่อ"]
+          }
+        ]
+      ]
+    }
+  ]
+}
+```
+
+| Piece | Contract |
+|-------|----------|
+| `FormField` | `{ name, type, aliases?, location? }` — tags in **any** table cell are normal fields (`text` / `bool` / `auto` / …). No special cell type. |
+| `location` | Optional `{ tableIndex, rowIndexInTable, cellIndex }` (0-based; first cell hit wins). |
+| `layout[]` table without `listName` | Non-loop → `staticRows[][]`. Each cell: `{ text, fieldName?, tags?, … }`. |
+| `layout[]` table with `listName` | Loop table — unchanged (`templateCells` + optional `trailingRows`). |
+| FE fill preview | FE tip tokenizes cell text / uses `fieldName`\|`tags[]` for inline blank + ข้าม (`public/doc-table-fields.js`). Falls back to seeding missing fields from layout tags. |
+| Fill / skip | Same as other text fields: `values[name]` fills the cell; `skip[name]=true` → `""` → no leftover `{{…}}`. |
+
+Loop tables (`{{#list}}`…`{{/}}`) keep the existing list field + `templateCells` path.
 
 ---
 

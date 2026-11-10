@@ -251,12 +251,19 @@ await check("BYOK_ONLY=0 coalesces shared key with no personal key / no keyId", 
     {
       DOCX_FORM_BYOK_ONLY: "0",
       DOCX_FORM_CURSOR_API_KEY: "crsr_shared_any_user_abcdef",
+      DOCX_FORM_GEMINI_API_KEY: undefined,
+      GEMINI_API_KEY: undefined,
+      GOOGLE_API_KEY: undefined,
+      GOOGLE_GENERATIVE_AI_API_KEY: undefined,
     },
     async () => {
       const {
         coalesceAiCredentialsWithSharedEnv,
         geminiStatus,
+        resolveEffectiveAiProvider,
+        resolveProviderApiKey,
         isByokOnly,
+        getGeminiApiKey,
       } = await loadFresh("../src/server/ai-config.ts");
       assert.equal(isByokOnly(), false);
       const empty = {
@@ -269,6 +276,18 @@ await check("BYOK_ONLY=0 coalesces shared key with no personal key / no keyId", 
       assert.equal(coalesced.usedSharedEnvFallback, true);
       assert.equal(coalesced.provider, "cursor");
       assert.equal(coalesced.apiKey, "crsr_shared_any_user_abcdef");
+      // Cursor key must NOT masquerade as a Gemini key.
+      assert.equal(getGeminiApiKey(coalesced.apiKey), undefined);
+      const provider = resolveEffectiveAiProvider({
+        requestProvider: coalesced.provider,
+        requestKey: coalesced.apiKey,
+        adminDefaultProvider: "google",
+      });
+      assert.equal(provider, "cursor");
+      assert.equal(
+        resolveProviderApiKey(provider, coalesced.apiKey),
+        "crsr_shared_any_user_abcdef",
+      );
       const status = geminiStatus({
         requestKey: coalesced.apiKey,
         requestProvider: coalesced.provider,
@@ -278,6 +297,139 @@ await check("BYOK_ONLY=0 coalesces shared key with no personal key / no keyId", 
       assert.equal(status.connected, true);
       assert.equal(status.keySource, "shared");
       assert.equal(status.byok, false);
+      assert.equal(status.effectiveProvider, "cursor");
+      assert.equal(status.provider, "cursor");
+      assert.notEqual(status.model, "gemini-3.8-flash");
+    },
+  );
+});
+
+await check("shared key resolution: cursor-only / google-only / both", async () => {
+  // Cursor only → effective cursor even when admin default is google.
+  await withEnv(
+    {
+      DOCX_FORM_BYOK_ONLY: "0",
+      DOCX_FORM_CURSOR_API_KEY: "crsr_only_shared_abcdefgh",
+      DOCX_FORM_GEMINI_API_KEY: undefined,
+      GEMINI_API_KEY: undefined,
+      GOOGLE_API_KEY: undefined,
+      GOOGLE_GENERATIVE_AI_API_KEY: undefined,
+    },
+    async () => {
+      const {
+        coalesceAiCredentialsWithSharedEnv,
+        resolveEffectiveAiProvider,
+        geminiStatus,
+      } = await loadFresh("../src/server/ai-config.ts");
+      const c = coalesceAiCredentialsWithSharedEnv({
+        provider: "google",
+        apiKey: "",
+        fromUserVault: false,
+      });
+      assert.equal(c.provider, "cursor");
+      assert.equal(
+        resolveEffectiveAiProvider({
+          requestProvider: c.provider,
+          requestKey: c.apiKey,
+          adminDefaultProvider: "google",
+        }),
+        "cursor",
+      );
+      const st = geminiStatus({
+        requestKey: c.apiKey,
+        requestProvider: c.provider,
+        usedSharedEnvFallback: true,
+        adminDefaultProvider: "google",
+      });
+      assert.equal(st.effectiveProvider, "cursor");
+      assert.equal(st.keySource, "shared");
+    },
+  );
+
+  // Google only → effective google.
+  await withEnv(
+    {
+      DOCX_FORM_BYOK_ONLY: "0",
+      DOCX_FORM_CURSOR_API_KEY: undefined,
+      DOCX_FORM_GEMINI_API_KEY: "AIzaSyGoogleSharedOnlyKey000001",
+      GEMINI_API_KEY: undefined,
+      GOOGLE_API_KEY: undefined,
+      GOOGLE_GENERATIVE_AI_API_KEY: undefined,
+    },
+    async () => {
+      const {
+        coalesceAiCredentialsWithSharedEnv,
+        resolveEffectiveAiProvider,
+        geminiStatus,
+      } = await loadFresh("../src/server/ai-config.ts");
+      const c = coalesceAiCredentialsWithSharedEnv({
+        provider: "google",
+        apiKey: "",
+        fromUserVault: false,
+      });
+      assert.equal(c.provider, "google");
+      assert.equal(
+        resolveEffectiveAiProvider({
+          requestProvider: c.provider,
+          requestKey: c.apiKey,
+          adminDefaultProvider: "google",
+        }),
+        "google",
+      );
+      const st = geminiStatus({
+        requestKey: c.apiKey,
+        requestProvider: c.provider,
+        usedSharedEnvFallback: true,
+        adminDefaultProvider: "google",
+      });
+      assert.equal(st.effectiveProvider, "google");
+      assert.equal(st.keySource, "shared");
+    },
+  );
+
+  // Both → admin default google wins when its env key is usable; Cursor key
+  // must not be treated as a Gemini override (calls use the Google env key).
+  await withEnv(
+    {
+      DOCX_FORM_BYOK_ONLY: "0",
+      DOCX_FORM_CURSOR_API_KEY: "crsr_both_shared_abcdefgh",
+      DOCX_FORM_GEMINI_API_KEY: "AIzaSyGoogleBothSharedKey0000001",
+    },
+    async () => {
+      const {
+        coalesceAiCredentialsWithSharedEnv,
+        resolveEffectiveAiProvider,
+        resolveProviderApiKey,
+        getGeminiApiKey,
+        geminiStatus,
+      } = await loadFresh("../src/server/ai-config.ts");
+      const c = coalesceAiCredentialsWithSharedEnv({
+        provider: "google",
+        apiKey: "",
+        fromUserVault: false,
+      });
+      assert.equal(c.provider, "cursor");
+      assert.equal(getGeminiApiKey(c.apiKey), "AIzaSyGoogleBothSharedKey0000001");
+      assert.equal(
+        resolveEffectiveAiProvider({
+          requestProvider: c.provider,
+          requestKey: c.apiKey,
+          adminDefaultProvider: "google",
+        }),
+        "google",
+      );
+      assert.equal(
+        resolveProviderApiKey("google", c.apiKey),
+        "AIzaSyGoogleBothSharedKey0000001",
+      );
+      const st = geminiStatus({
+        requestKey: c.apiKey,
+        requestProvider: c.provider,
+        usedSharedEnvFallback: true,
+        adminDefaultProvider: "google",
+      });
+      assert.equal(st.effectiveProvider, "google");
+      assert.equal(st.keySource, "shared");
     },
   );
 });

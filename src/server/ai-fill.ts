@@ -6,6 +6,7 @@
 
 import type { FormField } from "./docx-engine";
 import { callCursorAgentJson } from "./ai-cursor-agent";
+import { getCursorApiKey } from "./ai-config";
 import { formatProviderHttpError } from "./ai-http-errors";
 import {
   assertFormAiSupported,
@@ -29,6 +30,7 @@ export type AiFillOpts = {
   apiKey?: string | null;
   model?: string | null;
   fields?: FormField[];
+  signal?: AbortSignal;
 };
 
 const FILL_RULES = `Fill values from Source text. Set skip=true when unknown/empty (bool false is a real value → skip=false).
@@ -330,6 +332,7 @@ async function callOpenAiJson(
     apiKey: string;
     model: string;
     images: { mimeType: string; base64: string; filename: string }[];
+    signal?: AbortSignal;
   },
 ): Promise<Record<string, unknown> | null> {
   const provider = getAiProvider(providerId);
@@ -364,46 +367,59 @@ async function callOpenAiJson(
   body.response_format = { type: "json_object" };
 
   const url = `${provider.baseUrl.replace(/\/$/, "")}/chat/completions`;
-  let res = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
-  if (!res.ok && res.status === 400) {
-    delete body.response_format;
-    res = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
-  }
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(
-      formatProviderHttpError(
-        provider.label,
-        res.status,
-        errText || res.statusText,
-      ),
-    );
-  }
-  const data = (await res.json()) as {
-    choices?: { message?: { content?: string | unknown } }[];
-  };
-  const raw = data.choices?.[0]?.message?.content;
-  const text =
-    typeof raw === "string"
-      ? raw
-      : Array.isArray(raw)
-        ? raw
-            .map((p) =>
-              p && typeof p === "object" && "text" in p
-                ? String((p as { text?: string }).text || "")
-                : "",
-            )
-            .join("")
-        : "";
-  return parseJsonObject(text);
+  const { withAiTimeout } = await import("./ai-request");
+  return withAiTimeout(
+    async (signal) => {
+      let res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal,
+      });
+      if (!res.ok && res.status === 400) {
+        delete body.response_format;
+        res = await fetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal,
+        });
+      }
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw new Error(
+          formatProviderHttpError(
+            provider.label,
+            res.status,
+            errText || res.statusText,
+          ),
+        );
+      }
+      const data = (await res.json()) as {
+        choices?: { message?: { content?: string | unknown } }[];
+      };
+      const raw = data.choices?.[0]?.message?.content;
+      const text =
+        typeof raw === "string"
+          ? raw
+          : Array.isArray(raw)
+            ? raw
+                .map((p) =>
+                  p && typeof p === "object" && "text" in p
+                    ? String((p as { text?: string }).text || "")
+                    : "",
+                )
+                .join("")
+            : "";
+      return parseJsonObject(text);
+    },
+    {
+      signal: opts.signal,
+      route: "ai-fill.openai",
+      provider: providerId,
+      model: opts.model,
+    },
+  );
 }
 
 async function callAnthropicJson(
@@ -412,6 +428,7 @@ async function callAnthropicJson(
     apiKey: string;
     model: string;
     images: { mimeType: string; base64: string; filename: string }[];
+    signal?: AbortSignal;
   },
 ): Promise<Record<string, unknown> | null> {
   const content: Array<
@@ -430,38 +447,50 @@ async function callAnthropicJson(
   }
   content.push({ type: "text", text: prompt });
 
-  const res = await fetch(`${getAnthropicApiBase()}/v1/messages`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": opts.apiKey,
-      "anthropic-version": "2023-06-01",
+  const { withAiTimeout } = await import("./ai-request");
+  return withAiTimeout(
+    async (signal) => {
+      const res = await fetch(`${getAnthropicApiBase()}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": opts.apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: opts.model,
+          max_tokens: 8192,
+          temperature: 0.1,
+          messages: [{ role: "user", content }],
+        }),
+        signal,
+      });
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw new Error(
+          formatProviderHttpError(
+            "Anthropic",
+            res.status,
+            errText || res.statusText,
+          ),
+        );
+      }
+      const data = (await res.json()) as {
+        content?: { type?: string; text?: string }[];
+      };
+      const text = (data.content || [])
+        .filter((c) => c.type === "text")
+        .map((c) => c.text || "")
+        .join("");
+      return parseJsonObject(text);
     },
-    body: JSON.stringify({
+    {
+      signal: opts.signal,
+      route: "ai-fill.anthropic",
+      provider: "anthropic",
       model: opts.model,
-      max_tokens: 8192,
-      temperature: 0.1,
-      messages: [{ role: "user", content }],
-    }),
-  });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(
-      formatProviderHttpError(
-        "Anthropic",
-        res.status,
-        errText || res.statusText,
-      ),
-    );
-  }
-  const data = (await res.json()) as {
-    content?: { type?: string; text?: string }[];
-  };
-  const text = (data.content || [])
-    .filter((c) => c.type === "text")
-    .map((c) => c.text || "")
-    .join("");
-  return parseJsonObject(text);
+    },
+  );
 }
 
 type CompatApiFamily = "openai" | "anthropic" | "cursor";
@@ -474,12 +503,15 @@ async function callCompatJson(
     apiKey: string;
     model: string;
     images: { mimeType: string; base64: string; filename: string }[];
+    signal?: AbortSignal;
   },
 ): Promise<Record<string, unknown> | null> {
   if (apiFamily === "cursor") {
     return callCursorAgentJson(prompt, {
       apiKey: opts.apiKey,
       model: opts.model,
+      signal: opts.signal,
+      route: "ai-fill.cursor",
       images: opts.images.map((img) => ({
         mimeType: img.mimeType,
         base64: img.base64,
@@ -492,12 +524,22 @@ async function callCompatJson(
   return callOpenAiJson(providerId, prompt, opts);
 }
 
+function resolveCompatApiKey(
+  apiFamily: CompatApiFamily,
+  override?: string | null,
+): string {
+  if (apiFamily === "cursor") {
+    return getCursorApiKey(override) || "";
+  }
+  return String(override || "").trim();
+}
+
 async function fillViaCompat(
   skeleton: DocxFormValuesJson,
   sourceFiles: AiSourceFile[],
   opts: AiFillOpts & { providerId: string; apiFamily: CompatApiFamily },
 ): Promise<DocxFormValuesJson> {
-  const apiKey = String(opts.apiKey || "").trim();
+  const apiKey = resolveCompatApiKey(opts.apiFamily, opts.apiKey);
   if (!apiKey) throw new Error("ยังไม่ได้ใส่ API key");
   const model = String(opts.model || "").trim();
   if (!model) throw new Error("ยังไม่ได้เลือกโมเดล");
@@ -513,6 +555,7 @@ async function fillViaCompat(
     apiKey,
     model,
     images,
+    signal: opts.signal,
   });
   return mergeAiIntoValuesJson(skeleton, parsed);
 }
@@ -531,7 +574,7 @@ async function fillBatchViaCompat(
     });
     return [{ id: only.id, filename: only.filename, valuesJson }];
   }
-  const apiKey = String(opts.apiKey || "").trim();
+  const apiKey = resolveCompatApiKey(opts.apiFamily, opts.apiKey);
   const model = String(opts.model || "").trim();
   if (!apiKey) throw new Error("ยังไม่ได้ใส่ API key");
   if (!model) throw new Error("ยังไม่ได้เลือกโมเดล");
@@ -543,6 +586,7 @@ async function fillBatchViaCompat(
     apiKey,
     model,
     images,
+    signal: opts.signal,
   });
 
   const out: BatchFillResultItem[] = [];
@@ -587,6 +631,7 @@ export async function fillDocxFormValues(
       apiKey: opts?.apiKey,
       model: opts?.model,
       fields: opts?.fields,
+      signal: opts?.signal,
     });
   }
   if (
@@ -614,6 +659,7 @@ export async function fillDocxFormValuesBatch(
     return geminiFillDocxFormValuesBatch(items, sourceFiles, {
       apiKey: opts?.apiKey,
       model: opts?.model,
+      signal: opts?.signal,
     });
   }
   if (

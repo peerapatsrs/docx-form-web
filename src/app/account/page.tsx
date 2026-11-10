@@ -7,6 +7,7 @@ import { getAuthenticatorName } from "@better-auth/passkey";
 import { PasskeyMark } from "@/components/AuthIcons";
 import { BrandLockup } from "@/components/BrandLogo";
 import { ProfileAvatar } from "@/components/ProfileAvatar";
+import { AiKeysSection } from "@/components/AiKeysSection";
 
 type PasskeyRow = {
   id: string;
@@ -421,6 +422,8 @@ export default function AccountPage() {
             </button>
           </form>
         </section>
+
+        <AiKeysSection />
 
         <section className="account-panel">
           <h2 className="auth-section-title">แผน & โควตา</h2>

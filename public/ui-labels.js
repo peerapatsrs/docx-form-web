@@ -96,9 +96,10 @@ export const UI_LABELS = Object.freeze({
   homeAboutBody:
     "เว็บแอปสร้างเอกสารจากเทมเพลต Microsoft Word (.docx) อ่านตัวแปรแล้วสร้างฟอร์มให้กรอก รองรับดราฟ นำเข้า/ส่งออก JSON และ AI แมปจากไฟล์ต้นทาง",
   dropzoneDrag: "ลากไฟล์ .docx มาวางที่นี่",
-  dropzoneOrPick: "หรือเลือกไฟล์ · ฟรีสูงสุด 2 ไฟล์ต่อครั้ง",
+  // Fallback only — live copy uses getMaxMultiTemplates() / planQuotaLabel() (F02).
+  dropzoneOrPick: "หรือเลือกไฟล์ · สูงสุดตามโควตาแผนของคุณ",
   dropzonePick: "เลือกไฟล์",
-  dropzoneFreeLimit: "ฟรีสูงสุด 2 ไฟล์ต่อครั้ง",
+  dropzoneFreeLimit: "สูงสุดตามโควตาแผนของคุณ",
   dropzoneAriaUploadWord: "อัปโหลดไฟล์ Word",
   dropzoneAriaUploadTemplates: "อัปโหลดไฟล์เทมเพลต Word",
   showFullContentLabel: "แสดงรายละเอียดเนื้อหาในไฟล์ทั้งหมด",
@@ -113,6 +114,37 @@ export const UI_LABELS = Object.freeze({
   loadDraftDialogBody:
     "เลือกดราฟที่บันทึกไว้ในเบราว์เซอร์นี้ (คงอยู่ข้ามวัน)",
   dialogClose: "ปิด",
+  dialogCancel: "ยกเลิก",
+  dialogSave: "บันทึก",
+  dialogDelete: "ลบ",
+  dialogLoad: "โหลด",
+
+  // Named drafts (IndexedDB)
+  draftFallbackTitle: "ดราฟ",
+  draftUntitled: "ไม่มีชื่อ",
+  draftSaveNoTemplate: "ยังไม่มีเทมเพลตให้บันทึกดราฟ",
+  draftSaveDialogTitle: "บันทึกดราฟ",
+  draftSaveDialogBody:
+    "ตั้งชื่อดราฟเพื่อโหลดกลับภายหลัง (ข้ามวัน / สลับงานได้) — เก็บในเบราว์เซอร์นี้ผ่าน IndexedDB",
+  draftSaveNameLabel: "ชื่อดราฟ (ไม่บังคับ)",
+  draftSaveSuccess: (title) => `บันทึกดราฟแล้ว: ${title}`,
+  draftSaveFailed: "บันทึกดราฟไม่สำเร็จ",
+  draftMismatchTitle: "เทมเพลตต่างจากดราฟ",
+  draftMismatchUnknownFile: "ไม่ทราบไฟล์",
+  draftMismatchNoFile: "ยังไม่มีไฟล์",
+  draftMismatchBody: (draftFile, currentFile) =>
+    `ดราฟนี้มาจาก «${draftFile}» แต่ตอนนี้เปิด «${currentFile}» อยู่ — โหลดจะแทนที่ฟอร์มและไฟล์ปัจจุบันทั้งหมด`,
+  draftMismatchConfirm: "โหลดแทนที่",
+  draftNotFound: "ไม่พบดราฟที่เลือก",
+  draftLoadIncomplete: "โหลดดราฟไม่สำเร็จ — ข้อมูลไม่ครบ",
+  draftLoadSuccess: (title) => `โหลดดราฟแล้ว: ${title}`,
+  draftLoadFailed: "โหลดดราฟไม่สำเร็จ",
+  draftListEmpty:
+    "ยังไม่มีดราฟที่บันทึกไว้ — กด «บันทึกดราฟ» ตอนกรอกฟอร์ม",
+  draftDeleteTitle: "ลบดราฟนี้?",
+  draftDeleteBody: "ลบแล้วกู้คืนไม่ได้ — ดราฟอื่นยังอยู่ครบ",
+  draftDeleteSuccess: "ลบดราฟแล้ว",
+  draftDeleteFailed: "ลบดราฟไม่สำเร็จ",
   tipKindText: "ข้อความ",
   tipKindBool: "ติ๊ก",
   tipKindAuto: "รันเลข",

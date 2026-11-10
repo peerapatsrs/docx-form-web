@@ -558,6 +558,7 @@ async function callGeminiJson(
     model?: string | null;
     /** Original source files — preferred over plain-text corpus. */
     sourceFiles?: GeminiSourceFile[];
+    signal?: AbortSignal;
   },
 ): Promise<Record<string, unknown> | null> {
   const apiKey = getGeminiApiKey(opts?.apiKey);
@@ -579,36 +580,50 @@ async function callGeminiJson(
     },
   });
 
-  async function callOnce(): Promise<Response> {
-    return fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: requestBody,
-    });
-  }
+  const { withAiTimeout, isAiTimeoutError } = await import("./ai-request");
+  return withAiTimeout(
+    async (signal) => {
+      async function callOnce(): Promise<Response> {
+        try {
+          return await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: requestBody,
+            signal,
+          });
+        } catch (err) {
+          if (isAiTimeoutError(err) || signal.aborted) throw err;
+          throw new Error(formatGeminiNetworkError(err));
+        }
+      }
 
-  let res: Response;
-  try {
-    res = await callOnce();
-    if (res.status === 503) {
-      await sleep(700);
-      res = await callOnce();
-    }
-  } catch (err) {
-    throw new Error(formatGeminiNetworkError(err));
-  }
+      let res = await callOnce();
+      if (res.status === 503) {
+        await sleep(700);
+        res = await callOnce();
+      }
 
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(formatGeminiHttpError(res.status, errText));
-  }
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw new Error(formatGeminiHttpError(res.status, errText));
+      }
 
-  const data = (await res.json()) as {
-    candidates?: { content?: { parts?: { text?: string }[] } }[];
-  };
-  const text =
-    data.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "";
-  return parseJsonObject(text);
+      const data = (await res.json()) as {
+        candidates?: { content?: { parts?: { text?: string }[] } }[];
+      };
+      const text =
+        data.candidates?.[0]?.content?.parts
+          ?.map((p) => p.text || "")
+          .join("") || "";
+      return parseJsonObject(text);
+    },
+    {
+      signal: opts?.signal,
+      route: "gemini.generateContent",
+      provider: "google",
+      model,
+    },
+  );
 }
 
 function mergeHits(into: GeminiHit[], more: GeminiHit[]): void {
@@ -825,6 +840,7 @@ export async function geminiFillDocxFormValues(
     model?: string | null;
     /** Full FormField[] — adds compact bool/list hints without a second AI round. */
     fields?: FormField[];
+    signal?: AbortSignal;
   },
 ): Promise<DocxFormValuesJson> {
   if (!sourceFiles.length) {
@@ -854,6 +870,7 @@ SOURCE FILES are attached after this message.`;
     apiKey: opts?.apiKey,
     model: opts?.model,
     sourceFiles,
+    signal: opts?.signal,
   });
   return mergeAiIntoValuesJson(skeleton, parsed);
 }
@@ -942,7 +959,7 @@ function pickFilledRawForItem(
 export async function geminiFillDocxFormValuesBatch(
   items: BatchFillItem[],
   sourceFiles: GeminiSourceFile[],
-  opts?: { apiKey?: string | null; model?: string | null },
+  opts?: { apiKey?: string | null; model?: string | null; signal?: AbortSignal },
 ): Promise<BatchFillResultItem[]> {
   if (!items.length) return [];
   if (items.length === 1) {
@@ -951,6 +968,7 @@ export async function geminiFillDocxFormValuesBatch(
       apiKey: opts?.apiKey,
       model: opts?.model,
       fields: only.fields,
+      signal: opts?.signal,
     });
     return [{ id: only.id, filename: only.filename, valuesJson }];
   }
@@ -993,6 +1011,7 @@ SOURCE FILES are attached after this message.`;
     apiKey: opts?.apiKey,
     model: opts?.model,
     sourceFiles,
+    signal: opts?.signal,
   });
 
   const out: BatchFillResultItem[] = [];
@@ -1018,6 +1037,7 @@ SOURCE FILES are attached after this message.`;
       apiKey: opts?.apiKey,
       model: opts?.model,
       fields: item.fields,
+      signal: opts?.signal,
     });
     out.push({ id: item.id, filename: item.filename, valuesJson });
   }

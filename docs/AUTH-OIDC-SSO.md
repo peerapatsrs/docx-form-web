@@ -53,16 +53,22 @@ Pattern: `https://auth.tps18.space/realms/tps18-{env}` where `{env}` is
 1. **Public pages** (home `/`, `/logged-out`, …) render logged-out with an
    **เข้าสู่ระบบ** button. Opening the app does **not** bounce to Keycloak’s
    interactive login.
-2. **Silent SSO** (once per ~5 min via `docx_sso_checked`): middleware sends
-   document navigations without an app session to `/api/auth/oidc/silent`, which
-   starts authorize with `prompt=none` (PKCE/state/nonce). If Keycloak has a
-   session → callback creates the app session and returns to the opened URL.
-   If Keycloak returns `login_required` / `interaction_required` /
-   `consent_required` → stay logged out quietly (no error page). Skipped for
-   APIs, static, health, OIDC routes, and after RP logout (`docx_sso_skip`
-   session cookie until interactive login or a new browser session).
+2. **Silent SSO** (once per browser session via `docx_sso_checked` session
+   cookie): middleware sends **top-level document** navigations without an app
+   session to `/api/auth/oidc/silent`, which starts authorize with `prompt=none`
+   (PKCE/state/nonce). Requires `Sec-Fetch-Dest: document` or
+   `Sec-Fetch-Mode: navigate`; skips RSC (`RSC: 1` / `_rsc`), prefetch
+   (`Next-Router-Prefetch` / `Purpose: prefetch`), and non-HTML `Accept`.
+   If Keycloak has a session → callback creates the app session and returns to
+   the opened URL (path + query). Any silent callback error
+   (`login_required`, `temporarily_unavailable`, token exchange failure, …)
+   → stay logged out quietly on the original page (server log only; no error
+   page). Skipped for APIs, static, health, OIDC routes, and after RP logout
+   (`docx_sso_skip` session cookie until interactive login or a new browser
+   session).
 3. **Protected pages** (`/account`, `/admin`, …) without a session → interactive
-   `/login?next=…` (then Keycloak authorize **without** `prompt=none`).
+   `/login?next=…` preserving path + query (then Keycloak authorize **without**
+   `prompt=none`).
 4. **`/login`** (button or direct) → interactive authorize via
    `/api/auth/oidc/login` (clears `docx_sso_skip`).
 5. Callback validates ID token (JWKS), maps `(issuer, sub)` / email / create

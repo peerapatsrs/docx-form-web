@@ -78,7 +78,105 @@ await check("public vs protected path helpers", async () => {
   assert.equal(shouldSkipSilentSsoPath("/account"), false);
 });
 
-await check("silent check runs once per session window", async () => {
+await check("protected returnTo keeps path + query (open-redirect safe)", async () => {
+  const { safeAppReturnPath } = await load("src/server/oidc-silent.ts");
+  assert.equal(
+    safeAppReturnPath("/account", "?tab=passkeys"),
+    "/account?tab=passkeys",
+  );
+  assert.equal(safeAppReturnPath("/admin/users", "?q=1&x=2"), "/admin/users?q=1&x=2");
+  assert.equal(safeAppReturnPath("/", "?x=1"), "/?x=1");
+  assert.equal(safeAppReturnPath("//evil.com", ""), "/");
+  assert.equal(safeAppReturnPath("/\\evil", "?a=1"), "/");
+  const proxy = readFileSync(join(root, "src/proxy.ts"), "utf8");
+  assert.match(
+    proxy,
+    /safeAppReturnPath\(pathname,\s*search\)/,
+  );
+  // Both silent and protected interactive paths pass search.
+  const matches = proxy.match(/safeAppReturnPath\(pathname,\s*search\)/g) || [];
+  assert.ok(matches.length >= 2, "silent + protected must keep query");
+});
+
+await check("silent only for top-level document navigations", async () => {
+  const { isTopLevelDocumentNavigation, shouldStartSilentSso } = await load(
+    "src/server/oidc-silent.ts",
+  );
+  const top = {
+    accept: "text/html,application/xhtml+xml",
+    secFetchDest: "document",
+    secFetchMode: "navigate",
+    pathname: "/",
+    search: "",
+  };
+  assert.equal(isTopLevelDocumentNavigation(top), true);
+  assert.equal(
+    isTopLevelDocumentNavigation({ ...top, secFetchDest: "", secFetchMode: "navigate" }),
+    true,
+  );
+  assert.equal(
+    isTopLevelDocumentNavigation({ ...top, secFetchDest: "empty", secFetchMode: "cors" }),
+    false,
+  );
+  assert.equal(
+    isTopLevelDocumentNavigation({ ...top, rscHeader: "1" }),
+    false,
+  );
+  assert.equal(
+    isTopLevelDocumentNavigation({ ...top, search: "?_rsc=abc" }),
+    false,
+  );
+  assert.equal(
+    isTopLevelDocumentNavigation({ ...top, nextRouterPrefetch: "1" }),
+    false,
+  );
+  assert.equal(
+    isTopLevelDocumentNavigation({ ...top, purpose: "prefetch" }),
+    false,
+  );
+  assert.equal(
+    isTopLevelDocumentNavigation({
+      ...top,
+      accept: "application/json",
+    }),
+    false,
+  );
+  assert.equal(
+    shouldStartSilentSso({
+      pathname: "/",
+      hasSession: false,
+      ssoChecked: false,
+      ssoSkip: false,
+      oidcEnabled: true,
+      isDocumentNavigation: false,
+    }),
+    false,
+  );
+});
+
+await check("silent check cookie is session-scoped (no Max-Age)", async () => {
+  const {
+    shouldStartSilentSso,
+    oidcSsoCheckedSetCookie,
+    OIDC_SSO_CHECKED_COOKIE,
+  } = await load("src/server/oidc-silent.ts");
+  const set = oidcSsoCheckedSetCookie(false);
+  assert.match(set, new RegExp(`^${OIDC_SSO_CHECKED_COOKIE}=1`));
+  assert.doesNotMatch(set, /Max-Age=/);
+  assert.equal(
+    shouldStartSilentSso({
+      pathname: "/",
+      hasSession: false,
+      ssoChecked: true,
+      ssoSkip: false,
+      oidcEnabled: true,
+      isDocumentNavigation: true,
+    }),
+    false,
+  );
+});
+
+await check("silent check runs once per browser session", async () => {
   const { shouldStartSilentSso } = await load("src/server/oidc-silent.ts");
   const base = {
     pathname: "/",
@@ -132,9 +230,9 @@ await check("silent authorize URL includes prompt=none + PKCE", async () => {
     "src/server/oidc-flow.ts",
   );
   const { getOidcConfig } = await load("src/server/oidc-config.ts");
-  const saved = [];
+  const savedRows = [];
   const result = await buildOidcAuthorizationRedirect({
-    returnTo: "/account",
+    returnTo: "/account?tab=passkeys",
     prompt: "none",
     silent: true,
     config: getOidcConfig(),
@@ -150,12 +248,12 @@ await check("silent authorize URL includes prompt=none + PKCE", async () => {
       ),
     ensureSchema: async () => undefined,
     saveState: async (row) => {
-      saved.push(row);
+      savedRows.push(row);
     },
   });
   assert.equal(result.ok, true);
-  assert.equal(saved[0].silent, true);
-  assert.equal(saved[0].returnTo, "/account");
+  assert.equal(savedRows[0].silent, true);
+  assert.equal(savedRows[0].returnTo, "/account?tab=passkeys");
   const url = new URL(result.url);
   assert.equal(url.searchParams.get("prompt"), "none");
   assert.equal(url.searchParams.get("code_challenge_method"), "S256");
@@ -188,23 +286,52 @@ await check("login_required on silent → quiet returnTo (no /login?error)", asy
   assert.ok(
     result.setCookies.some((c) => c.startsWith("docx_sso_checked=")),
   );
+});
 
-  const interaction = await handleOidcCallback({
-    error: "interaction_required",
-    state: "s2",
-    config: getOidcConfig(),
+await check("any silent IdP/token error → quiet logged out (not error page)", async () => {
+  enableOidc();
+  const { handleOidcCallback } = await load("src/server/oidc-flow.ts");
+  const { getOidcConfig } = await load("src/server/oidc-config.ts");
+  const config = getOidcConfig();
+
+  for (const err of ["temporarily_unavailable", "access_denied", "server_error"]) {
+    const result = await handleOidcCallback({
+      error: err,
+      state: `silent-${err}`,
+      config,
+      consumeState: async () => ({
+        nonce: "n",
+        codeVerifier: "v",
+        returnTo: "/account?tab=passkeys",
+        silent: true,
+      }),
+    });
+    assert.equal(result.redirectTo, "/account?tab=passkeys", err);
+    assert.doesNotMatch(result.redirectTo, /login\?error/);
+  }
+
+  const tokenFail = await handleOidcCallback({
+    code: "bad-code",
+    state: "silent-token",
+    config,
     consumeState: async () => ({
       nonce: "n",
       codeVerifier: "v",
-      returnTo: "/account",
+      returnTo: "/?from=silent",
       silent: true,
     }),
+    fetchFn: async () => {
+      throw new Error("token exchange failed");
+    },
   });
-  assert.equal(interaction.redirectTo, "/account");
-  assert.doesNotMatch(interaction.redirectTo, /login\?error/);
+  assert.equal(tokenFail.redirectTo, "/?from=silent");
+  assert.doesNotMatch(tokenFail.redirectTo, /login\?error/);
+  assert.ok(
+    tokenFail.setCookies.some((c) => c.startsWith("docx_sso_checked=")),
+  );
 });
 
-await check("interactive login_required still shows error page", async () => {
+await check("interactive login errors still show Thai error page + loop guard", async () => {
   enableOidc();
   const { handleOidcCallback } = await load("src/server/oidc-flow.ts");
   const { getOidcConfig } = await load("src/server/oidc-config.ts");
@@ -220,12 +347,27 @@ await check("interactive login_required still shows error page", async () => {
     }),
   });
   assert.match(result.redirectTo, /\/login\?error=oidc_login_required/);
+  assert.ok(result.setCookies.some((c) => c.includes("docx_oidc_fail")));
+
+  const denied = await handleOidcCallback({
+    error: "access_denied",
+    state: "interactive-denied",
+    config: getOidcConfig(),
+    consumeState: async () => ({
+      nonce: "n",
+      codeVerifier: "v",
+      returnTo: "/account",
+      silent: false,
+    }),
+  });
+  assert.match(denied.redirectTo, /\/login\?error=oidc_access_denied/);
 });
 
 await check("return-to preserved and open-redirect safe", async () => {
   const { safeOidcReturnTo } = await load("src/server/oidc-identities.ts");
   const base = APP;
   assert.equal(safeOidcReturnTo("/account", "/", base), "/account");
+  assert.equal(safeOidcReturnTo("/account?tab=passkeys", "/", base), "/account?tab=passkeys");
   assert.equal(safeOidcReturnTo("/?x=1", "/", base), "/?x=1");
   assert.equal(safeOidcReturnTo("https://evil.com", "/", base), "/");
   assert.equal(safeOidcReturnTo("//evil.com", "/", base), "/");
@@ -238,8 +380,8 @@ await check("AuthBar / proxy / login wiring for silent + public button", async (
   assert.match(bar, /\/login\?next=/);
   const proxy = readFileSync(join(root, "src/proxy.ts"), "utf8");
   assert.match(proxy, /\/api\/auth\/oidc\/silent/);
+  assert.match(proxy, /isTopLevelDocumentNavigation/);
   assert.match(proxy, /shouldStartSilentSso|isProtectedAppPath/);
-  assert.match(proxy, /isProtectedAppPath/);
   const login = readFileSync(join(root, "src/app/login/page.tsx"), "utf8");
   assert.match(login, /\/api\/auth\/oidc\/login/);
   assert.doesNotMatch(login, /prompt:\s*[\"']none[\"']/);

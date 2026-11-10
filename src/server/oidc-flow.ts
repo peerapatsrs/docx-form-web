@@ -28,7 +28,6 @@ import {
   parseOidcFailCookie,
 } from "./oidc-login-guard";
 import {
-  isSilentOidcError,
   oidcSsoCheckedSetCookie,
   oidcSsoSkipClearCookie,
 } from "./oidc-silent";
@@ -278,19 +277,26 @@ export async function handleOidcCallback(input: {
   const code = String(input.code || "").trim();
   const state = String(input.state || "").trim();
 
-  // Silent SSO: IdP has no session — stay logged out quietly (no error page / loop).
-  if (input.error && !kcStatus && isSilentOidcError(input.error)) {
+  const quietSilentFail = (returnTo: string, error: string) => {
+    console.error("[oidc] silent SSO quiet fail:", error);
+    return {
+      status: 302,
+      redirectTo: safeOidcReturnTo(returnTo, "/"),
+      setCookies: [oidcSsoCheckedSetCookie(secure)],
+      error,
+    };
+  };
+
+  // IdP error: silent (prompt=none) → stay logged out quietly; interactive → Thai error page.
+  if (input.error && !kcStatus) {
     if (state) {
       const pending = await consumeState(state).catch(() => null);
       if (pending?.silent) {
-        return {
-          status: 302,
-          redirectTo: safeOidcReturnTo(pending.returnTo, "/"),
-          setCookies: [oidcSsoCheckedSetCookie(secure)],
-          error: String(input.error),
-        };
+        return quietSilentFail(
+          pending.returnTo,
+          String(input.error).slice(0, 128),
+        );
       }
-      // Interactive authorize that somehow got login_required — show error page.
       return {
         status: 302,
         redirectTo: `/login?error=oidc_${encodeURIComponent(String(input.error).slice(0, 64))}`,
@@ -298,22 +304,8 @@ export async function handleOidcCallback(input: {
         error: String(input.error),
       };
     }
-    // No state: treat as quiet (cannot distinguish); land home with checked cookie.
-    return {
-      status: 302,
-      redirectTo: "/",
-      setCookies: [oidcSsoCheckedSetCookie(secure)],
-      error: String(input.error),
-    };
-  }
-
-  if (input.error && !kcStatus) {
-    return {
-      status: 302,
-      redirectTo: `/login?error=oidc_${encodeURIComponent(String(input.error).slice(0, 64))}`,
-      setCookies: [failBumpCookie()],
-      error: String(input.error),
-    };
+    // No state — cannot tell; land home quietly with checked cookie (no loop).
+    return quietSilentFail("/", String(input.error).slice(0, 128));
   }
 
   // AIA cancelled/error without code: still return to settings with status.
@@ -335,6 +327,12 @@ export async function handleOidcCallback(input: {
   }
 
   if (!code || !state) {
+    if (state) {
+      const pending = await consumeState(state).catch(() => null);
+      if (pending?.silent) {
+        return quietSilentFail(pending.returnTo, "OIDC_MISSING_CODE");
+      }
+    }
     return {
       status: 302,
       redirectTo: "/login?error=oidc_missing_code",
@@ -343,6 +341,7 @@ export async function handleOidcCallback(input: {
     };
   }
 
+  let silentReturnTo: string | null = null;
   try {
     const pending = await consumeState(state);
     if (!pending) {
@@ -352,6 +351,9 @@ export async function handleOidcCallback(input: {
         setCookies: [failBumpCookie()],
         error: "OIDC_STATE_INVALID",
       };
+    }
+    if (pending.silent) {
+      silentReturnTo = pending.returnTo;
     }
 
     const meta = await fetchOidcDiscovery(config.issuer, {
@@ -406,6 +408,9 @@ export async function handleOidcCallback(input: {
     console.error("[oidc] callback failed:", summarizeOidcError(err));
     // Avoid leaking token material even in truncated form.
     void redactTokenForLog;
+    if (silentReturnTo !== null) {
+      return quietSilentFail(silentReturnTo, summarizeOidcError(err));
+    }
     const failCookie = failBumpCookie();
     if (err instanceof OidcEmailUnverifiedError || (err as { code?: string })?.code === "OIDC_EMAIL_UNVERIFIED") {
       return {

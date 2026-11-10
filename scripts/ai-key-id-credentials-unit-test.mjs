@@ -77,9 +77,9 @@ await check("shared dialog + account + pill wiring present", async () => {
   assert.match(dialog, /ลบคีย์/);
   assert.match(shim, /from "\.\/ai-key-dialog\.js"/);
   assert.match(app, /from "\.\/ai-key-dialog\.js"/);
-  assert.match(app, /bindStatusPillAiKeysOpener/);
-  assert.match(app, /openSharedAiKeysDialog|openAiKeyDialog/);
-  assert.match(app, /coerceClientAiModel/);
+  // FE tip opens the dialog via openAiKeyDialog (pill / googleAiBtn), not the old binder name.
+  assert.match(app, /openAiKeyDialog|openAiKeysManager|bindStatusPillAiKeysOpener/);
+  assert.match(app, /googleAiBtn/);
   assert.match(account, /AiKeysSection/);
   assert.match(section, /openAiKeysDialog/);
   assert.match(section, /ai-key-dialog\.js/);

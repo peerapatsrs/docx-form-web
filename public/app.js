@@ -232,7 +232,37 @@ let sourceMapSession = null;
 /** @type {AbortController | null} */
 let sourceMapAbort = null;
 /** @type {{ connected: boolean, maskedKey?: string|null, model?: string, models?: {id:string,label:string}[], defaultModel?: string, studioUrl?: string }} */
-let aiStatus = { connected: false, models: [], defaultModel: "gemini-3.8-flash" };
+let aiStatus = {
+    // Do not treat shared env / server "connected" as the user's own key (F19/F31).
+    connected: !!clientKey || hasVaultRef || hasClientAiCredentials(),
+    maskedKey: entry ? maskAiEntry(entry) : data.maskedKey || null,
+    model,
+    models,
+    defaultModel:
+      data.defaultModel ||
+      coerceClientAiModel(provider, "", models) ||
+      model,
+    studioUrl: data.docsUrl || data.studioUrl || providerDocs(provider),
+    byok: data.byok !== false,
+    provider,
+    effectiveProvider: data.effectiveProvider || provider,
+    effectiveModel: data.effectiveModel || model,
+    providerLabel:
+      data.effectiveProviderLabel ||
+      data.providerLabel ||
+      providerLabel(provider),
+    entryLabel: entry?.label || "",
+    providers: aiProvidersCatalog,
+    keySource,
+    keyId: data.keyId || (hasVaultRef ? entry?.id : null) || null,
+    lastTestStatus: data.lastTestStatus || null,
+    lastTestOk:
+      typeof data.lastTestOk === "boolean" ? data.lastTestOk : null,
+    aiTimeoutMs:
+      Number.isFinite(aiTimeoutMs) && aiTimeoutMs >= 5000
+        ? aiTimeoutMs
+        : 90_000,
+  };
 
 /**
  * Entitlement for multi-template caps (from /api/health).
@@ -2345,9 +2375,15 @@ const CURSOR_STALE_MODELS = new Set([
   "composer-2-fast",
 ]);
 
+function isCrossFamilyCursorModelId(raw) {
+  return /^(gemini|gpt-|o[1-9]|chatgpt|claude|deepseek|grok|mistral|llama|qwen)/i.test(
+    String(raw || "").trim(),
+  );
+}
+
 /**
- * Prefer a model that exists in `models` (live or catalog). Cursor stale ids
- * fall back to Composer 2.5 so draft headers do not hard-fail.
+ * Prefer a model that exists in `models` (live or catalog). Cursor stale /
+ * cross-family ids (gemini leftovers) fall back to Composer 2.5.
  * @param {string} provider
  * @param {string} model
  * @param {{id:string,label?:string}[]=} models
@@ -2367,7 +2403,10 @@ function coerceClientAiModel(provider, model, models) {
         : catalogDef || list[0]?.id || "composer-2.5"
       : catalogDef || list[0]?.id || "";
   const id = String(model || "").trim();
-  if (provider === "cursor" && (!id || CURSOR_STALE_MODELS.has(id))) {
+  if (
+    provider === "cursor" &&
+    (!id || CURSOR_STALE_MODELS.has(id) || isCrossFamilyCursorModelId(id))
+  ) {
     return fallback;
   }
   if (id && ids.size && !ids.has(id)) return fallback || id;
@@ -2377,6 +2416,104 @@ function coerceClientAiModel(provider, model, models) {
 function providerDocs(id) {
   const p = aiProvidersCatalog.find((x) => x.id === id);
   return p?.docsUrl || "https://aistudio.google.com/apikey";
+}
+
+function clientAiTimeoutMs() {
+  const serverMs = Number(aiStatus?.aiTimeoutMs);
+  const base =
+    Number.isFinite(serverMs) && serverMs >= 5000 ? serverMs : 90_000;
+  return base + 15_000;
+}
+
+function formatAiClientError(data, fallback) {
+  const code = String(data?.code || "").trim();
+  const err = String(data?.error || data?.message || "").trim();
+  if (code === "AI_TIMEOUT" || /^AI_TIMEOUT\b/i.test(err)) {
+    return (
+      err ||
+      "AI_TIMEOUT: ผู้ให้บริการ AI ไม่ตอบภายในเวลาที่กำหนด — ลองใหม่หรือเปลี่ยนโมเดล"
+    );
+  }
+  if (err) return err;
+  return fallback || "คำขอ AI ไม่สำเร็จ";
+}
+
+async function pollAiJobResult(jobId, { signal, onProgress, timeoutMs } = {}) {
+  const limit = timeoutMs ?? clientAiTimeoutMs();
+  const deadline = Date.now() + limit;
+  while (true) {
+    if (signal?.aborted) {
+      try {
+        await fetch(`/api/ai/jobs/${encodeURIComponent(jobId)}`, {
+          method: "DELETE",
+          credentials: "include",
+        });
+      } catch {
+        /* ignore */
+      }
+      throw new DOMException("Aborted", "AbortError");
+    }
+    if (Date.now() > deadline) {
+      try {
+        await fetch(`/api/ai/jobs/${encodeURIComponent(jobId)}`, {
+          method: "DELETE",
+          credentials: "include",
+        });
+      } catch {
+        /* ignore */
+      }
+      throw new Error(
+        "AI_TIMEOUT: การรอ AI นานเกินไป — ลองใหม่หรือเปลี่ยนโมเดล",
+      );
+    }
+    const res = await fetch(`/api/ai/jobs/${encodeURIComponent(jobId)}`, {
+      credentials: "include",
+      signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(formatAiClientError(data, "ติดตามงาน AI ไม่สำเร็จ"));
+    }
+    if (onProgress && data.progress) onProgress(data.progress);
+    if (data.status === "done") return data.result ?? data;
+    if (data.status === "error") {
+      throw new Error(formatAiClientError(data, "งาน AI ล้มเหลว"));
+    }
+    if (data.status === "cancelled") {
+      throw new Error(data.error || "ยกเลิกแล้ว");
+    }
+    await sleepMs(1500);
+  }
+}
+
+async function postSuggestTagsAsync(fd, { signal, onProgress, timeoutMs } = {}) {
+  fd.append("async", "1");
+  const res = await fetch("/api/template/suggest-tags?async=1", {
+    method: "POST",
+    body: fd,
+    headers: aiAuthHeaders(),
+    signal,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(formatAiClientError(data, "AI ดราฟตัวแปรไม่สำเร็จ"));
+  }
+  if (data.jobId) {
+    return pollAiJobResult(data.jobId, { signal, onProgress, timeoutMs });
+  }
+  return data;
+}
+
+async function ensureAiProviders() {
+  if (aiProvidersCatalog.length) return aiProvidersCatalog;
+  try {
+    const res = await fetch("/api/ai/providers");
+    const data = await res.json().catch(() => ({}));
+    if (Array.isArray(data.providers)) aiProvidersCatalog = data.providers;
+  } catch {
+    /* ignore */
+  }
+  return aiProvidersCatalog;
 }
 
 async function refreshAiLoginState() {
@@ -2494,36 +2631,68 @@ function applyAiStatus(data) {
   const entry = getActiveAiEntry();
   const clientKey = entry?.apiKey || "";
   const hasVaultRef = !!(entry?.storeOnServer && entry?.id);
-  const clientModel = entry?.model || "";
+  // Prefer the provider the server will actually use (effective), then vault.
   const provider =
-    entry?.provider || data.effectiveProvider || data.provider || "google";
+    data.effectiveProvider ||
+    entry?.provider ||
+    data.provider ||
+    "google";
   if (Array.isArray(data.providers) && data.providers.length) {
     aiProvidersCatalog = data.providers;
   }
+  const models = Array.isArray(data.models)
+    ? data.models
+    : providerModels(provider);
+  // Prefer server effective model so vault leftovers (gemini under Cursor /
+  // shared env key) never win the pill over the model that will actually run.
+  const model = coerceClientAiModel(
+    provider,
+    data.model || entry?.model || data.defaultModel || "",
+    models,
+  );
+  const aiTimeoutMs = Number(data.aiTimeoutMs);
+  const keySource =
+    clientKey || hasVaultRef
+      ? "user"
+      : data.keySource === "user" ||
+          data.keySource === "shared" ||
+          data.keySource === "none"
+        ? data.keySource
+        : data.connected
+          ? "shared"
+          : "none";
   aiStatus = {
-    // Do not treat shared env / server "connected" as the user's own key.
+    // Do not treat shared env / server "connected" as the user's own key (F19/F31).
     connected: !!clientKey || hasVaultRef || hasClientAiCredentials(),
-    maskedKey: entry ? maskAiEntry(entry) : null,
-    model:
-      clientModel ||
-      data.model ||
+    maskedKey: entry ? maskAiEntry(entry) : data.maskedKey || null,
+    model,
+    models,
+    defaultModel:
       data.defaultModel ||
-      "gemini-3.8-flash",
-    models: Array.isArray(data.models)
-      ? data.models
-      : providerModels(provider),
-    defaultModel: data.defaultModel || "gemini-3.8-flash",
+      coerceClientAiModel(provider, "", models) ||
+      model,
     studioUrl: data.docsUrl || data.studioUrl || providerDocs(provider),
     byok: data.byok !== false,
     provider,
     effectiveProvider: data.effectiveProvider || provider,
+    effectiveModel: data.effectiveModel || model,
     providerLabel:
       data.effectiveProviderLabel ||
       data.providerLabel ||
       providerLabel(provider),
     entryLabel: entry?.label || "",
     providers: aiProvidersCatalog,
+    keySource,
+    keyId: data.keyId || (hasVaultRef ? entry?.id : null) || null,
+    lastTestStatus: data.lastTestStatus || null,
+    lastTestOk:
+      typeof data.lastTestOk === "boolean" ? data.lastTestOk : null,
+    aiTimeoutMs:
+      Number.isFinite(aiTimeoutMs) && aiTimeoutMs >= 5000
+        ? aiTimeoutMs
+        : 90_000,
   };
+  updateStatusPillFromAi();
 }
 
 /** @type {AbortController|null} */
@@ -3814,6 +3983,11 @@ async function startTaggerSession(file, errorEl) {
     renderTaggerWorkspace();
   } catch (err) {
     const msg = err instanceof Error ? err.message : "อ่านเอกสารไม่สำเร็จ";
+      if (/AI_TIMEOUT/i.test(msg)) {
+        showBanner(
+          "หมดเวลารอ AI อ่านเอกสาร — ลองใหม่หรือเปลี่ยนโมเดล/ผู้ให้บริการ",
+        );
+      }
     if (errorEl) {
       errorEl.hidden = false;
       errorEl.textContent = msg;

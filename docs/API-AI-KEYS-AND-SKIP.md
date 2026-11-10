@@ -32,8 +32,8 @@ Public-ish snapshot used by the header pill. Same effective provider/model resol
   "lastTestAt": "2026-11-10T12:00:00.000Z",
   "lastTestCode": "AI_KEY_TEST_OK",
   "lastTestMessage": "คีย์ใช้งานได้",
-  "configStore": "server-file",
-  "configStoreLabel": "เก็บบนเซิร์ฟเวอร์",
+  "configStore": "database",
+  "configStoreLabel": "เก็บบนเซิร์ฟเวอร์ (ฐานข้อมูล)",
   "serverEnvCursorKeySource": "set via server",
   "serverEnvGeminiKeySource": null,
   "aiTimeoutMs": 90000,
@@ -47,13 +47,16 @@ Public-ish snapshot used by the header pill. Same effective provider/model resol
 | `keyId` | Present only when `keySource=user` and vault id resolved |
 | `effectiveProvider` / `effectiveModel` | What the server will actually call (same resolver as pill) |
 | `lastTest*` | From vault row when `keySource=user`; otherwise null |
+| `configStore` | `database` (or `browser` when BYOK-only) — **never** a filesystem path |
 | `configStoreLabel` | Human storage label — **never** a filesystem path |
 | `serverEnv*KeySource` | `"set via server"` or null — **never** raw env var names |
-| `upgradeUrl` | F37 deep link; **empty string → Frontend hides** the upgrade CTA (no hardcoded URL) |
+| `upgradeUrl` | F37 deep link string; **`""` → Frontend hides** the upgrade CTA (**no hardcoded URL**; config-driven) |
+
+**Not on `/api/ai/status`:** `uploadLimitText` lives on `GET /api/entitlement` / `GET /api/me` (`premium.uploadLimitText`) — see below.
 
 Admin: `GET /api/admin/ai` returns the same effective fields plus `premiumEnforceLabel` (`บังคับแผนพรีเมียม` / `ไม่บังคับ`). No `configPath`, no env var names.
 
-Admin AI default model / server Gemini key live in Postgres `app_settings` (`ai`, `ai_server`) — **not** `/tmp`. Legacy `config.json` (including under `/tmp`) is read once and migrated into `ai_server` when present.
+Admin AI default model / optional server Gemini key live in Postgres `app_settings` (`ai`, `ai_server`) — **not** under `/tmp`. Legacy `config.json` (including under `/tmp`) is read once and migrated into `ai_server` when present. Vault secrets stay encrypted in the user key table; list/status/audit responses never include plaintext key values.
 
 ---
 
@@ -243,11 +246,12 @@ Shared mapper: `classifyProviderError` in `src/server/ai-http-errors.ts` (one pl
 | `AI_KEY_NOT_FOUND` | 404 | Missing or not owned |
 | `AI_KEY_INVALID_ID` | 400 | Bad id format |
 | `AI_KEY_INVALID_PROVIDER` | 400 | Unknown provider |
-| `AI_KEY_INVALID_VALUE` | 400 | Missing / too-short key |
-| `AI_KEY_MISSING` | 400 | Alias when key body is empty (FE contract) |
+| `AI_KEY_INVALID_VALUE` | 400 | Empty / too-short key (what create/rotate/test emit today) |
 | `AI_KEY_INVALID` | 400 | Provider rejected key (auth) — **save/rotate does not store** |
-| `AI_KEY_UNAUTHORIZED` | 401 | Session missing (keys routes) |
 | `AI_KEY_MISSING_FIELDS` | 400 | Body incomplete (`entry` / `entries`) |
+
+`AI_KEY_MISSING` is **not** emitted by Backend today. Frontend may still map it for
+client-side empty-field checks before the request; treat it as FE-reserved.
 | `AI_KEY_EXISTS` | 400 | Create with existing id |
 | `AI_KEY_CREATED` | — | Audit only |
 | `AI_KEY_REPLACED` | — | Audit only |

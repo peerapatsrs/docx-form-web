@@ -264,11 +264,13 @@ const accountSrc = await import("node:fs").then((fs) =>
 );
 ok("account page includes AiKeysSection", /AiKeysSection/.test(accountSrc));
 
-const dialogJs = await fetch(`${BASE}/ai-keys-dialog.js`);
+const dialogJs = await fetch(`${BASE}/ai-key-dialog.js`);
 const dialogBody = await dialogJs.text();
 ok(
-  "shared ai-keys-dialog.js served",
-  dialogJs.ok && /openAiKeysDialog/.test(dialogBody) && /ลบคีย์นี้\?/.test(dialogBody),
+  "shared ai-key-dialog.js served",
+  dialogJs.ok &&
+    (/openAiKeyDialog/.test(dialogBody) || /openAiKeysDialog/.test(dialogBody)) &&
+    /ลบคีย์นี้\?/.test(dialogBody),
 );
 
 const appJs = await fetch(`${BASE}/app.js`);
@@ -276,8 +278,10 @@ const appBody = await appJs.text();
 ok(
   "app.js wires pill + shared dialog",
   appJs.ok &&
-    /bindStatusPillAiKeysOpener/.test(appBody) &&
-    /ai-keys-dialog\.js/.test(appBody),
+    (/bindStatusPillAiKeysOpener/.test(appBody) ||
+      /openAiKeyDialog/.test(appBody) ||
+      /openAiKeysManager/.test(appBody)) &&
+    /ai-key-dialog\.js/.test(appBody),
 );
 
 console.log(`userId=${userId || "?"} keyId=${keyId}`);

@@ -1,8 +1,8 @@
 # FE ↔ BE AI Key API contract
 
 Assumed by Frontend branch `fe/ux-confusing-2026-11-10`. Aligns with Backend
-`docs/API-AI-KEYS-AND-SKIP.md` on `dev-integration-2026-11-10` @ `27daee6` /
-`fix/ai-key-id-credentials` @ `0cb2060`.
+`docs/API-AI-KEYS-AND-SKIP.md` on `dev-integration-2026-11-10` / `fix/ai-key-id-credentials`
+(code is source of truth).
 
 Session cookie auth; **401** + `AI_KEY_UNAUTHORIZED` when logged out for vault
 routes. Frontend never displays or logs the full secret after save. AI feature
@@ -12,6 +12,19 @@ syncs.
 
 Canonical Backend doc: `docs/API-AI-KEYS-AND-SKIP.md` (Backend branches).  
 DEV one-click login: `docs/FE-DEV-TEST-LOGIN.md` + Backend `docs/DEV-TEST-ACCOUNTS.md`.
+
+## Status / entitlement shapes (config-driven; no hardcoded URLs)
+
+### `GET /api/ai/status` (pill)
+
+Includes `keySource` (`user`|`shared`|`none`) and `upgradeUrl` (string; `""` → hide CTA).
+Also `effectiveProvider` / `effectiveModel` / `lastTest*` / `configStore`=`database`|`browser`.
+Does **not** include `uploadLimitText`.
+
+### `GET /api/entitlement` / `GET /api/me`
+
+`premium.uploadLimitText` (plan-aware Thai quota copy) and `premium.upgradeUrl`
+(same resolver: admin `limits.upgradeUrl` → env `DOCX_FORM_UPGRADE_URL` → `""`).
 
 ## Endpoints (FE uses)
 
@@ -51,14 +64,16 @@ Bodies are `{ "error": "<message>", "code": "<CODE>" }` (and success/info may
 use `message` + `code`). FE maps via `mapAiKeyError` / `mapAiKeySuccess` /
 `mapFillError` in `public/ai-key-client.js` (TH default, EN when locale/`navigator` is English).
 
-**AI key / provider:**  
+**AI key / provider (Backend emits):**  
 `AI_KEY_UNAUTHORIZED`, `AI_KEY_NOT_FOUND`, `AI_KEY_INVALID_ID`,
-`AI_KEY_INVALID_PROVIDER`, `AI_KEY_INVALID_VALUE`, `AI_KEY_MISSING`,
+`AI_KEY_INVALID_PROVIDER`, `AI_KEY_INVALID_VALUE` (empty / too-short key),
 `AI_KEY_INVALID`, `AI_KEY_MISSING_FIELDS`, `AI_KEY_EXISTS`,
 `AI_KEY_PROVIDER_AUTH`, `AI_KEY_PROVIDER_ERROR`, `AI_KEY_TEST_TIMEOUT`,
 `AI_KEY_SERVER_ERROR`, `AI_PROVIDER_AUTH`, `AI_PROVIDER_RATE_LIMIT`,
 `AI_PROVIDER_QUOTA`, `AI_PROVIDER_TIMEOUT`, `AI_PROVIDER_UNAVAILABLE`,
 `AI_PROVIDER_BAD_REQUEST`, `AI_PROVIDER_ERROR`
+
+**FE-reserved (client pre-check; Backend does not emit today):** `AI_KEY_MISSING`
 
 **Success / info (toasts):**  
 `AI_KEY_CREATED`, `AI_KEY_REPLACED`, `AI_KEY_DELETED`, `AI_KEY_USED`,
@@ -101,3 +116,6 @@ Do **not** send `X-Ai-Api-Key` / `X-Gemini-Api-Key` in that case.
 
 - `public/ai-key-client.js` — typed client + mappers (`AI_KEY_TEST_ENABLED = true`)
 - `public/ai-key-dialog.js` — empty / saved / test / replace / delete UI
+  (shim: `public/ai-keys-dialog.js`)
+
+Admin AI settings persist in Postgres `app_settings` (`ai`, `ai_server`), not `/tmp`.

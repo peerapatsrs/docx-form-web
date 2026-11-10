@@ -92,6 +92,42 @@ console.log("fill-skip-unit-test");
   assert.doesNotMatch(xmlEmpty, /\{\{/);
   assert.doesNotMatch(xmlEmpty, /\{\{#/);
   console.log("✓ empty loop table [] → no leftover loop tags");
+
+  // Legacy: FE still pre-transforms skip → "" / [] and may omit skip/rowSkip maps.
+  // Backend must accept those values without requiring the maps.
+  const legacyPreTransformed = {
+    [text.name]: "",
+    [list.name]: [],
+  };
+  const outLegacy = await fillTemplate({
+    template,
+    values: legacyPreTransformed,
+    images: [],
+  });
+  const xmlLegacy = await readDocXml(outLegacy);
+  assert.doesNotMatch(xmlLegacy, /\{\{/);
+  assert.doesNotMatch(xmlLegacy, /\}\}/);
+  console.log("✓ legacy pre-transformed values (no skip maps) → no leftover tags");
+
+  // Preferred: raw values + skip/rowSkip maps (FE now also sends these).
+  const withMaps = toFillValues(
+    parsed.fields,
+    {
+      [text.name]: "ยังมีข้อความ",
+      [list.name]: [{ [list.itemFields[0].name]: "row" }],
+    },
+    { [text.name]: true, [list.name]: true },
+    {},
+  );
+  assert.equal(withMaps[text.name], "");
+  assert.deepEqual(withMaps[list.name], []);
+  const outMaps = await fillTemplate({
+    template,
+    values: withMaps,
+    images: [],
+  });
+  assert.doesNotMatch(await readDocXml(outMaps), /\{\{/);
+  console.log("✓ skip/rowSkip maps path (preferred) → no leftover tags");
 }
 
 {

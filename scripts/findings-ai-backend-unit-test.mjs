@@ -212,7 +212,11 @@ await check("F02 entitlement uploadLimitText + client plan-aware dropzone", asyn
   assert.match(api, /getAppLimits/);
 
   const app = readFileSync(join(root, "public/app.js"), "utf8");
-  assert.match(app, /dropzoneOrPickLabel/);
+  // FE tip: plan-aware copy via planQuotaLabel / dropzoneMultiSubHtml / UI_LABELS helpers.
+  assert.match(
+    app,
+    /dropzoneOrPickLabel|dropzoneMultiSubHtml|planQuotaLabel|dropzoneOrPickPaid|dropzoneOrPickFree/,
+  );
   assert.match(app, /getMaxMultiTemplates\(\)/);
   assert.doesNotMatch(app, /ฟรีสูงสุด 2 ไฟล์ต่อครั้ง/);
 

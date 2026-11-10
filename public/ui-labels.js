@@ -96,9 +96,10 @@ export const UI_LABELS = Object.freeze({
   homeAboutBody:
     "เว็บแอปสร้างเอกสารจากเทมเพลต Microsoft Word (.docx) อ่านตัวแปรแล้วสร้างฟอร์มให้กรอก รองรับดราฟ นำเข้า/ส่งออก JSON และ AI แมปจากไฟล์ต้นทาง",
   dropzoneDrag: "ลากไฟล์ .docx มาวางที่นี่",
-  dropzoneOrPick: "หรือเลือกไฟล์ · ฟรีสูงสุด 2 ไฟล์ต่อครั้ง",
+  // Fallback only — live copy uses getMaxMultiTemplates() / planQuotaLabel() (F02).
+  dropzoneOrPick: "หรือเลือกไฟล์ · สูงสุดตามโควตาแผนของคุณ",
   dropzonePick: "เลือกไฟล์",
-  dropzoneFreeLimit: "ฟรีสูงสุด 2 ไฟล์ต่อครั้ง",
+  dropzoneFreeLimit: "สูงสุดตามโควตาแผนของคุณ",
   dropzoneAriaUploadWord: "อัปโหลดไฟล์ Word",
   dropzoneAriaUploadTemplates: "อัปโหลดไฟล์เทมเพลต Word",
   showFullContentLabel: "แสดงรายละเอียดเนื้อหาในไฟล์ทั้งหมด",

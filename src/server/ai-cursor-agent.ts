@@ -13,8 +13,15 @@ import {
 } from "@cursor/sdk";
 import {
   CURSOR_STALE_MODEL_IDS,
+  getAiProvider,
   resolveCursorModelId,
 } from "./ai-providers";
+import {
+  AiTimeoutError,
+  getAiTimeoutMs,
+  isAiTimeoutError,
+  withAiTimeout,
+} from "./ai-request";
 
 export type CursorAgentImage = {
   mimeType: string;
@@ -25,42 +32,84 @@ export type CallCursorAgentJsonOpts = {
   apiKey: string;
   model: string;
   images?: CursorAgentImage[];
-  /** Optional cancel — no processing-time cap on Cloud Agent waits. */
+  /** Optional cancel — merged with DOCX_FORM_AI_TIMEOUT_MS processing-time cap. */
   signal?: AbortSignal;
+  /** Override DOCX_FORM_AI_TIMEOUT_MS (tests / special routes). */
+  timeoutMs?: number;
+  /** Structured log context (never secrets / doc body). */
+  route?: string;
+  requestId?: string;
 };
 
-/** Live model ids for the API key (empty on failure). */
-export async function listCursorModelIds(apiKey: string): Promise<string[]> {
+/** Live model ids for the API key (empty on failure / timeout). */
+export async function listCursorModelIds(
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
   const key = String(apiKey || "").trim();
   if (!key) return [];
   try {
-    const models = await Cursor.models.list({ apiKey: key });
-    return (models || [])
-      .map((m) => String(m?.id || "").trim())
-      .filter(Boolean);
+    // Catalog list should not burn the full AI timeout — cap at 15s.
+    const listTimeout = Math.min(15_000, getAiTimeoutMs());
+    return await withAiTimeout(
+      async (gated) => {
+        const models = await Cursor.models.list({ apiKey: key });
+        if (gated.aborted) return [];
+        return (models || [])
+          .map((m) => String(m?.id || "").trim())
+          .filter(Boolean);
+      },
+      {
+        signal,
+        timeoutMs: listTimeout,
+        route: "cursor.models.list",
+        provider: "cursor",
+      },
+    );
   } catch {
     return [];
   }
 }
 
+function cursorStaticCatalogIds(): string[] {
+  const provider = getAiProvider("cursor");
+  const ids = (provider?.models || []).map((m) => m.id).filter(Boolean);
+  return ids.length ? ids : ["composer-2.5"];
+}
+
+/** True when id clearly belongs to another provider family (never send to Cursor Agent). */
+export function isCrossFamilyCursorModelId(raw: string | null | undefined): boolean {
+  const id = String(raw || "").trim();
+  if (!id) return false;
+  return /^(gemini|gpt-|o[1-9]|chatgpt|claude|deepseek|grok|mistral|llama|qwen)/i.test(
+    id,
+  );
+}
+
 /**
  * Resolve vault/header model for Agent.create.
- * Stale/gated ids (auto-smart, …) remap immediately; otherwise optionally
- * validate against Cursor.models.list() when a key is present.
+ * Stale/gated/cross-family ids remap via static catalog immediately — never wait
+ * on a hung models.list, and never pass gemini-* through to Agent.prompt.
  */
 export async function resolveCursorModelForCall(
   apiKey: string,
   requested: string | null | undefined,
+  signal?: AbortSignal,
 ): Promise<string> {
   const raw = String(requested || "").trim();
-  if (!raw || CURSOR_STALE_MODEL_IDS.has(raw)) {
-    return resolveCursorModelId(raw, null);
+  const catalog = cursorStaticCatalogIds();
+
+  if (!raw || CURSOR_STALE_MODEL_IDS.has(raw) || isCrossFamilyCursorModelId(raw)) {
+    return resolveCursorModelId(raw, catalog);
   }
-  const available = await listCursorModelIds(apiKey);
-  return resolveCursorModelId(
-    raw,
-    available.length ? available : null,
-  );
+
+  const available = await listCursorModelIds(apiKey, signal);
+  if (available.length) {
+    return resolveCursorModelId(raw, available);
+  }
+  // Live list empty/failed — still bind to static catalog so unknown leftovers
+  // (or flaky catalog) cannot hang Agent.prompt on an invalid model id.
+  return resolveCursorModelId(raw, catalog);
 }
 
 function parseJsonObject(text: string): Record<string, unknown> | null {
@@ -93,9 +142,15 @@ async function waitWithOptionalAbort<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   if (!signal) return promise;
-  if (signal.aborted) throw new Error("CURSOR_AGENT_CANCELLED");
+  if (signal.aborted) {
+    if (isAiTimeoutError(signal.reason)) throw new AiTimeoutError();
+    throw new Error("CURSOR_AGENT_CANCELLED");
+  }
   return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(new Error("CURSOR_AGENT_CANCELLED"));
+    const onAbort = () => {
+      if (isAiTimeoutError(signal.reason)) reject(new AiTimeoutError());
+      else reject(new Error("CURSOR_AGENT_CANCELLED"));
+    };
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then(
       (value) => {
@@ -129,6 +184,13 @@ function haystackFromUnknown(err: unknown): string {
 
 /** Map SDK / cloud failures to short Thai errors for UI banners. */
 export function formatCursorAgentError(err: unknown): Error {
+  if (isAiTimeoutError(err)) {
+    return err instanceof AiTimeoutError
+      ? err
+      : new AiTimeoutError(
+          err instanceof Error ? err.message : String(err || "AI_TIMEOUT"),
+        );
+  }
   if (err instanceof Error && err.message.startsWith("Cursor:")) {
     return err;
   }
@@ -224,8 +286,47 @@ export function formatCursorAgentError(err: unknown): Error {
 }
 
 /**
+ * Local mock modes for CI / VM without a real Cursor key.
+ * DOCX_FORM_CURSOR_AGENT_MOCK=ok|hang|401
+ */
+async function maybeMockCursorAgentJson(
+  signal?: AbortSignal,
+): Promise<Record<string, unknown> | null | undefined> {
+  const mode = String(process.env.DOCX_FORM_CURSOR_AGENT_MOCK || "")
+    .trim()
+    .toLowerCase();
+  if (!mode) return undefined;
+  if (mode === "hang" || mode === "never") {
+    await waitWithOptionalAbort(new Promise<never>(() => {}), signal);
+    return null;
+  }
+  if (mode === "401" || mode === "auth") {
+    throw new AuthenticationError("Invalid API key (mock)", {
+      status: 401,
+      code: "AUTH_INVALID_API_KEY",
+    });
+  }
+  if (mode === "ok" || mode === "success") {
+    return {
+      suggestions: [
+        {
+          name: "ชื่อ",
+          kind: "text",
+          preview: "ชื่อ",
+          reason: "mock",
+        },
+      ],
+      values: { ชื่อ: "ตัวอย่าง" },
+      mock: true,
+    };
+  }
+  return undefined;
+}
+
+/**
  * One-shot cloud no-repo agent → parse assistant text as JSON object.
  * Text-only uses Agent.prompt; images use create + send (vision).
+ * Always bounded by DOCX_FORM_AI_TIMEOUT_MS (default 90s).
  */
 export async function callCursorAgentJson(
   prompt: string,
@@ -234,9 +335,6 @@ export async function callCursorAgentJson(
   const apiKey = String(opts.apiKey || "").trim();
   if (!apiKey) throw new Error("ยังไม่ได้ใส่ API key");
 
-  const model = await resolveCursorModelForCall(apiKey, opts.model);
-  if (!model) throw new Error("ยังไม่ได้เลือกโมเดล");
-
   const message = String(prompt || "").trim();
   if (!message) throw new Error("ไม่มีข้อความให้ส่งไป Cursor Agent");
 
@@ -244,53 +342,75 @@ export async function callCursorAgentJson(
     .filter((img) => img?.base64 && img?.mimeType)
     .slice(0, 12);
 
-  const agentOpts = {
-    apiKey,
-    model: { id: model },
-    cloud: { repos: [] },
-  };
-
   try {
-    let resultText = "";
+    return await withAiTimeout(
+      async (signal) => {
+        const mocked = await maybeMockCursorAgentJson(signal);
+        if (mocked !== undefined) return mocked;
 
-    if (images.length) {
-      const agent = await Agent.create(agentOpts);
-      try {
-        const run = await agent.send({
-          text: message,
-          images: images.map((img) => ({
-            data: img.base64,
-            mimeType: img.mimeType,
-          })),
-        });
-        const waited = await waitWithOptionalAbort(run.wait(), opts.signal);
-        if (waited.status === "error" || waited.status === "cancelled") {
-          const code = waited.error?.code ? ` (${waited.error.code})` : "";
-          const msg = waited.error?.message || waited.status;
-          throw new Error(`${msg}${code}`);
-        }
-        resultText = String(waited.result || "");
-      } finally {
-        try {
-          await agent[Symbol.asyncDispose]();
-        } catch {
-          agent.close();
-        }
-      }
-    } else {
-      const waited = await waitWithOptionalAbort(
-        Agent.prompt(message, agentOpts),
-        opts.signal,
-      );
-      if (waited.status === "error" || waited.status === "cancelled") {
-        const code = waited.error?.code ? ` (${waited.error.code})` : "";
-        const msg = waited.error?.message || waited.status;
-        throw new Error(`${msg}${code}`);
-      }
-      resultText = String(waited.result || "");
-    }
+        const model = await resolveCursorModelForCall(
+          apiKey,
+          opts.model,
+          signal,
+        );
+        if (!model) throw new Error("ยังไม่ได้เลือกโมเดล");
 
-    return parseJsonObject(resultText);
+        const agentOpts = {
+          apiKey,
+          model: { id: model },
+          cloud: { repos: [] as [] },
+        };
+
+        let resultText = "";
+
+        if (images.length) {
+          const agent = await Agent.create(agentOpts);
+          try {
+            const run = await agent.send({
+              text: message,
+              images: images.map((img) => ({
+                data: img.base64,
+                mimeType: img.mimeType,
+              })),
+            });
+            const waited = await waitWithOptionalAbort(run.wait(), signal);
+            if (waited.status === "error" || waited.status === "cancelled") {
+              const code = waited.error?.code ? ` (${waited.error.code})` : "";
+              const msg = waited.error?.message || waited.status;
+              throw new Error(`${msg}${code}`);
+            }
+            resultText = String(waited.result || "");
+          } finally {
+            try {
+              await agent[Symbol.asyncDispose]();
+            } catch {
+              agent.close();
+            }
+          }
+        } else {
+          const waited = await waitWithOptionalAbort(
+            Agent.prompt(message, agentOpts),
+            signal,
+          );
+          if (waited.status === "error" || waited.status === "cancelled") {
+            const code = waited.error?.code ? ` (${waited.error.code})` : "";
+            const msg = waited.error?.message || waited.status;
+            throw new Error(`${msg}${code}`);
+          }
+          resultText = String(waited.result || "");
+        }
+
+        return parseJsonObject(resultText);
+      },
+      {
+        signal: opts.signal,
+        timeoutMs: opts.timeoutMs,
+        route: opts.route || "cursor.agent",
+        provider: "cursor",
+        model: opts.model,
+        requestId: opts.requestId,
+      },
+    );
   } catch (err) {
     throw formatCursorAgentError(err);
   }

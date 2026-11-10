@@ -28,7 +28,9 @@ assert.equal(UI_LABELS.importJson, "นำเข้า JSON");
 assert.equal(UI_LABELS.toolsMenu, "เครื่องมือ");
 assert.equal(UI_LABELS.homeHeadline.startsWith("docx-form"), true);
 assert.equal(UI_LABELS.homeAboutSummary, "เกี่ยวกับ docx-form");
-assert.ok(UI_LABELS.dropzoneOrPick.includes("ฟรีสูงสุด 2"));
+// F02: static label is plan-agnostic; live UI uses getMaxMultiTemplates().
+assert.ok(UI_LABELS.dropzoneOrPick.includes("โควตาแผน") || UI_LABELS.dropzoneOrPick.includes("เลือกไฟล์"));
+assert.ok(!UI_LABELS.dropzoneOrPick.includes("ฟรีสูงสุด 2"));
 assert.equal(UI_LABELS.placeholderExamplePrefix, "เช่น ");
 assert.equal(UI_LABELS.seededRowTip.includes("1 แถว"), true);
 assert.equal(UI_LABELS.skip, "ข้าม");

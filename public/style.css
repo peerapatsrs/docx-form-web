@@ -2473,7 +2473,8 @@ textarea.doc-blank:focus,
   font-size: 0.92rem;
 }
 
-.dialog-input-label {
+.dialog-input-label,
+.dialog-field {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;

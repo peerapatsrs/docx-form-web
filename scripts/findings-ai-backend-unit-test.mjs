@@ -174,7 +174,9 @@ await check("F18 geminiStatus has no configPath / env names; effective model agr
   assert.doesNotMatch(adminPage, /PREMIUM_ENFORCE/);
   assert.doesNotMatch(adminPage, /configPath/);
   assert.match(adminPage, /effectiveModel|โมเดลที่ใช้จริง/);
-  assert.match(adminPage, /set via server/);
+  assert.match(adminPage, /serverKeySources/);
+  assert.match(adminPage, /ไม่ได้ตั้งค่าคีย์เซิร์ฟเวอร์/);
+  assert.doesNotMatch(adminPage, /คีย์ Gemini ของเซิร์ฟเวอร์/);
 });
 
 await check("F31/F19 status exposes keySource user|shared|none + lastTest", async () => {

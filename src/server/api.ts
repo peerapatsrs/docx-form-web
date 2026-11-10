@@ -31,10 +31,8 @@ import {
   getRequestAiProvider,
   getRequestGeminiKey,
   hasRequestAiKey,
-  hasServerFileGeminiKey,
   isByokOnly,
   maskGeminiKey,
-  maskServerFileGeminiKey,
   missingAiCredentialsError,
   requestHasExplicitAiProvider,
   resolveEffectiveAiProvider,
@@ -397,7 +395,8 @@ export function createApi(options: {
   /**
    * Public plan/quota snapshot for the guest shell (no internal diagnostics).
    * Admin limit changes are reflected here for the fill UI.
-   * `version` is package.json only — not author / AI inventory.
+   * `version` is short build commit when known (RENDER_GIT_COMMIT / SOURCE_COMMIT /
+   * GIT_SHA / …), else package.json — not author / AI inventory.
    */
   api.get("/entitlement", async (c) => {
     await ensureAdminSchema().catch(() => undefined);
@@ -612,9 +611,9 @@ export function createApi(options: {
       adminDefaultModel: aiAdmin.defaultModel,
       adminDefaultProvider,
     });
-    const fileKeyPresent = hasServerFileGeminiKey();
     // Strip internals — never leak env var names, filesystem paths, or raw
     // configPath. Human labels only; effective* matches /ai/status pill resolver.
+    // Server keys: status.serverKeySources from the provider catalog (generic).
     const {
       configPath: _dropPath,
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -625,15 +624,6 @@ export function createApi(options: {
       settings: aiAdmin,
       status: {
         ...safeStatus,
-        // File key may show mask; env keys: presence label only.
-        maskedKey: maskServerFileGeminiKey(),
-        hasServerFileGeminiKey: fileKeyPresent,
-        serverEnvCursorKeySource: status.hasServerEnvCursorKey
-          ? "set via server"
-          : null,
-        serverEnvGeminiKeySource: status.hasServerEnvKey
-          ? "set via server"
-          : null,
         effectiveProvider: status.effectiveProvider,
         effectiveProviderLabel: status.effectiveProviderLabel,
         effectiveModel: status.effectiveModel || status.model,
@@ -642,6 +632,8 @@ export function createApi(options: {
         adminDefaultProvider: status.adminDefaultProvider,
         defaultModel: status.defaultModel,
         configStoreLabel: status.configStoreLabel,
+        serverKeySources: status.serverKeySources || [],
+        hasClearableServerKey: Boolean(status.hasClearableServerKey),
         premiumEnforceLabel: status.premiumEnforce
           ? "บังคับแผนพรีเมียม"
           : "ไม่บังคับ",

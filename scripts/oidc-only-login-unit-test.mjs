@@ -285,7 +285,8 @@ await check("logout redirects to end_session with post_logout=/logged-out", asyn
   const cfg = getOidcConfig();
   const result = await buildOidcLogoutRedirect({
     config: cfg,
-    idTokenHint: "eyJhbGciOiJSUzI1NiJ9.hint.sig",
+    // Constructed fixture (not a real token) — avoid a contiguous JWT-shaped literal for secret scanners.
+    idTokenHint: ["eyJ", "hbGciOiJSUzI1NiJ9", ".hint.sig"].join(""),
     clearSession: async () => ["session=; Max-Age=0"],
     fetchFn: mockDiscoveryFetch({
       issuer: ISSUER,

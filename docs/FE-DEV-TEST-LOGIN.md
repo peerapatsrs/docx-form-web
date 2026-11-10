@@ -22,7 +22,7 @@ return **404**. Off by default; never enable on SIT / UAT / PROD.
 ```json
 [
   { "key": "user", "label": "ผู้ใช้ทดสอบ", "role": "user" },
-  { "key": "admin", "label": "แอดมินทดสอบ", "role": "admin" }
+  { "key": "admin", "label": "แอดมินทดสอบ", "role": "superadmin" }
 ]
 ```
 

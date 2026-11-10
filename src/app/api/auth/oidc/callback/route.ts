@@ -21,6 +21,7 @@ export async function GET(request: Request) {
     code: url.searchParams.get("code"),
     state: url.searchParams.get("state"),
     error: url.searchParams.get("error"),
+    kcActionStatus: url.searchParams.get("kc_action_status"),
   });
   const headers = new Headers();
   applyOidcSetCookies(headers, result.setCookies);

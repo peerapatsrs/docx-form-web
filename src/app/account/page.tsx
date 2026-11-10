@@ -38,6 +38,27 @@ type MePayload = {
   session: { id: string; expiresAt: string | Date };
 };
 
+type PasskeyRow = {
+  id: string;
+  label: string;
+  createdAt: string | null;
+};
+
+function passkeyStatusMessage(
+  status: string | null,
+): { kind: "ok" | "error"; text: string } | null {
+  if (status === "success") {
+    return { kind: "ok", text: "จัดการ passkey สำเร็จ" };
+  }
+  if (status === "cancelled") {
+    return { kind: "error", text: "ยกเลิกการจัดการ passkey" };
+  }
+  if (status === "error") {
+    return { kind: "error", text: "จัดการ passkey ไม่สำเร็จ" };
+  }
+  return null;
+}
+
 function isSuperAdmin(role: string): boolean {
   return role
     .split(",")
@@ -76,8 +97,10 @@ export default function AccountPage() {
   const [ok, setOk] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  /** Keycloak account-console URL for passkeys; null when SSO is not configured. */
-  const [passkeyManageUrl, setPasskeyManageUrl] = useState<string | null>(null);
+  const [passkeyAddPath, setPasskeyAddPath] = useState<string | null>(null);
+  const [passkeyListEnabled, setPasskeyListEnabled] = useState(false);
+  const [passkeys, setPasskeys] = useState<PasskeyRow[]>([]);
+  const [passkeysLoading, setPasskeysLoading] = useState(false);
 
   const reload = useCallback(async () => {
     setError("");
@@ -101,13 +124,38 @@ export default function AccountPage() {
 
     const cfgRes = await fetch("/api/auth-config", { credentials: "include" });
     const cfg = (await cfgRes.json().catch(() => ({}))) as {
-      passkeyManageUrl?: string | null;
+      passkeyAddPath?: string | null;
+      passkeyListEnabled?: boolean;
+      oidc?: boolean;
     };
-    setPasskeyManageUrl(
-      typeof cfg.passkeyManageUrl === "string" && cfg.passkeyManageUrl
-        ? cfg.passkeyManageUrl
-        : null,
-    );
+    const addPath =
+      typeof cfg.passkeyAddPath === "string" && cfg.passkeyAddPath
+        ? cfg.passkeyAddPath
+        : null;
+    setPasskeyAddPath(addPath);
+    const listEnabled = Boolean(cfg.passkeyListEnabled);
+    setPasskeyListEnabled(listEnabled);
+
+    if (listEnabled) {
+      setPasskeysLoading(true);
+      try {
+        const listRes = await fetch("/api/auth/oidc/passkey", {
+          credentials: "include",
+        });
+        const listData = (await listRes.json().catch(() => ({}))) as {
+          credentials?: PasskeyRow[];
+        };
+        setPasskeys(
+          listRes.ok && Array.isArray(listData.credentials)
+            ? listData.credentials
+            : [],
+        );
+      } finally {
+        setPasskeysLoading(false);
+      }
+    } else {
+      setPasskeys([]);
+    }
 
     const sess = await authClient.listSessions();
     if (!sess.error && Array.isArray(sess.data)) {
@@ -121,6 +169,18 @@ export default function AccountPage() {
   useEffect(() => {
     void Promise.resolve().then(() => reload());
   }, [reload]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const msg = passkeyStatusMessage(params.get("passkey"));
+    if (!msg) return;
+    if (msg.kind === "ok") setOk(msg.text);
+    else setError(msg.text);
+    params.delete("passkey");
+    const next = `${window.location.pathname}${params.toString() ? `?${params}` : ""}${window.location.hash}`;
+    window.history.replaceState({}, "", next);
+  }, []);
 
   async function saveProfile(e: React.FormEvent) {
     e.preventDefault();
@@ -299,22 +359,57 @@ export default function AccountPage() {
 
         <AiKeysSection />
 
-        <section className="account-panel">
-          <h2 className="auth-section-title">ความปลอดภัย</h2>
+        <section className="account-panel" id="passkeys">
+          <div className="account-panel-head">
+            <h2 className="auth-section-title">จัดการ passkey</h2>
+            {passkeyAddPath ? (
+              <a
+                className="admin-btn admin-btn-primary"
+                href={`${passkeyAddPath}?next=${encodeURIComponent("/account")}`}
+              >
+                เพิ่ม passkey
+              </a>
+            ) : null}
+          </div>
           <p className="auth-hint">
-            Passkey / WebAuthn จัดการที่ Keycloak (IdP กลาง) ไม่ใช่ในแอปนี้
+            Passkey ลงทะเบียนที่ Keycloak ผ่าน SSO (ไม่เก็บในแอปนี้)
           </p>
-          {passkeyManageUrl ? (
-            <a
-              className="admin-btn admin-btn-primary"
-              href={passkeyManageUrl}
-              rel="noopener noreferrer"
-            >
-              จัดการ passkey
-            </a>
-          ) : (
-            <p className="auth-hint">SSO ยังไม่ได้ตั้งค่า — ไม่สามารถจัดการ passkey ได้</p>
-          )}
+          {!passkeyAddPath ? (
+            <p className="auth-hint">
+              SSO ยังไม่ได้ตั้งค่า — ไม่สามารถจัดการ passkey ได้
+            </p>
+          ) : null}
+          {passkeyAddPath && passkeyListEnabled ? (
+            passkeysLoading ? (
+              <p className="auth-hint">กำลังโหลด passkey…</p>
+            ) : passkeys.length === 0 ? (
+              <p className="auth-hint">ยังไม่มี passkey</p>
+            ) : (
+              <ul className="account-row-list">
+                {passkeys.map((pk) => (
+                  <li key={pk.id} className="account-row-item">
+                    <div className="account-row-meta">
+                      <strong>{pk.label || "Passkey"}</strong>
+                      <span className="auth-bar-muted">
+                        สร้างเมื่อ {fmtDate(pk.createdAt)}
+                      </span>
+                    </div>
+                    <a
+                      className="auth-bar-btn auth-bar-ghost"
+                      href={`/api/auth/oidc/passkey/remove?credentialId=${encodeURIComponent(pk.id)}&next=${encodeURIComponent("/account")}`}
+                    >
+                      ลบ
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            )
+          ) : passkeyAddPath ? (
+            <p className="auth-hint">
+              รายการ passkey จะแสดงเมื่อตั้งค่า OIDC_ADMIN_CLIENT_ID /
+              OIDC_ADMIN_CLIENT_SECRET
+            </p>
+          ) : null}
         </section>
 
         <section className="account-panel">

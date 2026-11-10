@@ -83,29 +83,21 @@ export function logOidcNotConfigured(context: string): void {
   );
 }
 
-const DEFAULT_PASSKEY_MANAGE_PATH = "/account/#/account-security/signing-in";
-
 /**
- * Keycloak account-console URL for managing passkeys (WebAuthn lives at the IdP).
- * Prefer optional `OIDC_PASSKEY_MANAGE_URL`; otherwise derive from issuer:
- * `${OIDC_ISSUER}/account/#/account-security/signing-in`.
- * Returns null when OIDC is not configured (or override URL is invalid).
+ * Optional external passkey help/manage URL override.
+ * Account-console defaults were removed (blocked for end users) — passkeys use
+ * Keycloak AIA via `/api/auth/oidc/passkey/*`. Returns null unless explicitly set.
  */
 export function resolveOidcPasskeyManageUrl(
   envSource: NodeJS.ProcessEnv = process.env,
 ): string | null {
   const explicit = String(envSource.OIDC_PASSKEY_MANAGE_URL || "").trim();
-  if (explicit) {
-    try {
-      const u = new URL(explicit);
-      if (u.protocol !== "http:" && u.protocol !== "https:") return null;
-      return u.toString();
-    } catch {
-      return null;
-    }
+  if (!explicit) return null;
+  try {
+    const u = new URL(explicit);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return u.toString();
+  } catch {
+    return null;
   }
-
-  const cfg = getOidcConfig(envSource);
-  if (!cfg) return null;
-  return `${cfg.issuer}${DEFAULT_PASSKEY_MANAGE_PATH}`;
 }

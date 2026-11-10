@@ -317,7 +317,8 @@ await check("AuthBar / account logout go to /api/auth/oidc/logout", async () => 
   assert.doesNotMatch(account, /passkey\.|linkSocial|unlinkAccount/);
   assert.doesNotMatch(account, /listUserPasskeys|addPasskey|deletePasskey/);
   assert.match(account, /จัดการ passkey/);
-  assert.match(account, /passkeyManageUrl/);
+  assert.match(account, /passkeyAddPath/);
+  assert.match(account, /\/api\/auth\/oidc\/passkey\/remove/);
 });
 
 await check("app-hosted passkey routes 404; AuthIcons removed", async () => {
@@ -347,7 +348,8 @@ await check("missing OIDC env does not enable soft social/password fallback", as
     "utf8",
   );
   assert.match(authCfg, /passkey:\s*false/);
-  assert.match(authCfg, /passkeyManageUrl/);
+  assert.match(authCfg, /passkeyAddPath/);
+  assert.match(authCfg, /passkeyListEnabled/);
   assert.match(authCfg, /passwordLogin:\s*false/);
   assert.match(authCfg, /providers:\s*\[\]/);
 });

@@ -108,6 +108,25 @@ export async function findIdentityByIssuerSub(
   return rows[0] ?? null;
 }
 
+/** Look up IdP subject for an app user (own credentials listing). */
+export async function findIdentityByIssuerAndUserId(
+  issuer: string,
+  userId: string,
+  query: QueryFn = defaultQuery(),
+): Promise<IdentityRow | null> {
+  const uid = String(userId || "").trim();
+  if (!uid) return null;
+  const { rows } = await query<IdentityRow>(
+    `SELECT id, issuer, subject, "userId" as "userId", email,
+            "emailVerified" as "emailVerified"
+     FROM identities
+     WHERE issuer = $1 AND "userId" = $2
+     LIMIT 1`,
+    [issuer.replace(/\/$/, ""), uid],
+  );
+  return rows[0] ?? null;
+}
+
 export async function findUserIdByVerifiedEmail(
   email: string,
   query: QueryFn = defaultQuery(),

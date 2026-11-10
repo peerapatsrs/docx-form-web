@@ -54,8 +54,15 @@ export function summarizeOidcError(err: unknown): string {
 
 export async function buildOidcAuthorizationRedirect(input: {
   returnTo?: string | null;
+  /** Keycloak application-initiated action (e.g. webauthn-register-passwordless). */
+  kcAction?: string | null;
+  /** Override scopes (AIA uses `openid` only when set). */
+  scopes?: string[];
   config?: OidcConfig | null;
   fetchDiscovery?: DiscoveryFetch;
+  /** Test seam — defaults to DB-backed saveOidcLoginState. */
+  saveState?: typeof saveOidcLoginState;
+  ensureSchema?: typeof ensureOidcIdentitiesSchema;
 }): Promise<{
   ok: true;
   url: string;
@@ -67,13 +74,18 @@ export async function buildOidcAuthorizationRedirect(input: {
   }
 
   try {
-    await ensureOidcIdentitiesSchema();
+    const ensureSchema = input.ensureSchema ?? ensureOidcIdentitiesSchema;
+    const saveState = input.saveState ?? saveOidcLoginState;
+    await ensureSchema();
     const meta = await fetchOidcDiscovery(config.issuer, {
       fetch: input.fetchDiscovery,
     });
     const secrets = createOidcAuthRequestSecrets();
-    const returnTo = safeOidcReturnTo(input.returnTo, "/");
-    await saveOidcLoginState({
+    const returnTo = safeOidcReturnTo(
+      input.returnTo,
+      input.kcAction ? "/account" : "/",
+    );
+    await saveState({
       state: secrets.state,
       nonce: secrets.nonce,
       codeVerifier: secrets.codeVerifier,
@@ -84,11 +96,20 @@ export async function buildOidcAuthorizationRedirect(input: {
     url.searchParams.set("response_type", "code");
     url.searchParams.set("client_id", config.clientId);
     url.searchParams.set("redirect_uri", config.redirectUri);
-    url.searchParams.set("scope", config.scopes.join(" "));
+    const scopes =
+      input.scopes && input.scopes.length > 0
+        ? input.scopes
+        : config.scopes;
+    url.searchParams.set("scope", scopes.join(" "));
     url.searchParams.set("state", secrets.state);
     url.searchParams.set("nonce", secrets.nonce);
     url.searchParams.set("code_challenge", secrets.codeChallenge);
     url.searchParams.set("code_challenge_method", "S256");
+    const kcAction = String(input.kcAction || "").trim();
+    if (kcAction) {
+      // Keycloak AIA — value may include `delete_credential:<id>`; URLSearchParams encodes safely.
+      url.searchParams.set("kc_action", kcAction);
+    }
 
     return { ok: true, url: url.toString(), state: secrets.state };
   } catch (err) {
@@ -195,18 +216,29 @@ export async function handleOidcCallback(input: {
   code?: string | null;
   state?: string | null;
   error?: string | null;
+  /** Keycloak AIA result: success | cancelled | error. */
+  kcActionStatus?: string | null;
   config?: OidcConfig | null;
   fetchFn?: DiscoveryFetch;
   jwks?: JSONWebKeySet;
   createSession?: typeof createAppSessionCookie;
+  /** Test seam — defaults to DB-backed consumeOidcLoginState. */
+  consumeState?: typeof consumeOidcLoginState;
+  /** Test seam — defaults to resolveUserForOidcClaims. */
+  resolveUser?: typeof resolveUserForOidcClaims;
 }): Promise<{
   status: number;
   redirectTo: string;
   setCookies: string[];
   error?: string;
 }> {
+  const { appendOidcPasskeyStatusParam, normalizeKcActionStatus } =
+    await import("./oidc-passkey");
   const config = input.config === undefined ? getOidcConfig() : input.config;
   const secure = process.env.NODE_ENV === "production";
+  const kcStatus = normalizeKcActionStatus(input.kcActionStatus);
+  const consumeState = input.consumeState ?? consumeOidcLoginState;
+  const resolveUser = input.resolveUser ?? resolveUserForOidcClaims;
   if (!config) {
     return {
       status: 404,
@@ -215,7 +247,7 @@ export async function handleOidcCallback(input: {
       error: "OIDC_DISABLED",
     };
   }
-  if (input.error) {
+  if (input.error && !kcStatus) {
     return {
       status: 302,
       redirectTo: `/login?error=oidc_${encodeURIComponent(String(input.error).slice(0, 64))}`,
@@ -225,6 +257,25 @@ export async function handleOidcCallback(input: {
   }
   const code = String(input.code || "").trim();
   const state = String(input.state || "").trim();
+
+  // AIA cancelled/error without code: still return to settings with status.
+  if (!code && kcStatus && state) {
+    const pending = await consumeState(state).catch(() => null);
+    const base = safeOidcReturnTo(pending?.returnTo, "/account");
+    return {
+      status: 302,
+      redirectTo: appendOidcPasskeyStatusParam(base, kcStatus),
+      setCookies: [],
+    };
+  }
+  if (!code && kcStatus) {
+    return {
+      status: 302,
+      redirectTo: appendOidcPasskeyStatusParam("/account", kcStatus),
+      setCookies: [],
+    };
+  }
+
   if (!code || !state) {
     return {
       status: 302,
@@ -235,7 +286,7 @@ export async function handleOidcCallback(input: {
   }
 
   try {
-    const pending = await consumeOidcLoginState(state);
+    const pending = await consumeState(state);
     if (!pending) {
       return {
         status: 302,
@@ -269,7 +320,7 @@ export async function handleOidcCallback(input: {
       jwks: input.jwks,
     });
 
-    const { userId } = await resolveUserForOidcClaims(claims);
+    const { userId } = await resolveUser(claims);
     const createSession = input.createSession ?? createAppSessionCookie;
     const session = await createSession(userId);
     const setCookies = [
@@ -277,15 +328,31 @@ export async function handleOidcCallback(input: {
       ...buildOidcSideCookies(idToken, secure),
     ];
 
+    let redirectTo = safeOidcReturnTo(pending.returnTo, "/");
+    if (kcStatus) {
+      redirectTo = appendOidcPasskeyStatusParam(
+        safeOidcReturnTo(pending.returnTo, "/account"),
+        kcStatus,
+      );
+    }
+
     return {
       status: 302,
-      redirectTo: safeOidcReturnTo(pending.returnTo, "/"),
+      redirectTo,
       setCookies,
     };
   } catch (err) {
     console.error("[oidc] callback failed:", summarizeOidcError(err));
     // Avoid leaking token material even in truncated form.
     void redactTokenForLog;
+    if (kcStatus) {
+      return {
+        status: 302,
+        redirectTo: appendOidcPasskeyStatusParam("/account", "error"),
+        setCookies: clearOidcSideCookies(secure),
+        error: summarizeOidcError(err),
+      };
+    }
     return {
       status: 302,
       redirectTo: "/login?error=oidc_callback_failed",

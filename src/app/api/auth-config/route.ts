@@ -15,6 +15,7 @@ export async function GET() {
     oidc,
     sso: oidc,
     ssoLoginPath: oidc ? "/api/auth/oidc/login" : null,
+    ssoSilentPath: oidc ? "/api/auth/oidc/silent" : null,
     ssoLogoutPath: oidc ? "/api/auth/oidc/logout" : null,
     /** AIA: register passwordless passkey (session required). */
     passkeyAddPath: oidc ? "/api/auth/oidc/passkey/add" : null,

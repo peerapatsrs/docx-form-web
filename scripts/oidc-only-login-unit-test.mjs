@@ -123,13 +123,17 @@ function memoryDb() {
     if (s.includes("UPDATE identities")) {
       return { rows: [], rowCount: 1 };
     }
+    if (s.includes("ALTER TABLE oidc_login_state")) {
+      return { rows: [], rowCount: 0 };
+    }
     if (s.includes("INSERT INTO oidc_login_state")) {
-      const [state, nonce, codeVerifier, returnTo] = params;
+      const [state, nonce, codeVerifier, returnTo, silent] = params;
       states.set(state, {
         state,
         nonce,
         codeVerifier,
         returnTo,
+        silent: Boolean(silent),
         expiresAt: new Date(Date.now() + 600_000),
       });
       return { rows: [], rowCount: 1 };
@@ -144,6 +148,7 @@ function memoryDb() {
                 nonce: row.nonce,
                 codeVerifier: row.codeVerifier,
                 returnTo: row.returnTo,
+                silent: Boolean(row.silent),
                 expiresAt: row.expiresAt,
               },
             ]
@@ -174,7 +179,7 @@ function mockDiscoveryFetch(meta) {
 
 await check("login page is server OIDC redirect (no chooser / SSO button)", async () => {
   const login = readFileSync(join(root, "src/app/login/page.tsx"), "utf8");
-  assert.match(login, /buildOidcAuthorizationRedirect/);
+  assert.match(login, /\/api\/auth\/oidc\/login/);
   assert.match(login, /SSO not configured/);
   assert.match(login, /LoginErrorPanel|shouldBlockOidcAutoRedirect/);
   assert.doesNotMatch(login, /เข้าด้วย TPS18 SSO/);

@@ -1,7 +1,6 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { getOidcConfig, logOidcNotConfigured } from "@/server/oidc-config";
-import { buildOidcAuthorizationRedirect } from "@/server/oidc-flow";
 import { safeOidcReturnTo } from "@/server/oidc-identities";
 import {
   OIDC_FAIL_COOKIE,
@@ -56,7 +55,8 @@ function LoginErrorPanel(props: {
 }
 
 /**
- * OIDC-only entry: immediately redirect to Keycloak authorize URL.
+ * Interactive OIDC entry (button / protected redirect).
+ * Silent SSO is middleware → /api/auth/oidc/silent (prompt=none).
  * With ?error= (or fail-cookie loop guard) → static error page, never auto-redirect.
  */
 export default async function LoginPage({ searchParams }: LoginPageProps) {
@@ -101,27 +101,8 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
     );
   }
 
-  const result = await buildOidcAuthorizationRedirect({
-    returnTo: next,
-    config,
-  });
-  if (!result.ok) {
-    logOidcNotConfigured(`login-authorize:${result.error}`);
-    return (
-      <main className="auth-page">
-        <div className="auth-card">
-          <div className="auth-brand">
-            <BrandLockup />
-          </div>
-          <h1 className="auth-title">SSO unavailable</h1>
-          <p className="auth-lead" role="alert">
-            Could not start Keycloak login ({result.error}). Check OIDC discovery
-            and client credentials. There is no alternate login.
-          </p>
-        </div>
-      </main>
-    );
-  }
-
-  redirect(result.url);
+  // Interactive authorize via API (clears post-logout silent-skip cookie).
+  redirect(
+    `/api/auth/oidc/login?next=${encodeURIComponent(next)}`,
+  );
 }

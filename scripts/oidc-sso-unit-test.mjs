@@ -176,13 +176,17 @@ function memoryDb() {
       }
       return { rows: [], rowCount: 0 };
     }
+    if (s.includes("ALTER TABLE oidc_login_state")) {
+      return { rows: [], rowCount: 0 };
+    }
     if (s.includes("INSERT INTO oidc_login_state")) {
-      const [state, nonce, codeVerifier, returnTo] = params;
+      const [state, nonce, codeVerifier, returnTo, silent] = params;
       states.set(state, {
         state,
         nonce,
         codeVerifier,
         returnTo,
+        silent: Boolean(silent),
         expiresAt: new Date(Date.now() + 600_000),
       });
       return { rows: [], rowCount: 1 };
@@ -198,6 +202,7 @@ function memoryDb() {
                 nonce: row.nonce,
                 codeVerifier: row.codeVerifier,
                 returnTo: row.returnTo,
+                silent: Boolean(row.silent),
                 expiresAt: row.expiresAt,
               },
             ]

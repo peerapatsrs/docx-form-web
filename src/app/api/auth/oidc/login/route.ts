@@ -6,22 +6,29 @@ import {
 import { getAppBaseUrl } from "@/lib/app-base-url";
 import { logOidcNotConfigured } from "@/server/oidc-config";
 import { safeOidcReturnTo } from "@/server/oidc-identities";
+import { oidcSsoSkipClearCookie } from "@/server/oidc-silent";
 
 export const dynamic = "force-dynamic";
 
-/** Start OIDC authorization-code + PKCE login. Missing env → /login error page. */
+/** Interactive OIDC login (no prompt=none). Clears post-logout silent skip. */
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const returnTo =
     url.searchParams.get("next") || url.searchParams.get("returnTo");
-  const result = await buildOidcAuthorizationRedirect({ returnTo });
+  const result = await buildOidcAuthorizationRedirect({
+    returnTo,
+    silent: false,
+  });
+  const secure = process.env.NODE_ENV === "production";
   if (!result.ok) {
     logOidcNotConfigured(`oidc-login:${result.error}`);
     const login = new URL("/login", getAppBaseUrl());
     login.searchParams.set("next", safeOidcReturnTo(returnTo, "/"));
-    return NextResponse.redirect(login, 302);
+    const headers = new Headers();
+    applyOidcSetCookies(headers, [oidcSsoSkipClearCookie(secure)]);
+    return NextResponse.redirect(login, { status: 302, headers });
   }
   const headers = new Headers();
-  applyOidcSetCookies(headers, []);
+  applyOidcSetCookies(headers, [oidcSsoSkipClearCookie(secure)]);
   return NextResponse.redirect(result.url, { status: 302, headers });
 }

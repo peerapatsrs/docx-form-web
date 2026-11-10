@@ -9,6 +9,23 @@ import {
   buildSafeHttpsRedirectUrl,
   safeAppPathUrl,
 } from "@/lib/public-origin";
+import { isOidcEnabled } from "@/server/oidc-config";
+import {
+  isProtectedAppPath,
+  OIDC_SSO_CHECKED_COOKIE,
+  OIDC_SSO_SKIP_COOKIE,
+  shouldStartSilentSso,
+} from "@/server/oidc-silent";
+
+/** Edge-safe same-origin path only (no pg / Node DB imports). */
+function safeReturnPath(pathname: string, search = ""): string {
+  const raw = `${pathname}${search}`;
+  if (!raw.startsWith("/") || raw.startsWith("//") || raw.includes("\\")) {
+    return "/";
+  }
+  if (raw.length > 1 && (raw[1] === "/" || raw[1] === "\\")) return "/";
+  return raw.split("#")[0] || "/";
+}
 
 function applySecurityHeaders(response: NextResponse): NextResponse {
   const headers = securityHeaders();
@@ -60,8 +77,9 @@ function maybeRedirectToHttps(request: NextRequest): NextResponse | null {
 }
 
 /**
- * Network boundary: HTTPS redirect, security headers, auth gates.
- * Unauthenticated /account|/admin → /login?next=… (OIDC-only login).
+ * Network boundary: HTTPS redirect, security headers, auth gates, silent SSO.
+ * Public pages render logged-out; protected pages → interactive /login.
+ * Silent SSO (prompt=none) runs at most once per check window when no session.
  */
 export function proxy(request: NextRequest) {
   const httpsRedirect = maybeRedirectToHttps(request);
@@ -79,26 +97,43 @@ export function proxy(request: NextRequest) {
     return applySecurityHeaders(new NextResponse(null, { status: 404 }));
   }
 
-  const needsAuth =
-    pathname === "/account" ||
-    pathname.startsWith("/account/") ||
-    pathname === "/admin" ||
-    pathname.startsWith("/admin/");
+  const sessionToken = getSessionCookie(request);
+  const hasSession = Boolean(sessionToken);
+  const documentNav = isDocumentNavigation(request);
 
-  if (needsAuth) {
-    const token = getSessionCookie(request);
-    if (!token) {
-      const login = new URL(safeAppPathUrl("/login"));
-      login.searchParams.set("next", pathname);
-      const redirect = applySecurityHeaders(NextResponse.redirect(login, 307));
+  // Silent SSO once per check window (public or protected document navigations).
+  if (
+    shouldStartSilentSso({
+      pathname,
+      hasSession,
+      ssoChecked: Boolean(request.cookies.get(OIDC_SSO_CHECKED_COOKIE)?.value),
+      ssoSkip: Boolean(request.cookies.get(OIDC_SSO_SKIP_COOKIE)?.value),
+      oidcEnabled: isOidcEnabled(),
+      isDocumentNavigation: documentNav,
+    })
+  ) {
+    const returnTo = safeReturnPath(pathname, request.nextUrl.search);
+    const silent = new URL(safeAppPathUrl("/api/auth/oidc/silent"));
+    silent.searchParams.set("next", returnTo);
+    const redirect = applySecurityHeaders(NextResponse.redirect(silent, 307));
+    if (documentNav) {
       redirect.headers.set("Cache-Control", documentCacheControl(pathname));
-      return redirect;
     }
+    return redirect;
+  }
+
+  // Protected pages only — interactive login (not silent).
+  if (isProtectedAppPath(pathname) && !hasSession) {
+    const login = new URL(safeAppPathUrl("/login"));
+    login.searchParams.set("next", safeReturnPath(pathname));
+    const redirect = applySecurityHeaders(NextResponse.redirect(login, 307));
+    redirect.headers.set("Cache-Control", documentCacheControl(pathname));
+    return redirect;
   }
 
   const response = NextResponse.next();
   applySecurityHeaders(response);
-  if (isDocumentNavigation(request)) {
+  if (documentNav) {
     response.headers.set("Cache-Control", documentCacheControl(pathname));
   }
   return response;

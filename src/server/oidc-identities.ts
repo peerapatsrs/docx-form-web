@@ -74,9 +74,15 @@ export function ensureOidcIdentitiesSchema(
           nonce text NOT NULL,
           "codeVerifier" text NOT NULL,
           "returnTo" text NOT NULL DEFAULT '/',
+          silent boolean NOT NULL DEFAULT false,
           "expiresAt" timestamptz NOT NULL,
           "createdAt" timestamptz NOT NULL DEFAULT NOW()
         )
+      `);
+      // Additive — existing deployments created the table before `silent` existed.
+      await q(`
+        ALTER TABLE oidc_login_state
+          ADD COLUMN IF NOT EXISTS silent boolean NOT NULL DEFAULT false
       `);
       await q(`
         CREATE INDEX IF NOT EXISTS oidc_login_state_expires_idx
@@ -407,25 +413,30 @@ export async function saveOidcLoginState(input: {
   nonce: string;
   codeVerifier: string;
   returnTo: string;
+  /** prompt=none silent SSO — quiet fail on login_required. */
+  silent?: boolean;
   ttlSec?: number;
   query?: QueryFn;
 }): Promise<void> {
   const query = input.query ?? defaultQuery();
   await ensureOidcIdentitiesSchema(query);
   const ttl = input.ttlSec ?? 600;
+  const silent = Boolean(input.silent);
   await query(
-    `INSERT INTO oidc_login_state (state, nonce, "codeVerifier", "returnTo", "expiresAt")
-     VALUES ($1, $2, $3, $4, NOW() + make_interval(secs => $5::int))
+    `INSERT INTO oidc_login_state (state, nonce, "codeVerifier", "returnTo", silent, "expiresAt")
+     VALUES ($1, $2, $3, $4, $5, NOW() + make_interval(secs => $6::int))
      ON CONFLICT (state) DO UPDATE SET
        nonce = EXCLUDED.nonce,
        "codeVerifier" = EXCLUDED."codeVerifier",
        "returnTo" = EXCLUDED."returnTo",
+       silent = EXCLUDED.silent,
        "expiresAt" = EXCLUDED."expiresAt"`,
     [
       input.state,
       input.nonce,
       input.codeVerifier,
       input.returnTo,
+      silent,
       ttl,
     ],
   );
@@ -438,17 +449,20 @@ export async function consumeOidcLoginState(
   nonce: string;
   codeVerifier: string;
   returnTo: string;
+  silent: boolean;
 } | null> {
   await ensureOidcIdentitiesSchema(query);
   const { rows } = await query<{
     nonce: string;
     codeVerifier: string;
     returnTo: string;
+    silent: boolean;
     expiresAt: Date;
   }>(
     `DELETE FROM oidc_login_state
      WHERE state = $1
-     RETURNING nonce, "codeVerifier" as "codeVerifier", "returnTo" as "returnTo", "expiresAt" as "expiresAt"`,
+     RETURNING nonce, "codeVerifier" as "codeVerifier", "returnTo" as "returnTo",
+               silent, "expiresAt" as "expiresAt"`,
     [state],
   );
   const row = rows[0];
@@ -458,6 +472,7 @@ export async function consumeOidcLoginState(
     nonce: row.nonce,
     codeVerifier: row.codeVerifier,
     returnTo: row.returnTo || "/",
+    silent: Boolean(row.silent),
   };
 }
 

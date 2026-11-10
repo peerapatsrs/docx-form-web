@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { authClient } from "@/lib/auth-client";
 import { ProfileAvatar } from "@/components/ProfileAvatar";
@@ -41,8 +42,12 @@ function planBadgeLabel(user: SessionUser | null): string {
 const SSO_LOGOUT_PATH = "/api/auth/oidc/logout";
 
 export function AuthBar() {
+  const pathname = usePathname() || "/";
   const [user, setUser] = useState<SessionUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const loginHref = `/login?next=${encodeURIComponent(
+    pathname.startsWith("/") && !pathname.startsWith("//") ? pathname : "/",
+  )}`;
 
   useEffect(() => {
     let cancelled = false;
@@ -67,7 +72,7 @@ export function AuthBar() {
   if (!user) {
     return (
       <div className="auth-bar">
-        <Link className="auth-bar-btn auth-bar-primary" href="/login?next=/account">
+        <Link className="auth-bar-btn auth-bar-primary" href={loginHref}>
           เข้าสู่ระบบ
         </Link>
       </div>

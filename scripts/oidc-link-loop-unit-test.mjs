@@ -67,7 +67,11 @@ function memoryDb() {
   /** @type {import('../src/server/oidc-identities.ts').QueryFn} */
   const query = async (sql, params = []) => {
     const s = String(sql).replace(/\s+/g, " ").trim();
-    if (s.startsWith("CREATE TABLE") || s.startsWith("CREATE INDEX")) {
+    if (
+      s.startsWith("CREATE TABLE") ||
+      s.startsWith("CREATE INDEX") ||
+      s.includes("ALTER TABLE oidc_login_state")
+    ) {
       return { rows: [], rowCount: 0 };
     }
     if (
@@ -421,10 +425,11 @@ await check("login page never auto-redirects when ?error= present", async () => 
   assert.match(login, /\/api\/auth\/oidc\/login/);
   assert.match(login, /\/api\/auth\/oidc\/logout/);
   assert.match(login, /ลองเข้าใหม่/);
-  // Auto redirect only after error/guard checks.
+  // Auto redirect only after error/guard checks (interactive via login API).
   const errorIdx = login.indexOf("if (errorRaw)");
-  const redirectIdx = login.lastIndexOf("redirect(result.url)");
+  const redirectIdx = login.lastIndexOf("/api/auth/oidc/login");
   assert.ok(errorIdx >= 0 && redirectIdx > errorIdx);
+  assert.doesNotMatch(login, /prompt:\s*[\"']none[\"']/);
 });
 
 if (failed > 0) {

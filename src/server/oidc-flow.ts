@@ -27,6 +27,11 @@ import {
   oidcFailSetCookieHeader,
   parseOidcFailCookie,
 } from "./oidc-login-guard";
+import {
+  isSilentOidcError,
+  oidcSsoCheckedSetCookie,
+  oidcSsoSkipClearCookie,
+} from "./oidc-silent";
 import type { JSONWebKeySet } from "jose";
 
 export const OIDC_ID_TOKEN_COOKIE = "docx_oidc_id_token";
@@ -65,6 +70,10 @@ export async function buildOidcAuthorizationRedirect(input: {
   kcAction?: string | null;
   /** Override scopes (AIA uses `openid` only when set). */
   scopes?: string[];
+  /** OIDC prompt — use `none` for silent SSO. */
+  prompt?: "none" | null;
+  /** Mark pending state as silent (quiet login_required). */
+  silent?: boolean;
   config?: OidcConfig | null;
   fetchDiscovery?: DiscoveryFetch;
   /** Test seam — defaults to DB-backed saveOidcLoginState. */
@@ -88,6 +97,7 @@ export async function buildOidcAuthorizationRedirect(input: {
       fetch: input.fetchDiscovery,
     });
     const secrets = createOidcAuthRequestSecrets();
+    const silent = Boolean(input.silent) || input.prompt === "none";
     const returnTo = safeOidcReturnTo(
       input.returnTo,
       input.kcAction ? "/account" : "/",
@@ -97,6 +107,7 @@ export async function buildOidcAuthorizationRedirect(input: {
       nonce: secrets.nonce,
       codeVerifier: secrets.codeVerifier,
       returnTo,
+      silent,
     });
 
     const url = new URL(meta.authorization_endpoint);
@@ -112,6 +123,9 @@ export async function buildOidcAuthorizationRedirect(input: {
     url.searchParams.set("nonce", secrets.nonce);
     url.searchParams.set("code_challenge", secrets.codeChallenge);
     url.searchParams.set("code_challenge_method", "S256");
+    if (input.prompt === "none") {
+      url.searchParams.set("prompt", "none");
+    }
     const kcAction = String(input.kcAction || "").trim();
     if (kcAction) {
       // Keycloak AIA — value may include `delete_credential:<id>`; URLSearchParams encodes safely.
@@ -261,6 +275,38 @@ export async function handleOidcCallback(input: {
       error: "OIDC_DISABLED",
     };
   }
+  const code = String(input.code || "").trim();
+  const state = String(input.state || "").trim();
+
+  // Silent SSO: IdP has no session — stay logged out quietly (no error page / loop).
+  if (input.error && !kcStatus && isSilentOidcError(input.error)) {
+    if (state) {
+      const pending = await consumeState(state).catch(() => null);
+      if (pending?.silent) {
+        return {
+          status: 302,
+          redirectTo: safeOidcReturnTo(pending.returnTo, "/"),
+          setCookies: [oidcSsoCheckedSetCookie(secure)],
+          error: String(input.error),
+        };
+      }
+      // Interactive authorize that somehow got login_required — show error page.
+      return {
+        status: 302,
+        redirectTo: `/login?error=oidc_${encodeURIComponent(String(input.error).slice(0, 64))}`,
+        setCookies: [failBumpCookie()],
+        error: String(input.error),
+      };
+    }
+    // No state: treat as quiet (cannot distinguish); land home with checked cookie.
+    return {
+      status: 302,
+      redirectTo: "/",
+      setCookies: [oidcSsoCheckedSetCookie(secure)],
+      error: String(input.error),
+    };
+  }
+
   if (input.error && !kcStatus) {
     return {
       status: 302,
@@ -269,8 +315,6 @@ export async function handleOidcCallback(input: {
       error: String(input.error),
     };
   }
-  const code = String(input.code || "").trim();
-  const state = String(input.state || "").trim();
 
   // AIA cancelled/error without code: still return to settings with status.
   if (!code && kcStatus && state) {
@@ -341,6 +385,8 @@ export async function handleOidcCallback(input: {
       session.setCookie,
       ...buildOidcSideCookies(idToken, secure),
       oidcFailClearCookieHeader(secure),
+      oidcSsoCheckedSetCookie(secure),
+      oidcSsoSkipClearCookie(secure),
     ];
 
     let redirectTo = safeOidcReturnTo(pending.returnTo, "/");

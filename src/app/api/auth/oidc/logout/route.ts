@@ -5,6 +5,10 @@ import {
   OIDC_ID_TOKEN_COOKIE,
   readCookie,
 } from "@/server/oidc-flow";
+import {
+  oidcSsoCheckedClearCookie,
+  oidcSsoSkipSetCookie,
+} from "@/server/oidc-silent";
 import { getAppBaseUrl } from "@/lib/app-base-url";
 
 export const dynamic = "force-dynamic";
@@ -21,8 +25,14 @@ async function logout(request: Request) {
     OIDC_ID_TOKEN_COOKIE,
   );
   const result = await buildOidcLogoutRedirect({ idTokenHint });
+  const secure = process.env.NODE_ENV === "production";
   const headers = new Headers();
-  applyOidcSetCookies(headers, result.setCookies);
+  // After explicit logout: skip silent SSO until interactive login / new session.
+  applyOidcSetCookies(headers, [
+    ...result.setCookies,
+    oidcSsoSkipSetCookie(secure),
+    oidcSsoCheckedClearCookie(secure),
+  ]);
   return NextResponse.redirect(absoluteRedirect(result.redirectTo), {
     status: 302,
     headers,

@@ -50,21 +50,26 @@ Pattern: `https://auth.tps18.space/realms/tps18-{env}` where `{env}` is
 
 ## Login / logout behaviour
 
-1. Visit `/login` (or any gated page/API that sends the user to login) → **302**
-   straight to Keycloak `authorization_endpoint` with PKCE S256, `state`, `nonce`.
-2. Callback validates ID token (JWKS), maps `(issuer, sub)` in `identities`,
-   else links by case-insensitive email (see `OIDC_TRUST_IDP_EMAIL`), else
-   creates a user — all in one transaction with `ON CONFLICT` (no duplicate-key
-   loops). Sets `user.emailVerified=true` on link; keeps role/plan/superadmin.
-3. API calls without a session return **401** with `code: "AUTH_REQUIRED"`;
-   the FE navigates to `/login?next=<current path>` (open redirects rejected by
-   `safeOidcReturnTo`).
-4. Logout → `GET|POST /api/auth/oidc/logout` clears the app session, then
-   RP-initiated logout at `end_session_endpoint` with `id_token_hint` and
-   `post_logout_redirect_uri={APP_BASE_URL}/logged-out`.
-5. `/login?error=…` shows a Thai error page with retry + Keycloak logout links
-   and **never** auto-redirects. A `docx_oidc_fail` cookie stops auto-redirect
-   after 2+ failures within 60s (loop breaker).
+1. **Public pages** (home `/`, `/logged-out`, …) render logged-out with an
+   **เข้าสู่ระบบ** button. Opening the app does **not** bounce to Keycloak’s
+   interactive login.
+2. **Silent SSO** (once per ~5 min via `docx_sso_checked`): middleware sends
+   document navigations without an app session to `/api/auth/oidc/silent`, which
+   starts authorize with `prompt=none` (PKCE/state/nonce). If Keycloak has a
+   session → callback creates the app session and returns to the opened URL.
+   If Keycloak returns `login_required` / `interaction_required` /
+   `consent_required` → stay logged out quietly (no error page). Skipped for
+   APIs, static, health, OIDC routes, and after RP logout (`docx_sso_skip`
+   session cookie until interactive login or a new browser session).
+3. **Protected pages** (`/account`, `/admin`, …) without a session → interactive
+   `/login?next=…` (then Keycloak authorize **without** `prompt=none`).
+4. **`/login`** (button or direct) → interactive authorize via
+   `/api/auth/oidc/login` (clears `docx_sso_skip`).
+5. Callback validates ID token (JWKS), maps `(issuer, sub)` / email / create
+   (see `OIDC_TRUST_IDP_EMAIL`) in one transaction with `ON CONFLICT`.
+6. Logout → RP-initiated logout + set `docx_sso_skip` (no silent check until
+   login click / new session) → `/logged-out`.
+7. `/login?error=…` Thai error page + `docx_oidc_fail` loop guard (unchanged).
 
 ## Passkeys (Keycloak AIA)
 
@@ -90,9 +95,10 @@ Pattern: `https://auth.tps18.space/realms/tps18-{env}` where `{env}` is
 |---|---|---|
 | GET | `/login` | Immediate OIDC redirect (or SSO-not-configured page) |
 | GET | `/logged-out` | Post-logout landing (no auto-loop) |
-| GET | `/api/auth/oidc/login` | Same authorize start (API/FE helper) |
+| GET | `/api/auth/oidc/login` | Interactive authorize (no `prompt`) |
+| GET | `/api/auth/oidc/silent` | Silent authorize (`prompt=none`) |
 | GET | `/api/auth/oidc/callback` | Code callback (+ optional `kc_action_status`) |
-| GET/POST | `/api/auth/oidc/logout` | RP logout |
+| GET/POST | `/api/auth/oidc/logout` | RP logout (+ skip silent until login) |
 | GET | `/api/auth/oidc/passkey/add` | AIA register passkey (session) |
 | GET | `/api/auth/oidc/passkey/remove` | AIA delete passkey (session) |
 | GET | `/api/auth/oidc/passkey` | List own passkeys (Admin API; optional) |

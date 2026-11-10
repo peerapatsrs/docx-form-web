@@ -4140,6 +4140,46 @@ button.danger:hover {
   box-shadow: 0 0 0 3px rgba(20, 36, 40, 0.08);
 }
 
+.auth-test-accounts {
+  margin: 0 0 1.15rem;
+  padding: 0.85rem 0.9rem 1rem;
+  border: 1px dashed rgba(13, 122, 106, 0.35);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(180deg, #f3faf8 0%, #f7fbfa 100%);
+}
+
+.auth-test-accounts-title {
+  margin: 0 0 0.25rem;
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: #0b5c52;
+  letter-spacing: -0.01em;
+}
+
+.auth-test-accounts-lead {
+  margin: 0 0 0.75rem;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.auth-test-accounts-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.auth-provider-test {
+  background: #fff;
+  border-color: rgba(13, 122, 106, 0.35);
+  color: #0b5c52;
+}
+
+.auth-provider-test:hover:not(:disabled) {
+  border-color: rgba(13, 122, 106, 0.55);
+  box-shadow: 0 0 0 3px rgba(13, 122, 106, 0.12);
+}
+
 .auth-error {
   margin: 0 0 0.85rem;
   padding: 0.65rem 0.75rem;

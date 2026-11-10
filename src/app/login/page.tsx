@@ -9,6 +9,15 @@ import {
 } from "@/components/AuthIcons";
 import { BrandLogo, BRAND_NAME } from "@/components/BrandLogo";
 import { resolveDevAutoLoginUser } from "@/lib/dev-auth-auto-login";
+import {
+  parseTestAccountsPayload,
+  resolveTestLoginRedirect,
+  shouldShowTestAccountsPanel,
+  TEST_ACCOUNTS_LIST_PATH,
+  TEST_ACCOUNTS_PANEL_TITLE,
+  TEST_LOGIN_PATH,
+  type DevTestAccount,
+} from "@/lib/dev-test-login";
 type ProviderInfo = { id: string; label: string };
 
 type DevUser = {
@@ -91,6 +100,7 @@ export default function LoginPage() {
   const [error, setError] = useState(readLoginErrorFromQuery);
   const [busy, setBusy] = useState<string | null>(null);
   const [accountNext, setAccountNext] = useState(false);
+  const [testAccounts, setTestAccounts] = useState<DevTestAccount[]>([]);
 
   useEffect(() => {
     try {
@@ -139,6 +149,25 @@ export default function LoginPage() {
         }
       } else {
         setDevAuth(false);
+      }
+
+      // Backend-gated DEV test accounts (404 → hide). Never asks for passwords.
+      try {
+        const res = await fetch(TEST_ACCOUNTS_LIST_PATH, {
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+        });
+        if (!res.ok) {
+          setTestAccounts([]);
+          return;
+        }
+        const body = await res.json().catch(() => null);
+        const accounts = parseTestAccountsPayload(body);
+        setTestAccounts(
+          shouldShowTestAccountsPanel(res.status, accounts) ? accounts : [],
+        );
+      } catch {
+        setTestAccounts([]);
       }
     })();
 
@@ -236,9 +265,62 @@ export default function LoginPage() {
     }
   }
 
+  async function loginAsTestAccount(account: DevTestAccount) {
+    setError("");
+    setBusy(`test-${account.key}`);
+    try {
+      const res = await fetch(TEST_LOGIN_PATH, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ key: account.key }),
+      });
+      if (res.status === 404) {
+        setTestAccounts([]);
+        setError("บัญชีทดสอบปิดอยู่บนสภาพแวดล้อมนี้");
+        setBusy(null);
+        return;
+      }
+      if (!res.ok) {
+        let msg = "เข้าด้วยบัญชีทดสอบไม่สำเร็จ";
+        try {
+          const data = (await res.json()) as { error?: string };
+          if (data?.error) msg = String(data.error);
+        } catch {
+          /* ignore */
+        }
+        setError(msg);
+        setBusy(null);
+        return;
+      }
+      const nextParam = (() => {
+        try {
+          return new URLSearchParams(window.location.search).get("next");
+        } catch {
+          return null;
+        }
+      })();
+      window.location.assign(
+        resolveTestLoginRedirect(account.role, nextParam),
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "เข้าด้วยบัญชีทดสอบไม่สำเร็จ",
+      );
+      setBusy(null);
+    }
+  }
+
+  const showTestAccounts = testAccounts.length > 0;
+
   return (
     <main className="auth-page">
-      <div className={`auth-card${devAuth ? " auth-card-wide" : ""}`}>
+      <div
+        className={`auth-card${devAuth || showTestAccounts ? " auth-card-wide" : ""}`}
+      >
         <div className="auth-brand">
           <BrandLogo size={40} className="brand-logo auth-brand-logo" />
           <p className="auth-eyebrow">{BRAND_NAME}</p>
@@ -271,6 +353,37 @@ export default function LoginPage() {
             busy={busy}
             onPick={(u) => void loginAsDev(u)}
           />
+        ) : null}
+
+        {showTestAccounts ? (
+          <section
+            className="auth-test-accounts"
+            aria-label={TEST_ACCOUNTS_PANEL_TITLE}
+          >
+            <h2 className="auth-test-accounts-title">
+              {TEST_ACCOUNTS_PANEL_TITLE}
+            </h2>
+            <p className="auth-test-accounts-lead">
+              กดครั้งเดียวเพื่อเข้าสู่ระบบบน DEV — ไม่มีรหัสผ่านส่งถึงเบราว์เซอร์
+            </p>
+            <div className="auth-test-accounts-actions">
+              {testAccounts.map((account) => (
+                <button
+                  key={account.key}
+                  type="button"
+                  className="auth-provider auth-provider-test"
+                  disabled={busy !== null}
+                  onClick={() => void loginAsTestAccount(account)}
+                >
+                  <span>
+                    {busy === `test-${account.key}`
+                      ? "กำลังเข้า…"
+                      : account.label}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </section>
         ) : null}
 
         <div className="auth-actions">

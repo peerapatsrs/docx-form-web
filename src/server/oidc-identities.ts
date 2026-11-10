@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { QueryResultRow } from "pg";
+import { getAppBaseUrl } from "@/lib/app-base-url";
 import { getAuthPool } from "./auth-db";
 import type { OidcIdTokenClaims } from "./oidc-id-token";
 import { isSuperAdminEmail } from "./auth-superadmin";
@@ -329,12 +330,78 @@ export async function consumeOidcLoginState(
   };
 }
 
-/** Only same-origin relative paths. */
+function hasControlChars(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c <= 0x1f || c === 0x7f) return true;
+  }
+  return false;
+}
+
+function decodeUriComponentSafe(s: string): string | null {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Same-origin relative return paths only.
+ * Accepts `/` or `/` + a non-`/` / non-`\` character (e.g. `/account`).
+ * Rejects protocol-relative (`//`), backslash tricks (`/\`, `\\`), encoded
+ * `%2F%2F` / `%5C`, and control characters. Verified by resolving against
+ * APP_BASE_URL (or `baseUrl`) and comparing origins.
+ */
 export function safeOidcReturnTo(
   raw: string | null | undefined,
   fallback = "/",
+  baseUrl?: string,
 ): string {
   const v = String(raw || "").trim();
-  if (!v.startsWith("/") || v.startsWith("//")) return fallback;
-  return v;
+  if (!v) return fallback;
+  if (hasControlChars(v)) return fallback;
+  // Raw backslash (incl. `/\…`, `\\…`) — never treat as a path separator.
+  if (v.includes("\\")) return fallback;
+  if (!v.startsWith("/")) return fallback;
+  // Single `/` is fine; otherwise the next char must not be `/` or `\`.
+  if (v.length > 1 && (v[1] === "/" || v[1] === "\\")) return fallback;
+
+  // Decode once (and a second pass) to catch `%2F%2F`, `%5C`, `%252F`, …
+  let decoded = decodeUriComponentSafe(v);
+  if (decoded == null) return fallback;
+  if (hasControlChars(decoded) || decoded.includes("\\")) return fallback;
+  if (!decoded.startsWith("/")) return fallback;
+  if (decoded.length > 1 && (decoded[1] === "/" || decoded[1] === "\\")) {
+    return fallback;
+  }
+  const decoded2 = decodeUriComponentSafe(decoded);
+  if (decoded2 != null && decoded2 !== decoded) {
+    if (hasControlChars(decoded2) || decoded2.includes("\\")) return fallback;
+    if (!decoded2.startsWith("/")) return fallback;
+    if (
+      decoded2.length > 1 &&
+      (decoded2[1] === "/" || decoded2[1] === "\\")
+    ) {
+      return fallback;
+    }
+    decoded = decoded2;
+  }
+
+  const base = String(baseUrl || getAppBaseUrl() || "http://localhost:3000")
+    .trim()
+    .replace(/\/$/, "");
+  try {
+    const baseOrigin = new URL(base).origin;
+    const resolved = new URL(decoded, base);
+    if (resolved.origin !== baseOrigin) return fallback;
+    const out = `${resolved.pathname}${resolved.search}${resolved.hash}`;
+    // Re-check the resolved path shape (URL may normalize oddly).
+    if (!out.startsWith("/")) return fallback;
+    if (out.length > 1 && (out[1] === "/" || out[1] === "\\")) return fallback;
+    if (out.includes("\\") || hasControlChars(out)) return fallback;
+    return out || fallback;
+  } catch {
+    return fallback;
+  }
 }

@@ -376,9 +376,54 @@ await check("identities: link by verified email only when email_verified", async
   assert.equal(again.linkedBy, "identity");
   assert.equal(again.userId, "u-existing");
 
-  assert.equal(safeOidcReturnTo("https://evil.com"), "/");
-  assert.equal(safeOidcReturnTo("//evil.com"), "/");
-  assert.equal(safeOidcReturnTo("/account"), "/account");
+  const base = "https://app.example.com";
+  assert.equal(safeOidcReturnTo("https://evil.com", "/", base), "/");
+  assert.equal(safeOidcReturnTo("//evil.com", "/", base), "/");
+  assert.equal(safeOidcReturnTo("/account", "/", base), "/account");
+  assert.equal(safeOidcReturnTo("/", "/", base), "/");
+  assert.equal(safeOidcReturnTo("/account?x=1#y", "/", base), "/account?x=1#y");
+});
+
+await check("safeOidcReturnTo rejects backslash / encoded / control open-redirects", async () => {
+  const { safeOidcReturnTo } = await loadIdentities();
+  const base = "https://app.example.com";
+  const reject = [
+    "/\\evil.com",
+    "\\evil.com",
+    "\\\\evil.com",
+    "/%2Fevil.com",
+    "/%2f%2fevil.com",
+    "%2F%2Fevil.com",
+    "/%5Cevil.com",
+    "/%5cevil.com",
+    "/%252F%252Fevil.com",
+    "/\tevil.com",
+    "/\nevil.com",
+    "/account\u0000.evil",
+    "https://evil.com",
+    "//evil.com",
+    "/\\/evil.com",
+  ];
+  for (const raw of reject) {
+    assert.equal(
+      safeOidcReturnTo(raw, "/", base),
+      "/",
+      `should reject ${JSON.stringify(raw)}`,
+    );
+  }
+  const accept = ["/account", "/login", "/admin/users", "/"];
+  for (const raw of accept) {
+    assert.equal(
+      safeOidcReturnTo(raw, "/fallback", base),
+      raw,
+      `should accept ${JSON.stringify(raw)}`,
+    );
+  }
+  // Origin mismatch via resolution must fall back.
+  assert.equal(
+    safeOidcReturnTo("//app.example.com.evil.com/", "/", base),
+    "/",
+  );
 });
 
 await check("authorize redirect includes PKCE + state + nonce; soft 404 when disabled", async () => {

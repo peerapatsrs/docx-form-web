@@ -9,6 +9,15 @@ import {
 } from "@/components/AuthIcons";
 import { BrandLogo, BRAND_NAME } from "@/components/BrandLogo";
 import { resolveDevAutoLoginUser } from "@/lib/dev-auth-auto-login";
+import {
+  parseTestAccountsPayload,
+  resolveTestLoginRedirect,
+  shouldShowTestAccountsPanel,
+  TEST_ACCOUNTS_LIST_PATH,
+  TEST_ACCOUNTS_PANEL_TITLE,
+  TEST_LOGIN_PATH,
+  type DevTestAccount,
+} from "@/lib/dev-test-login";
 type ProviderInfo = { id: string; label: string };
 
 type DevUser = {
@@ -90,10 +99,14 @@ export default function LoginPage() {
   );
   const [error, setError] = useState(readLoginErrorFromQuery);
   const [busy, setBusy] = useState<string | null>(null);
+  const [accountNext, setAccountNext] = useState(false);
+  const [testAccounts, setTestAccounts] = useState<DevTestAccount[]>([]);
 
   useEffect(() => {
     try {
       const params = new URLSearchParams(window.location.search);
+      const next = params.get("next") || "";
+      setAccountNext(next.startsWith("/account") || next.includes("account"));
       if (params.get("error")) {
         const url = new URL(window.location.href);
         url.searchParams.delete("error");
@@ -136,6 +149,25 @@ export default function LoginPage() {
         }
       } else {
         setDevAuth(false);
+      }
+
+      // Backend-gated DEV test accounts (404 → hide). Never asks for passwords.
+      try {
+        const res = await fetch(TEST_ACCOUNTS_LIST_PATH, {
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+        });
+        if (!res.ok) {
+          setTestAccounts([]);
+          return;
+        }
+        const body = await res.json().catch(() => null);
+        const accounts = parseTestAccountsPayload(body);
+        setTestAccounts(
+          shouldShowTestAccountsPanel(res.status, accounts) ? accounts : [],
+        );
+      } catch {
+        setTestAccounts([]);
       }
     })();
 
@@ -233,17 +265,71 @@ export default function LoginPage() {
     }
   }
 
+  async function loginAsTestAccount(account: DevTestAccount) {
+    setError("");
+    setBusy(`test-${account.key}`);
+    try {
+      const res = await fetch(TEST_LOGIN_PATH, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ key: account.key }),
+      });
+      if (res.status === 404) {
+        setTestAccounts([]);
+        setError("บัญชีทดสอบปิดอยู่บนสภาพแวดล้อมนี้");
+        setBusy(null);
+        return;
+      }
+      if (!res.ok) {
+        let msg = "เข้าด้วยบัญชีทดสอบไม่สำเร็จ";
+        try {
+          const data = (await res.json()) as { error?: string };
+          if (data?.error) msg = String(data.error);
+        } catch {
+          /* ignore */
+        }
+        setError(msg);
+        setBusy(null);
+        return;
+      }
+      const nextParam = (() => {
+        try {
+          return new URLSearchParams(window.location.search).get("next");
+        } catch {
+          return null;
+        }
+      })();
+      window.location.assign(
+        resolveTestLoginRedirect(account.role, nextParam),
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "เข้าด้วยบัญชีทดสอบไม่สำเร็จ",
+      );
+      setBusy(null);
+    }
+  }
+
+  const showTestAccounts = testAccounts.length > 0;
+
   return (
     <main className="auth-page">
-      <div className={`auth-card${devAuth ? " auth-card-wide" : ""}`}>
+      <div
+        className={`auth-card${devAuth || showTestAccounts ? " auth-card-wide" : ""}`}
+      >
         <div className="auth-brand">
           <BrandLogo size={40} className="brand-logo auth-brand-logo" />
           <p className="auth-eyebrow">{BRAND_NAME}</p>
         </div>
         <h1 className="auth-title">เข้าสู่ระบบ</h1>
         <p className="auth-lead">
-          ใช้บัญชีภายนอกที่เชื่อถือได้ — ไม่เก็บรหัสผ่านในระบบนี้ หลังล็อกอินสำเร็จ
-          สามารถลงทะเบียนพาสคีย์เพื่อเข้าครั้งถัดไปได้เร็วและปลอดภัยขึ้น
+          {accountNext
+            ? "เข้าสู่ระบบเพื่อดูบัญชีและบันทึกคีย์ AI ข้ามเครื่อง — ใช้งานฟรีได้โดยไม่ต้องเข้าสู่ระบบ"
+            : "เข้าสู่ระบบเพื่อบันทึกงานข้ามเครื่อง หรือใช้แผนจ่ายแล้ว — ใช้งานฟรีได้โดยไม่ต้องเข้าสู่ระบบ"}
         </p>
 
         <input
@@ -269,21 +355,41 @@ export default function LoginPage() {
           />
         ) : null}
 
-        <div className="auth-actions">
-          <button
-            type="button"
-            className="auth-provider auth-provider-passkey"
-            disabled={busy !== null}
-            onClick={() => void signInPasskey()}
+        {showTestAccounts ? (
+          <section
+            className="auth-test-accounts"
+            aria-label={TEST_ACCOUNTS_PANEL_TITLE}
           >
-            <PasskeyMark className="auth-provider-icon" />
-            <span>{busy === "passkey" ? "รอพาสคีย์…" : "เข้าด้วยพาสคีย์"}</span>
-          </button>
+            <h2 className="auth-test-accounts-title">
+              {TEST_ACCOUNTS_PANEL_TITLE}
+            </h2>
+            <p className="auth-test-accounts-lead">
+              กดครั้งเดียวเพื่อเข้าสู่ระบบบน DEV — ไม่มีรหัสผ่านส่งถึงเบราว์เซอร์
+            </p>
+            <div className="auth-test-accounts-actions">
+              {testAccounts.map((account) => (
+                <button
+                  key={account.key}
+                  type="button"
+                  className="auth-provider auth-provider-test"
+                  disabled={busy !== null}
+                  onClick={() => void loginAsTestAccount(account)}
+                >
+                  <span>
+                    {busy === `test-${account.key}`
+                      ? "กำลังเข้า…"
+                      : account.label}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : null}
 
+        <div className="auth-actions">
           {googleFirst.length === 0 ? (
             <p className="auth-hint">
-              ยังไม่ได้ตั้งค่า OAuth — ใส่ <code>GOOGLE_CLIENT_ID</code> /{" "}
-              <code>GOOGLE_CLIENT_SECRET</code> ใน <code>.env.local</code> แล้วรีสตาร์ทเซิร์ฟเวอร์
+              ยังไม่ได้ตั้งค่าการเข้าสู่ระบบด้วยบัญชีภายนอก — ติดต่อฝ่ายสนับสนุน
             </p>
           ) : (
             googleFirst.map((p) => (
@@ -303,14 +409,30 @@ export default function LoginPage() {
               </button>
             ))
           )}
+
+          <button
+            type="button"
+            className="auth-provider auth-provider-passkey"
+            disabled={busy !== null}
+            onClick={() => void signInPasskey()}
+          >
+            <PasskeyMark className="auth-provider-icon" />
+            <span>
+              {busy === "passkey" ? "รอพาสคีย์…" : "เข้าด้วยพาสคีย์ (ถ้ามีแล้ว)"}
+            </span>
+          </button>
         </div>
 
         <p className="auth-foot">
           {/* Hard nav so home remounts cleanly with app.js (soft Link leaves a broken shell). */}
           {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- intentional full reload for guest shell */}
-          <a href="/">กลับหน้าหลัก</a>
-          {" · "}
-          เซสชันเข้ารหัสในคุกกี้ HttpOnly · OAuth ผ่าน HTTPS ในโปรดักชัน
+          <a className="auth-home-link" href="/" style={{ minHeight: 44, display: "inline-flex", alignItems: "center" }}>
+            กลับหน้าหลัก
+          </a>
+          <span className="auth-foot-sep" aria-hidden="true">
+            ·
+          </span>
+          <span className="auth-foot-note">เซสชันปลอดภัยบนเบราว์เซอร์นี้</span>
         </p>
       </div>
     </main>

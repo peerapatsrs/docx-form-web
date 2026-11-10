@@ -69,27 +69,35 @@ await check("api.ts routes use resolveRequestAiCredentials / resolveRouteAiCrede
 });
 
 await check("shared dialog + account + pill wiring present", async () => {
-  const dialog = readFileSync(join(root, "public/ai-keys-dialog.js"), "utf8");
+  const dialog = readFileSync(join(root, "public/ai-key-dialog.js"), "utf8");
+  const shim = readFileSync(join(root, "public/ai-keys-dialog.js"), "utf8");
   const app = readFileSync(join(root, "public/app.js"), "utf8");
   const account = readFileSync(join(root, "src/app/account/page.tsx"), "utf8");
   const section = readFileSync(join(root, "src/components/AiKeysSection.tsx"), "utf8");
   const admin = readFileSync(join(root, "src/app/admin/ai/page.tsx"), "utf8");
+  assert.match(dialog, /export async function openAiKeyDialog/);
   assert.match(dialog, /export async function openAiKeysDialog/);
   assert.match(dialog, /ลบคีย์นี้\?/);
   assert.match(dialog, /ลบคีย์/);
-  assert.match(app, /from "\.\/ai-keys-dialog\.js"/);
-  assert.match(app, /bindStatusPillAiKeysOpener/);
-  assert.match(app, /openSharedAiKeysDialog/);
-  assert.match(app, /coerceClientAiModel/);
+  assert.match(shim, /from "\.\/ai-key-dialog\.js"/);
+  assert.match(app, /from "\.\/ai-key-dialog\.js"/);
+  // FE tip opens the dialog via openAiKeyDialog (pill / googleAiBtn), not the old binder name.
+  assert.match(app, /openAiKeyDialog|openAiKeysManager|bindStatusPillAiKeysOpener/);
+  assert.match(app, /googleAiBtn/);
   // Shared-key ready when BYOK off: trust server connected / keySource=shared.
-  assert.match(app, /connected:\s*!!clientKey\s*\|\|\s*hasVaultRef\s*\|\|\s*!!data\.connected/);
-  assert.match(app, /source === "shared"/);
+  assert.match(app, /!!data\.connected/);
+  assert.match(app, /aiStatus\.keySource === "shared"/);
   assert.match(app, /คีย์เซิร์ฟเวอร์/);
   assert.match(account, /AiKeysSection/);
   assert.match(section, /openAiKeysDialog/);
-  assert.match(section, /ai-keys-dialog\.js/);
-  assert.match(admin, /set via server/);
+  assert.match(section, /ai-key-dialog\.js/);
+  assert.match(admin, /serverKeySources/);
+  assert.match(admin, /ไม่ได้ตั้งค่าคีย์เซิร์ฟเวอร์/);
   assert.match(admin, /\/api\/admin\/ai\/server-key/);
+  // No provider-specific server-key row labels in the admin UI.
+  assert.doesNotMatch(admin, /คีย์ Gemini ของเซิร์ฟเวอร์/);
+  assert.doesNotMatch(admin, /คีย์ Gemini บนเซิร์ฟเวอร์ \(ไฟล์\)/);
+  assert.doesNotMatch(admin, /คีย์ Cursor ของเซิร์ฟเวอร์/);
 });
 
 await check("resolveEffectiveModelForProvider remaps gemini id under cursor", async () => {

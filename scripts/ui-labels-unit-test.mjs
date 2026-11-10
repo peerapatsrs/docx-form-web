@@ -23,10 +23,10 @@ import {
 
 console.log("ui-labels-unit-test");
 
-assert.equal(UI_LABELS.exportJson, "ส่งออก JSON");
-assert.equal(UI_LABELS.importJson, "นำเข้า JSON");
+assert.equal(UI_LABELS.exportJson, "ส่งออกค่า");
+assert.equal(UI_LABELS.importJson, "นำเข้าค่า");
 assert.equal(UI_LABELS.toolsMenu, "เครื่องมือ");
-assert.equal(UI_LABELS.homeHeadline.startsWith("docx-form"), true);
+assert.ok(UI_LABELS.homeHeadline.includes("กรอกแบบฟอร์ม Word"));
 assert.equal(UI_LABELS.homeAboutSummary, "เกี่ยวกับ docx-form");
 // F02: static label is plan-agnostic; live UI uses getMaxMultiTemplates().
 assert.ok(UI_LABELS.dropzoneOrPick.includes("โควตาแผน") || UI_LABELS.dropzoneOrPick.includes("เลือกไฟล์"));
@@ -34,21 +34,34 @@ assert.ok(!UI_LABELS.dropzoneOrPick.includes("ฟรีสูงสุด 2"));
 assert.equal(UI_LABELS.placeholderExamplePrefix, "เช่น ");
 assert.equal(UI_LABELS.seededRowTip.includes("1 แถว"), true);
 assert.equal(UI_LABELS.skip, "ข้าม");
+assert.equal(UI_LABELS.putAiKey, "ตั้งค่าคีย์ AI");
+assert.ok(UI_LABELS.stickyCtaHint.includes("จะได้ไฟล์ใหม่"));
+assert.equal(UI_LABELS.uploadInvalidFile.includes(".docx"), true);
+assert.equal(UI_LABELS.removeRow, "ลบแถว");
+assert.equal(UI_LABELS.removeRowTitle(2), "ลบแถว 2");
+assert.equal(
+  UI_LABELS.shortValidationLabel("ก".repeat(50)).endsWith("…"),
+  true,
+);
 assert.equal(UI_LABELS.draftListLoadFailed, "อ่านรายการดราฟไม่สำเร็จ");
 assert.ok(
-  UI_LABELS.loadDraftDialogBody.includes("IndexedDB") ||
-    UI_LABELS.loadDraftDialogBody.includes("เบราว์เซอร์"),
+  UI_LABELS.loadDraftDialogBody.includes("เบราว์เซอร์") ||
+    UI_LABELS.draftOpenDialogBody.includes("เบราว์เซอร์"),
 );
 assert.equal(UI_LABELS.dialogClose, "ปิด");
 assert.equal(UI_LABELS.dialogCancel, "ยกเลิก");
 assert.equal(UI_LABELS.dialogSave, "บันทึก");
 assert.equal(UI_LABELS.dialogDelete, "ลบ");
-assert.equal(UI_LABELS.dialogLoad, "โหลด");
+assert.equal(UI_LABELS.dialogLoad, "เปิดดราฟนี้");
+assert.equal(UI_LABELS.draftOpenAction, "เปิดดราฟนี้");
 assert.equal(UI_LABELS.draftFallbackTitle, "ดราฟ");
 assert.equal(UI_LABELS.draftUntitled, "ไม่มีชื่อ");
 assert.equal(UI_LABELS.draftSaveNoTemplate, "ยังไม่มีเทมเพลตให้บันทึกดราฟ");
 assert.equal(UI_LABELS.draftSaveDialogTitle, "บันทึกดราฟ");
-assert.ok(UI_LABELS.draftSaveDialogBody.includes("IndexedDB"));
+assert.ok(
+  UI_LABELS.draftSaveDialogBody.includes("เบราว์เซอร์") &&
+    !UI_LABELS.draftSaveDialogBody.includes("IndexedDB"),
+);
 assert.equal(UI_LABELS.draftSaveNameLabel, "ชื่อดราฟ (ไม่บังคับ)");
 assert.equal(UI_LABELS.draftSaveSuccess("ใบเสนอราคา"), "บันทึกดราฟแล้ว: ใบเสนอราคา");
 assert.equal(UI_LABELS.draftSaveFailed, "บันทึกดราฟไม่สำเร็จ");
@@ -96,15 +109,34 @@ console.log("✓ fieldDisplayLabel");
 assert.equal(formatExamplePlaceholder("ลูกค้า"), "เช่น ลูกค้า");
 assert.equal(formatExamplePlaceholder(""), "");
 assert.equal(
+  formatExamplePlaceholder("ประเภทหนี้ กู้ เงินกู้ยืม", "ยืม"),
+  "เช่น ยืม",
+);
+assert.equal(
+  formatMissingFieldLabel(
+    "บริษัทฯ ขอเรียนว่าได้ดำเนินการตรวจกรรมสิทธิ์ที่ดิน สำนักงานที่ดิน เมื่อวันที่",
+    undefined,
+    "วันที่ตรวจ",
+  ),
+  "วันที่ตรวจ",
+);
+assert.equal(
   formatMissingFieldLabel("รายการสินค้า", UI_LABELS.validationListMinRows),
   "รายการสินค้า (ต้องมีอย่างน้อย 1 แถว)",
 );
+assert.ok(UI_LABELS.tipKindBool.includes("ติ๊ก"));
+assert.ok(UI_LABELS.addKeyNeedsUpgrade.includes("อัปเกรด"));
+assert.ok(UI_LABELS.aiCancelNeutral.includes("ยกเลิก"));
 console.log("✓ placeholder + missing label");
 
 const banner = formatValidationBannerModel(["ลูกค้า", "วันที่", "โลโก้"]);
-assert.equal(banner.title, "ยังมีช่องที่ยังไม่ได้กรอก (3)");
+assert.equal(banner.title, UI_LABELS.validationTitle(3));
+assert.ok(banner.title.includes("3"));
 assert.deepEqual(banner.items, ["ลูกค้า", "วันที่", "โลโก้"]);
 assert.equal(banner.hint, UI_LABELS.validationHint);
+const longBanner = formatValidationBannerModel(["ก".repeat(80)]);
+assert.ok(longBanner.items[0].endsWith("…"));
+assert.ok(longBanner.items[0].length <= 43);
 console.log("✓ validation banner model");
 
 assert.deepEqual(seedListRowsIfEmpty(undefined), [{}]);

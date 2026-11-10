@@ -13,13 +13,13 @@ import {
   getAppLimits,
   listAuditLogs,
   listUsersForAdmin,
+  resolveUpgradeUrl,
   setAiAdminSettings,
   setAppLimits,
   setUserBanned,
   setUserPlan,
   setUserRole,
   writeAuditLog,
-  resolveUpgradeUrl,
 } from "./admin-store";
 import {
   clearGeminiKey,
@@ -31,10 +31,8 @@ import {
   getRequestAiProvider,
   getRequestGeminiKey,
   hasRequestAiKey,
-  hasServerFileGeminiKey,
   isByokOnly,
   maskGeminiKey,
-  maskServerFileGeminiKey,
   missingAiCredentialsError,
   requestHasExplicitAiProvider,
   resolveEffectiveAiProvider,
@@ -397,7 +395,8 @@ export function createApi(options: {
   /**
    * Public plan/quota snapshot for the guest shell (no internal diagnostics).
    * Admin limit changes are reflected here for the fill UI.
-   * `version` is package.json only — not author / AI inventory.
+   * `version` is short build commit when known (RENDER_GIT_COMMIT / SOURCE_COMMIT /
+   * GIT_SHA / …), else package.json — not author / AI inventory.
    */
   api.get("/entitlement", async (c) => {
     await ensureAdminSchema().catch(() => undefined);
@@ -612,9 +611,9 @@ export function createApi(options: {
       adminDefaultModel: aiAdmin.defaultModel,
       adminDefaultProvider,
     });
-    const fileKeyPresent = hasServerFileGeminiKey();
     // Strip internals — never leak env var names, filesystem paths, or raw
     // configPath. Human labels only; effective* matches /ai/status pill resolver.
+    // Server keys: status.serverKeySources from the provider catalog (generic).
     const {
       configPath: _dropPath,
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -625,15 +624,6 @@ export function createApi(options: {
       settings: aiAdmin,
       status: {
         ...safeStatus,
-        // File key may show mask; env keys: presence label only.
-        maskedKey: maskServerFileGeminiKey(),
-        hasServerFileGeminiKey: fileKeyPresent,
-        serverEnvCursorKeySource: status.hasServerEnvCursorKey
-          ? "set via server"
-          : null,
-        serverEnvGeminiKeySource: status.hasServerEnvKey
-          ? "set via server"
-          : null,
         effectiveProvider: status.effectiveProvider,
         effectiveProviderLabel: status.effectiveProviderLabel,
         effectiveModel: status.effectiveModel || status.model,
@@ -642,6 +632,8 @@ export function createApi(options: {
         adminDefaultProvider: status.adminDefaultProvider,
         defaultModel: status.defaultModel,
         configStoreLabel: status.configStoreLabel,
+        serverKeySources: status.serverKeySources || [],
+        hasClearableServerKey: Boolean(status.hasClearableServerKey),
         premiumEnforceLabel: status.premiumEnforce
           ? "บังคับแผนพรีเมียม"
           : "ไม่บังคับ",
@@ -659,7 +651,7 @@ export function createApi(options: {
     if (!model) return c.json({ error: "โมเดลไม่ถูกต้อง" }, 400);
     const settings = await setAiAdminSettings({ defaultModel: model });
     if (!isByokOnly()) {
-      writeAiConfig({ geminiModel: model });
+      await writeAiConfig({ geminiModel: model });
     }
     await writeAuditLog({
       actorId: gate.userId,
@@ -699,12 +691,12 @@ export function createApi(options: {
         400,
       );
     }
-    clearGeminiKey();
+    await clearGeminiKey();
     await writeAuditLog({
       actorId: gate.userId,
       actorEmail: gate.email,
       action: "ai.clear_server_key",
-      detail: { kind: "file-gemini" },
+      detail: { kind: "db-gemini" },
     });
     const aiAdmin = await getAiAdminSettings();
     return c.json({
@@ -936,7 +928,7 @@ export function createApi(options: {
       if (patch.geminiModel && !patch.geminiApiKey && !getGeminiApiKey()) {
         return c.json({ error: "ต้องเชื่อมต่อ API key ก่อนเปลี่ยนโมเดล" }, 401);
       }
-      writeAiConfig(patch);
+      await writeAiConfig(patch);
       return c.json({ ok: true, ...geminiStatus({ requestProvider: "google" }) });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -948,17 +940,17 @@ export function createApi(options: {
   api.post("/ai/google", (c) => postAiConnect(c));
 
   const deleteAiConnect = async (c: Parameters<typeof requirePremium>[0]) => {
-    // Clearing the shared file-stored server key is superadmin-only.
+    // Clearing the shared DB-stored server key is superadmin-only.
     // BYOK mode is a no-op clear (client-side disconnect status only).
     if (!isByokOnly()) {
       const gate = await requireSuperAdmin(c.req.raw);
       if (!gate.ok) return c.json({ error: gate.error }, gate.status);
-      clearGeminiKey();
+      await clearGeminiKey();
       await writeAuditLog({
         actorId: gate.userId,
         actorEmail: gate.email,
         action: "ai.clear_server_key",
-        detail: { kind: "file-gemini", via: "ai/connect" },
+        detail: { kind: "db-gemini", via: "ai/connect" },
       });
     }
     return c.json({

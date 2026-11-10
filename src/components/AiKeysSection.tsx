@@ -47,7 +47,7 @@ function providerLabel(id: string): string {
 }
 
 /**
- * Account-page entry that opens the same public/ai-keys-dialog.js manager
+ * Account-page entry that opens the same public/ai-key-dialog.js manager
  * used by the home status pill — one shared dialog implementation.
  */
 export function AiKeysSection() {
@@ -67,7 +67,7 @@ export function AiKeysSection() {
       try {
         // Same public module the home shell imports (not part of the Next graph).
         const loaded = (await new Function(
-          "return import('/ai-keys-dialog.js')",
+          "return import('/ai-key-dialog.js')",
         )()) as AiKeysModule;
         if (!cancelled) setMod(loaded);
       } catch {

@@ -23,15 +23,24 @@ import {
 
 console.log("ui-labels-unit-test");
 
-assert.equal(UI_LABELS.exportJson, "ส่งออก JSON");
-assert.equal(UI_LABELS.importJson, "นำเข้า JSON");
+assert.equal(UI_LABELS.exportJson, "ส่งออกค่า");
+assert.equal(UI_LABELS.importJson, "นำเข้าค่า");
 assert.equal(UI_LABELS.toolsMenu, "เครื่องมือ");
-assert.equal(UI_LABELS.homeHeadline.startsWith("docx-form"), true);
+assert.ok(UI_LABELS.homeHeadline.includes("กรอกแบบฟอร์ม Word"));
 assert.equal(UI_LABELS.homeAboutSummary, "เกี่ยวกับ docx-form");
 assert.ok(UI_LABELS.dropzoneOrPick.includes("ฟรีสูงสุด 2"));
 assert.equal(UI_LABELS.placeholderExamplePrefix, "เช่น ");
 assert.equal(UI_LABELS.seededRowTip.includes("1 แถว"), true);
 assert.equal(UI_LABELS.skip, "ข้าม");
+assert.equal(UI_LABELS.putAiKey, "ตั้งค่าคีย์ AI");
+assert.ok(UI_LABELS.stickyCtaHint.includes("จะได้ไฟล์ใหม่"));
+assert.equal(UI_LABELS.uploadInvalidFile.includes(".docx"), true);
+assert.equal(UI_LABELS.removeRow, "ลบแถว");
+assert.equal(UI_LABELS.removeRowTitle(2), "ลบแถว 2");
+assert.equal(
+  UI_LABELS.shortValidationLabel("ก".repeat(50)).endsWith("…"),
+  true,
+);
 assert.equal(UI_LABELS.draftListLoadFailed, "อ่านรายการดราฟไม่สำเร็จ");
 assert.ok(
   UI_LABELS.loadDraftDialogBody.includes("IndexedDB") ||
@@ -100,9 +109,13 @@ assert.equal(
 console.log("✓ placeholder + missing label");
 
 const banner = formatValidationBannerModel(["ลูกค้า", "วันที่", "โลโก้"]);
-assert.equal(banner.title, "ยังมีช่องที่ยังไม่ได้กรอก (3)");
+assert.equal(banner.title, UI_LABELS.validationTitle(3));
+assert.ok(banner.title.includes("3"));
 assert.deepEqual(banner.items, ["ลูกค้า", "วันที่", "โลโก้"]);
 assert.equal(banner.hint, UI_LABELS.validationHint);
+const longBanner = formatValidationBannerModel(["ก".repeat(80)]);
+assert.ok(longBanner.items[0].endsWith("…"));
+assert.ok(longBanner.items[0].length <= 43);
 console.log("✓ validation banner model");
 
 assert.deepEqual(seedListRowsIfEmpty(undefined), [{}]);

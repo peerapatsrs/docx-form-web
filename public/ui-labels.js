@@ -12,10 +12,12 @@ export const UI_LABELS = Object.freeze({
   skipTitle: "ข้าม — ไม่ใส่ค่าในเอกสารที่สร้าง",
   skipFirstUseTip:
     "ข้าม = ไม่ใส่ค่าในเอกสารที่สร้าง (ช่องจะว่างตามเทมเพลต) — ใช้เมื่อฟิลด์นั้นไม่จำเป็นในรอบนี้",
+  skipFirstUseDismiss: "เข้าใจแล้ว",
   skipFirstUseStorageKey: "docx-form-skip-tip-seen-v1",
 
   // Validation banner
-  validationTitle: (count) => `ยังมีช่องที่ยังไม่ได้กรอก (${count})`,
+  validationTitle: (count) =>
+    `ยังมี ${count} ช่องที่ยังไม่กรอก — กดชื่อช่องเพื่อไปที่นั้น หรือติ๊กข้าม`,
   validationHint: "กรอกให้ครบ หรือติ๊ก “ข้าม” ก่อนสร้างเอกสาร",
   validationListMinRows: "ต้องมีอย่างน้อย 1 แถว",
   /** Banner item when a required table/list has no filled row (seeded empty rows do not count). */
@@ -28,6 +30,15 @@ export const UI_LABELS = Object.freeze({
     "รูปแบบอีเมลไม่ถูกต้อง — ตรวจอีกครั้ง หรือติ๊ก “ข้าม”",
   fieldErrorPickFileOrSkip: "กรุณาเลือกไฟล์ หรือติ๊ก “ข้าม”",
   fieldErrorAddRowOrSkip: "เพิ่มแถว หรือติ๊ก “ข้าม”",
+  /** Cap long layout-derived labels so validation lists stay scannable. */
+  shortValidationLabel: (label, fallback = "") => {
+    const raw = String(label || "").trim();
+    const fb = String(fallback || "").trim();
+    const text = raw || fb;
+    if (!text) return "ช่องว่าง";
+    if (text.length <= 42) return text;
+    return `${text.slice(0, 40)}…`;
+  },
 
   // Placeholders
   placeholderExamplePrefix: "เช่น ",
@@ -37,8 +48,9 @@ export const UI_LABELS = Object.freeze({
   listBadgeFromFile: "ตารางจากไฟล์",
   listBadgeList: "รายการ",
   addRow: "+ เพิ่มแถว",
-  removeRow: "ลบ",
-  removeRowTitle: "ลบแถว",
+  removeRow: "ลบแถว",
+  removeRowTitle: (n) => (n != null ? `ลบแถว ${n}` : "ลบแถว"),
+  removeRowAria: (n) => (n != null ? `ลบแถว ${n}` : "ลบแถว"),
   emptyRows: "ยังไม่มีแถว",
   emptyRowsHint: "ยังไม่มีแถว — กดเพิ่มแถว หรือติ๊กข้าม",
   seededRowTip: "เริ่มด้วย 1 แถวว่างแล้ว — กรอกหรือกด + เพิ่มแถว",
@@ -57,22 +69,35 @@ export const UI_LABELS = Object.freeze({
 
   // Toolbar
   toolsMenu: "เครื่องมือ",
-  exportJson: "ส่งออก JSON",
-  exportJsonTitle: "ส่งออกค่าที่กรอกเป็น JSON",
-  importJson: "นำเข้า JSON",
-  importJsonTitle: "นำเข้าค่าจากไฟล์ JSON",
-  putAiKey: "ใส่ AI key",
+  toolsMenuHint: "เครื่องมือ · คีย์ AI / แนบไฟล์ / ส่งออก",
+  exportJson: "ส่งออกค่า",
+  exportJsonTitle: "ส่งออกค่าที่กรอกเป็นไฟล์",
+  importJson: "นำเข้าค่า",
+  importJsonTitle: "นำเข้าค่าจากไฟล์ที่บันทึกไว้",
+  putAiKey: "ตั้งค่าคีย์ AI",
   aiReadyFallback: "พร้อม",
-  aiConnectedPrefix: "AI · ",
-  attachSource: "แนบเอกสารต้นทาง",
-  attachSourceMulti: "ต้นทาง → ให้ AI กรอก JSON",
+  aiConnectedPrefix: "คีย์ AI · ",
+  aiStatusNoKey: "AI ยังไม่พร้อม · ยังไม่มีคีย์",
+  aiStatusReady: (provider) => `พร้อมใช้ AI · ${provider}`,
+  aiStatusNoFile: "ยังไม่มีไฟล์",
+  aiStatusEmptyCount: (n) => `ยังว่าง ${n} ช่อง`,
+  aiStatusReadyCreate: "พร้อมสร้าง",
+  aiStatusCreating: "กำลังสร้าง",
+  aiStatusNotReadyCount: (n) => `ยังไม่พร้อม — ว่าง ${n} ช่อง`,
+  attachSource: "แนบไฟล์ให้ AI ช่วยกรอก",
+  attachSourceMulti: "แนบไฟล์ให้ AI ช่วยกรอก (หลายเทมเพลต)",
   attachSourceInputAria: "แนบเอกสารต้นทางสำหรับ AI กรอกค่า",
-  attachSourceNeedKeyBanner: "ต้องใส่ AI API key ของคุณก่อนถึงจะแนบเอกสารได้",
-  attachSourceTitleNeedKey: "ต้องใส่ AI key ของคุณก่อน",
+  attachSourceNeedKeyBanner: "ต้องตั้งค่าคีย์ AI ก่อนถึงจะแนบเอกสารได้",
+  attachSourceTitleNeedKey: "ต้องตั้งค่าคีย์ AI ก่อน",
   attachSourceTitleMulti:
-    "แนบต้นทาง — ส่ง Export JSON ให้ AI กรอกค่า แล้วนำ JSON กลับมาใส่จอ",
-  attachSourceTitleSingle: "แนบ PDF / Word / รูป — ส่งโครง JSON ให้ AI กรอกค่า",
+    "แนบต้นทาง — ให้ AI อ่านแล้วกรอกค่าลงหลายเทมเพลต",
+  attachSourceTitleSingle: "แนบ PDF / Word / รูป — ให้ AI อ่านแล้วกรอกช่อง",
+  attachSourceConfirmTitle: "ส่งไฟล์ให้ AI อ่าน?",
+  attachSourceConfirmBody:
+    "จะส่งไฟล์นี้ให้ AI อ่านเพื่อกรอกช่อง — ดำเนินการต่อไหม?",
+  attachSourceConfirmOk: "ดำเนินการต่อ",
   addTemplateInputAria: "เลือกไฟล์เทมเพลต Word เพิ่ม",
+  addTemplateBtn: "+ เพิ่มเทมเพลต",
   homeLink: "← หน้าหลัก",
   homeLinkTitle: "กลับไปหน้าอัปโหลดเทมเพลต",
   createTemplate: "สร้างเทมเพลต",
@@ -81,20 +106,44 @@ export const UI_LABELS = Object.freeze({
   createDocMulti: "สร้างเอกสาร…",
   saveDraft: "บันทึกดราฟ",
   loadDraft: "โหลดดราฟ",
-  multiMetaHint:
-    " · แนบต้นทาง → ระบบสร้างโครง JSON → AI กรอกค่า → ใส่ลงหน้าจอ",
+  multiMetaHint: " · แนบไฟล์ให้ AI ช่วยกรอกได้จากเมนูเครื่องมือ",
   stickyCtaHint:
-    "จะดาวน์โหลดไฟล์ใหม่ โดยไม่แก้ไฟล์ต้นฉบับ · ช่องว่างต้องติ๊ก “ข้าม” · ส่งออก/นำเข้า JSON ได้ด้านบน · บันทึกดราฟเพื่อกลับมาทำต่อข้ามวัน",
+    "จะได้ไฟล์ใหม่ โดยไม่แก้ไฟล์ต้นฉบับ · ช่องที่ไม่ใช้ให้ติ๊กข้าม · บันทึกดราฟเพื่อทำต่อภายหลัง",
   stickyCtaHintMulti:
-    " · หลายเทมเพลต: แนบต้นทางเพื่อแมป JSON ลงจอ แล้วกดสร้างเลือกไฟล์เดียวหรือทั้งหมด",
+    " · หลายเทมเพลต: แนบไฟล์ให้ AI ช่วยกรอก แล้วกดสร้างเลือกไฟล์เดียวหรือทั้งหมด",
+  uploadInvalidFile:
+    "ไฟล์นี้ใช้ไม่ได้ — เลือกได้เฉพาะไฟล์ Word นามสกุล .docx",
+  connectFailed: "เชื่อมต่อไม่สำเร็จ — ลองใหม่",
+  connectRetry: "ลองอีกครั้ง",
+  draftResumeTitle: "มีงานค้างอยู่ — ทำต่อหรือเริ่มใหม่?",
+  draftResumeBody:
+    "พบงานที่ค้างในเครื่องนี้ — ทำต่อจากเดิม หรือเริ่มใหม่ (ล้างค่าในเครื่อง ไม่ลบไฟล์บนเซิร์ฟเวอร์)",
+  draftResumeContinue: "ทำต่อ",
+  draftResumeFresh: "เริ่มใหม่",
+  recentLocalWork: "งานล่าสุดในเครื่องนี้",
+  generateClearToast: "ดาวน์โหลดแล้ว — ล้างช่องที่กรอกไหม?",
+  generateClearKeep: "เก็บไว้",
+  generateClearWipe: "ล้างช่อง",
+  taggerEntryTitle: "สร้างเทมเพลตจากเอกสารตัวอย่าง",
+  taggerEntrySub:
+    "อัปโหลดไฟล์ Word แล้วลากคลุมข้อความที่อยากให้เป็นช่องกรอก",
+  taggerPickSample: "เลือกไฟล์ตัวอย่าง",
+  taggerExistingBanner: (n) =>
+    `พบช่องกรอกในไฟล์ ${n} ช่อง — คลิกที่ช่องเพื่อเปลี่ยนชื่อ`,
+  taggerExistingBannerNote:
+    "ช่องที่มีในไฟล์อยู่แล้ว ลบในหน้านี้ไม่ได้ หากต้องการลบ ให้แก้ใน Word แล้วอัปโหลดใหม่",
+  taggerMakeField: "ทำให้เป็นช่องกรอก",
+  taggerShowTagCode: "ดูรหัสแท็ก",
+  supportContact: "ติดต่อฝ่ายสนับสนุน",
+  supportEmail: "support@tps18.space",
 
   // Home (mockup 01 / prototype-screens.html)
-  homeHeadline: "docx-form — กรอกแบบฟอร์มเอกสาร Word จากเทมเพลต .docx",
+  homeHeadline: "กรอกแบบฟอร์ม Word ออนไลน์",
   homeSubhead:
-    "อัปโหลดเทมเพลตที่มีแท็ก {{ชื่อฟิลด์}} แล้วกรอกบนหน้าเว็บ · รองรับหลายเทมเพลต · JSON · AI (BYOK)",
+    "อัปโหลดไฟล์ Word แล้วกรอกช่องว่างบนเว็บนี้ จากนั้นดาวน์โหลดไฟล์ใหม่ โดยไม่แก้ไฟล์ต้นฉบับ",
   homeAboutSummary: "เกี่ยวกับ docx-form",
   homeAboutBody:
-    "เว็บแอปสร้างเอกสารจากเทมเพลต Microsoft Word (.docx) อ่านตัวแปรแล้วสร้างฟอร์มให้กรอก รองรับดราฟ นำเข้า/ส่งออก JSON และ AI แมปจากไฟล์ต้นทาง",
+    "เว็บแอปสร้างเอกสารจากเทมเพลต Microsoft Word (.docx) อ่านช่องว่างแล้วสร้างฟอร์มให้กรอก รองรับดราฟ และ AI ช่วยกรอกจากไฟล์ต้นทาง (ใช้คีย์ของท่านเอง)",
   dropzoneDrag: "ลากไฟล์ .docx มาวางที่นี่",
   dropzoneOrPick: "หรือเลือกไฟล์ · ฟรีสูงสุด 2 ไฟล์ต่อครั้ง",
   dropzonePick: "เลือกไฟล์",
@@ -103,9 +152,9 @@ export const UI_LABELS = Object.freeze({
   dropzoneAriaUploadTemplates: "อัปโหลดไฟล์เทมเพลต Word",
   showFullContentLabel: "แสดงรายละเอียดเนื้อหาในไฟล์ทั้งหมด",
   noTemplateTitle: "ยังไม่มีเทมเพลต?",
-  noTemplateDesc: "ไฮไลต์ข้อความในไฟล์ตัวอย่าง แล้วแทนด้วย {{ตัวแปร}}",
+  noTemplateDesc: "อัปโหลดไฟล์ตัวอย่าง แล้วลากคลุมข้อความที่อยากให้เป็นช่องกรอก",
   createTemplateFromDoc: "สร้างเทมเพลตจากเอกสาร",
-  manualVarsDetails: "วิธีใส่ตัวแปรด้วยมือ",
+  manualVarsDetails: "สำหรับผู้จัดทำเทมเพลต",
   startCreateTemplate: "เริ่มสร้างเทมเพลต",
   loadDraftAria: "โหลดดราฟ",
   loadDraftEmptyLoading: "กำลังโหลดรายการดราฟ…",
@@ -224,7 +273,7 @@ export function formatExamplePlaceholder(displayLabel) {
  * @param {string} [minRowsNote]
  */
 export function formatMissingFieldLabel(displayLabel, minRowsNote) {
-  const label = String(displayLabel || "").trim();
+  const label = UI_LABELS.shortValidationLabel(displayLabel);
   if (minRowsNote) return `${label} (${minRowsNote})`;
   return label;
 }
@@ -234,7 +283,9 @@ export function formatMissingFieldLabel(displayLabel, minRowsNote) {
  * @param {string[]} displayLabels
  */
 export function formatValidationBannerModel(displayLabels) {
-  const labels = (displayLabels || []).map((s) => String(s).trim()).filter(Boolean);
+  const labels = (displayLabels || [])
+    .map((s) => UI_LABELS.shortValidationLabel(s))
+    .filter(Boolean);
   return {
     title: UI_LABELS.validationTitle(labels.length),
     items: labels,

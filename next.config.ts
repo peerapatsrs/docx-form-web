@@ -27,6 +27,18 @@ const nextConfig: NextConfig = {
     "@better-auth/passkey",
     "@cursor/sdk",
   ],
+  async redirects() {
+    return [
+      { source: "/tagger", destination: "/", permanent: false },
+      { source: "/form", destination: "/", permanent: false },
+      { source: "/progress", destination: "/", permanent: false },
+      { source: "/success", destination: "/", permanent: false },
+      { source: "/components", destination: "/", permanent: false },
+      { source: "/history", destination: "/", permanent: false },
+      { source: "/settings", destination: "/account", permanent: false },
+      { source: "/keys", destination: "/account", permanent: false },
+    ];
+  },
   async headers() {
     return [
       {

@@ -8,6 +8,7 @@ import { isSuperAdminEmail } from "./auth-superadmin";
 import { isDevAuthEnabled } from "@/lib/dev-auth-flag";
 import { getBetterAuthBaseUrl } from "@/lib/app-base-url";
 import { devAuthPlugin } from "./dev-auth-plugin";
+import { isPasswordLoginEnabled } from "./oidc-config";
 
 function env(name: string): string | undefined {
   const v = String(process.env[name] || "").trim();
@@ -98,8 +99,9 @@ export const auth = betterAuth({
     "docx-form-dev-secret-change-me-32b",
   database: getAuthPool(),
   emailAndPassword: {
-    // Password auth off — OAuth + passkeys only (phishing-resistant by default).
-    enabled: false,
+    // Password off by default (OAuth + passkeys). Opt-in via ENABLE_PASSWORD_LOGIN=1
+    // until central SSO migration decides otherwise. Passkeys stay enabled either way.
+    enabled: isPasswordLoginEnabled(),
   },
   user: {
     additionalFields: {

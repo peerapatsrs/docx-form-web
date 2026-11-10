@@ -37,14 +37,32 @@ function planBadgeLabel(user: SessionUser | null): string {
   return isPaidSessionUser(user) ? "จ่ายแล้ว" : "ฟรี";
 }
 
+function hasOidcSessionCookie(): boolean {
+  if (typeof document === "undefined") return false;
+  return /(?:^|;\s*)docx_oidc=1(?:;|$)/.test(document.cookie);
+}
+
 export function AuthBar() {
   const [user, setUser] = useState<SessionUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [ssoLogoutPath, setSsoLogoutPath] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
+        void fetch("/api/auth-config")
+          .then((r) => r.json())
+          .then((cfg: { ssoLogoutPath?: string | null; oidc?: boolean }) => {
+            if (cancelled) return;
+            if (cfg?.oidc && cfg.ssoLogoutPath) {
+              setSsoLogoutPath(String(cfg.ssoLogoutPath));
+            }
+          })
+          .catch(() => {
+            /* ignore */
+          });
+
         const { data } = await authClient.getSession();
         if (cancelled) return;
         if (data?.user) {
@@ -141,6 +159,12 @@ export function AuthBar() {
               "ออกจากระบบ?\nจะออกจากบัญชีนี้บนเครื่องนี้ — งานในเครื่อง (ดราฟ/คีย์ท้องถิ่น) ยังอยู่",
             )
           ) {
+            return;
+          }
+          // Prefer RP-initiated OIDC logout when this browser used central SSO.
+          if (ssoLogoutPath && hasOidcSessionCookie()) {
+            // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- hard nav to IdP logout
+            window.location.assign(ssoLogoutPath);
             return;
           }
           void authClient.signOut({

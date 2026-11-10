@@ -4,6 +4,8 @@ import { auth } from "./auth";
 import { seedQaUser } from "./auth-seed-qa";
 import { ensureSuperAdmins } from "./auth-superadmin";
 import { seedTestUsers } from "./dev-test-accounts";
+import { ensureOidcIdentitiesSchema } from "./oidc-identities";
+import { isOidcEnabled } from "./oidc-config";
 
 let ran = false;
 
@@ -11,6 +13,11 @@ let ran = false;
 export async function migrateAuth(): Promise<void> {
   if (ran) return;
   await ensureAdminSchema();
+  // OIDC identities / login-state tables — safe when SSO env is absent (schema only).
+  await ensureOidcIdentitiesSchema();
+  if (isOidcEnabled()) {
+    console.info("[auth] OIDC SSO enabled (identities table ready)");
+  }
   const { toBeCreated, toBeAdded, toBeAddedIndexes, runMigrations } =
     await getMigrations(auth.options);
   const pending =

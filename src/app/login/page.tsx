@@ -101,6 +101,8 @@ export default function LoginPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [accountNext, setAccountNext] = useState(false);
   const [testAccounts, setTestAccounts] = useState<DevTestAccount[]>([]);
+  const [ssoEnabled, setSsoEnabled] = useState(false);
+  const [ssoLoginPath, setSsoLoginPath] = useState("/api/auth/oidc/login");
 
   useEffect(() => {
     try {
@@ -123,6 +125,9 @@ export default function LoginPage() {
         providers?: string[];
         devAuth?: boolean;
         devAuthDefaultEmail?: string | null;
+        oidc?: boolean;
+        sso?: boolean;
+        ssoLoginPath?: string | null;
       };
       const list = Array.isArray(data.providers) ? data.providers : [];
       setProviders(
@@ -131,6 +136,9 @@ export default function LoginPage() {
           label: PROVIDER_LABELS[id] || id,
         })),
       );
+      const ssoOn = Boolean(data.oidc || data.sso);
+      setSsoEnabled(ssoOn);
+      if (data.ssoLoginPath) setSsoLoginPath(String(data.ssoLoginPath));
 
       if (INCLUDE_DEV_AUTH_CLIENT && data.devAuth) {
         const mod = await import("@/components/DevAuthControls");
@@ -210,6 +218,18 @@ export default function LoginPage() {
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "เข้าสู่ระบบไม่สำเร็จ");
+      setBusy(null);
+    }
+  }
+
+  function signInSso() {
+    setError("");
+    setBusy("sso");
+    try {
+      const next = encodeURIComponent(postLoginPath());
+      window.location.assign(`${ssoLoginPath}?next=${next}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "เข้าสู่ระบบ SSO ไม่สำเร็จ");
       setBusy(null);
     }
   }
@@ -387,7 +407,21 @@ export default function LoginPage() {
         ) : null}
 
         <div className="auth-actions">
-          {googleFirst.length === 0 ? (
+          {ssoEnabled ? (
+            <button
+              type="button"
+              className="auth-provider auth-provider-sso"
+              disabled={busy !== null}
+              onClick={() => signInSso()}
+            >
+              <ExternalAccountMark className="auth-provider-icon" />
+              <span>
+                {busy === "sso" ? "กำลังเปิด…" : "เข้าด้วย TPS18 SSO"}
+              </span>
+            </button>
+          ) : null}
+
+          {googleFirst.length === 0 && !ssoEnabled ? (
             <p className="auth-hint">
               ยังไม่ได้ตั้งค่าการเข้าสู่ระบบด้วยบัญชีภายนอก — ติดต่อฝ่ายสนับสนุน
             </p>

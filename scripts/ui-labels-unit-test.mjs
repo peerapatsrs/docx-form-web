@@ -43,19 +43,23 @@ assert.equal(
 );
 assert.equal(UI_LABELS.draftListLoadFailed, "อ่านรายการดราฟไม่สำเร็จ");
 assert.ok(
-  UI_LABELS.loadDraftDialogBody.includes("IndexedDB") ||
-    UI_LABELS.loadDraftDialogBody.includes("เบราว์เซอร์"),
+  UI_LABELS.loadDraftDialogBody.includes("เบราว์เซอร์") ||
+    UI_LABELS.draftOpenDialogBody.includes("เบราว์เซอร์"),
 );
 assert.equal(UI_LABELS.dialogClose, "ปิด");
 assert.equal(UI_LABELS.dialogCancel, "ยกเลิก");
 assert.equal(UI_LABELS.dialogSave, "บันทึก");
 assert.equal(UI_LABELS.dialogDelete, "ลบ");
-assert.equal(UI_LABELS.dialogLoad, "โหลด");
+assert.equal(UI_LABELS.dialogLoad, "เปิดดราฟนี้");
+assert.equal(UI_LABELS.draftOpenAction, "เปิดดราฟนี้");
 assert.equal(UI_LABELS.draftFallbackTitle, "ดราฟ");
 assert.equal(UI_LABELS.draftUntitled, "ไม่มีชื่อ");
 assert.equal(UI_LABELS.draftSaveNoTemplate, "ยังไม่มีเทมเพลตให้บันทึกดราฟ");
 assert.equal(UI_LABELS.draftSaveDialogTitle, "บันทึกดราฟ");
-assert.ok(UI_LABELS.draftSaveDialogBody.includes("IndexedDB"));
+assert.ok(
+  UI_LABELS.draftSaveDialogBody.includes("เบราว์เซอร์") &&
+    !UI_LABELS.draftSaveDialogBody.includes("IndexedDB"),
+);
 assert.equal(UI_LABELS.draftSaveNameLabel, "ชื่อดราฟ (ไม่บังคับ)");
 assert.equal(UI_LABELS.draftSaveSuccess("ใบเสนอราคา"), "บันทึกดราฟแล้ว: ใบเสนอราคา");
 assert.equal(UI_LABELS.draftSaveFailed, "บันทึกดราฟไม่สำเร็จ");
@@ -103,9 +107,24 @@ console.log("✓ fieldDisplayLabel");
 assert.equal(formatExamplePlaceholder("ลูกค้า"), "เช่น ลูกค้า");
 assert.equal(formatExamplePlaceholder(""), "");
 assert.equal(
+  formatExamplePlaceholder("ประเภทหนี้ กู้ เงินกู้ยืม", "ยืม"),
+  "เช่น ยืม",
+);
+assert.equal(
+  formatMissingFieldLabel(
+    "บริษัทฯ ขอเรียนว่าได้ดำเนินการตรวจกรรมสิทธิ์ที่ดิน สำนักงานที่ดิน เมื่อวันที่",
+    undefined,
+    "วันที่ตรวจ",
+  ),
+  "วันที่ตรวจ",
+);
+assert.equal(
   formatMissingFieldLabel("รายการสินค้า", UI_LABELS.validationListMinRows),
   "รายการสินค้า (ต้องมีอย่างน้อย 1 แถว)",
 );
+assert.ok(UI_LABELS.tipKindBool.includes("ติ๊ก"));
+assert.ok(UI_LABELS.addKeyNeedsUpgrade.includes("อัปเกรด"));
+assert.ok(UI_LABELS.aiCancelNeutral.includes("ยกเลิก"));
 console.log("✓ placeholder + missing label");
 
 const banner = formatValidationBannerModel(["ลูกค้า", "วันที่", "โลโก้"]);

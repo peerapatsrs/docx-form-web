@@ -31,6 +31,20 @@ export function mapAiKeyError(data, status = 0) {
     AI_KEY_NOT_FOUND: "ไม่พบคีย์นี้ — อาจถูกลบไปแล้ว",
   };
   if (code && byCode[code]) return byCode[code];
+  // Map common English provider errors to Thai (F27/F28) — keep dialog open via caller.
+  if (/api key not valid|invalid api key|invalid user api key|incorrect api key/i.test(fallback)) {
+    return byCode.AI_KEY_INVALID;
+  }
+  if (/permission|forbidden|unauthorized/i.test(fallback) && status === 401) {
+    return byCode.AI_KEY_UNAUTHORIZED;
+  }
+  if (fallback && !/^[A-Za-z0-9_ ."'-]+$/.test(fallback)) {
+    // Already Thai (or mixed) — show as-is.
+    return fallback;
+  }
+  if (fallback && /[A-Za-z]{4,}/.test(fallback)) {
+    return `${byCode.AI_KEY_INVALID} (${fallback.slice(0, 80)})`;
+  }
   if (fallback) return fallback;
   if (status === 401) return "ต้องเข้าสู่ระบบก่อนจึงจะจัดการคีย์บนเซิร์ฟเวอร์ได้";
   if (status === 404) return "ไม่พบคีย์นี้ — อาจถูกลบไปแล้ว";

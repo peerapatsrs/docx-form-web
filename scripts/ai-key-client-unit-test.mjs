@@ -23,6 +23,11 @@ assert.equal(
 );
 assert.equal(mapAiKeyError({ error: "ข้อความไทยจากเซิร์ฟเวอร์" }), "ข้อความไทยจากเซิร์ฟเวอร์");
 assert.equal(mapAiKeyError({}, 401).includes("เข้าสู่ระบบ"), true);
+assert.ok(
+  mapAiKeyError({
+    error: "API key not valid. Please pass a valid API key.",
+  }).includes("คีย์นี้ใช้ไม่ได้"),
+);
 
 const entry = normalizeMaskedEntry({
   id: "k-1",

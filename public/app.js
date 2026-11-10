@@ -948,7 +948,7 @@ function renderNamedDraftListHtml(drafts, opts = {}) {
             <span class="draft-list-meta">${escapeHtml(formatDraftDate(d.savedAt))}</span>
           </div>
           <div class="draft-list-actions">
-            <button type="button" class="btn-secondary btn-compact" data-draft-load="${escapeAttr(d.id)}">${escapeHtml(UI_LABELS.dialogLoad)}</button>
+            <button type="button" class="btn-secondary btn-compact" data-draft-load="${escapeAttr(d.id)}">${escapeHtml(UI_LABELS.draftOpenAction)}</button>
             <button type="button" class="btn-ghost btn-compact" data-draft-delete="${escapeAttr(d.id)}">${escapeHtml(UI_LABELS.dialogDelete)}</button>
           </div>
         </li>`,
@@ -1058,7 +1058,7 @@ async function openNamedDraftPicker() {
   overlay.innerHTML = `
     <div class="dialog-card dialog-card-wide">
       <h2 class="dialog-title" id="namedDraftDialogTitle">${escapeHtml(UI_LABELS.loadDraft)}</h2>
-      <p class="dialog-body" id="namedDraftDialogBody">${escapeHtml(UI_LABELS.loadDraftDialogBody)}</p>
+      <p class="dialog-body" id="namedDraftDialogBody">${escapeHtml(UI_LABELS.draftOpenDialogBody)}</p>
       <div id="namedDraftDialogList">${renderNamedDraftListHtml(drafts)}</div>
       <div class="dialog-actions dialog-actions-stack">
         <button type="button" class="btn-ghost" data-draft-close>${escapeHtml(UI_LABELS.dialogClose)}</button>
@@ -1277,7 +1277,7 @@ function wireMobileToolsMenuBanner() {
 function showBanner(message, kind = "error", opts = {}) {
   if (!banner) return;
   banner.hidden = !message;
-  banner.classList.remove("success", "progress", "is-validation");
+  banner.classList.remove("success", "progress", "is-validation", "warn");
   validationBannerActive = !!(message && opts.validation);
   if (!message) {
     hideBanner();
@@ -1299,12 +1299,13 @@ function showBanner(message, kind = "error", opts = {}) {
   if (kind === "progress") {
     banner.classList.add("progress");
     banner.setAttribute("aria-busy", "true");
-    banner.innerHTML = `<span class="banner-spinner" aria-hidden="true"></span><span class="banner-copy"><span class="banner-msg">${escapeHtml(message)}</span>${noteHtml}</span><span class="banner-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="banner-bar" aria-hidden="true"></span>`;
+    banner.innerHTML = `<span class="banner-spinner" aria-hidden="true"></span><span class="banner-copy"><span class="banner-msg">${escapeHtml(message)}</span>${noteHtml}</span>${actionBtn}<span class="banner-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="banner-bar" aria-hidden="true"></span>`;
   } else if (kind === "success") {
     banner.classList.add("success");
     banner.removeAttribute("aria-busy");
     banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${actionBtn}${closeBtn}`;
   } else if (kind === "warn") {
+    banner.classList.add("warn");
     banner.removeAttribute("aria-busy");
     banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${noteHtml}${actionBtn}${closeBtn}`;
   } else if (opts.validation && validationItems.length) {
@@ -1857,10 +1858,10 @@ function validateBeforeSubmit() {
     if (f.type === "text" || f.type === "email") {
       const raw = String(state.values[f.name] ?? "").trim();
       if (!raw) {
-        missing.push(formatMissingFieldLabel(fieldLabel));
+        missing.push(formatMissingFieldLabel(fieldLabel, undefined, f.name));
         markFieldError(`#f-${cssId(f.name)}`, f.name);
       } else if (isEmailTypedField(f.name, f) && !isValidEmailValue(raw)) {
-        missing.push(formatInvalidEmailMissing(fieldLabel));
+        missing.push(formatInvalidEmailMissing(fieldLabel, f.name));
         markFieldErrorMessage(
           `#f-${cssId(f.name)}`,
           f.name,
@@ -1871,7 +1872,7 @@ function validateBeforeSubmit() {
       // always true/false — no required check
     } else if (f.type === "image") {
       if (!state.images[f.name]) {
-        missing.push(formatMissingFieldLabel(fieldLabel));
+        missing.push(formatMissingFieldLabel(fieldLabel, undefined, f.name));
         const wrap = app.querySelector(`[data-image-field="${cssAttrSelector(f.name)}"]`);
         if (wrap) {
           wrap.classList.add("has-error");
@@ -2400,12 +2401,12 @@ async function pullServerAiKeys() {
     if (!res.ok) return;
     const data = await res.json().catch(() => ({}));
     const remote = Array.isArray(data.entries) ? data.entries : [];
-    if (!remote.length) return;
     const vault = readAiVault();
-    const byId = new Map(vault.entries.map((e) => [e.id, e]));
+    const localOnly = vault.entries.filter((e) => !e.storeOnServer);
+    const byId = new Map();
     for (const r of remote) {
       if (!r?.id) continue;
-      const existing = byId.get(String(r.id));
+      const existing = vault.entries.find((e) => e.id === String(r.id));
       // Server no longer returns plaintext — keep local secret if we already have it.
       const next = {
         id: String(r.id),
@@ -2414,14 +2415,16 @@ async function pullServerAiKeys() {
         apiKey: existing?.apiKey || "",
         model: String(r.model || existing?.model || ""),
         storeOnServer: true,
+        hasKey: r.hasKey !== false,
         // hasKey: server has ciphertext; never expect plaintext in GET.
         maskedKey: String(r.maskedKey || existing?.maskedKey || "") ||
           (r.hasKey ? "••••" : ""),
       };
       byId.set(next.id, next);
     }
-    vault.entries = [...byId.values()];
-    if (!vault.activeId || !byId.has(vault.activeId)) {
+    // Drop stale server-backed entries that GET no longer returns (F31).
+    vault.entries = [...localOnly, ...byId.values()];
+    if (!vault.activeId || !vault.entries.some((e) => e.id === vault.activeId)) {
       vault.activeId = vault.entries[0]?.id || null;
     }
     writeAiVault(vault);
@@ -2616,19 +2619,19 @@ function canAddAiKey() {
 
 async function explainAiKeyQuota() {
   const choice = await askDialog({
-    title: "เพิ่มคีย์ได้เมื่อเป็นแผนจ่ายแล้ว",
-    body:
-      `บัญชี${planQuotaLabel()}เก็บ AI key ได้ ${FREE_MAX_AI_KEYS} อัน\n` +
-      `ถ้าต้องการเก็บหลายคีย์ (หลายเจ้า / สลับใช้) ให้อัปเกรดเป็นจ่ายแล้วที่หน้าบัญชี หรือให้ผู้ดูแลตั้งแผนให้`,
+    title: UI_LABELS.addKeyUpsellTitle,
+    body: aiUserLoggedIn
+      ? UI_LABELS.addKeyUpsellBodyLoggedIn
+      : UI_LABELS.addKeyUpsellBodyLoggedOut,
     actions: [
       { id: "ok", label: "เข้าใจแล้ว", kind: "primary" },
-      { id: "account", label: "ไปหน้าบัญชี", kind: "secondary" },
+      { id: "account", label: UI_LABELS.addKeyUpsellAccount, kind: "secondary" },
     ],
   });
   if (choice === "account") {
     // Hard nav — Next soft router is unavailable from this vanilla app.js shell.
     // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- intentional
-    window.location.assign("/account");
+    window.location.assign(aiUserLoggedIn ? "/account" : "/login?next=%2Faccount");
   }
 }
 
@@ -2943,7 +2946,7 @@ async function openAiKeysManager() {
           <p class="dialog-body" id="aiKeysDialogBody">${escapeHtml(quotaHint)} · ${escapeHtml(syncHint)}</p>
           ${renderList()}
           <div class="dialog-actions dialog-actions-stack">
-            <button type="button" class="btn-primary" data-ai-act="add" title="${allowAdd ? "เพิ่มคีย์ผู้ให้บริการ" : "แผนฟรีมีได้ 1 คีย์ — จ่ายแล้วถึงจะเพิ่มได้อีก"}">${allowAdd ? "เพิ่มคีย์" : "เพิ่มคีย์ (จ่ายแล้ว)"}</button>
+            <button type="button" class="btn-primary" data-ai-act="add" title="${allowAdd ? "เพิ่มคีย์ผู้ให้บริการ" : "แผนฟรีมีได้ 1 คีย์ — จ่ายแล้วถึงจะเพิ่มได้อีก"}">${allowAdd ? "เพิ่มคีย์" : UI_LABELS.addKeyNeedsUpgrade}</button>
             <button type="button" class="btn-secondary" data-ai-act="use" ${vault.entries.length ? "" : "disabled"}>ใช้คีย์ที่เลือก</button>
             <button type="button" class="btn-secondary" data-ai-act="edit-model" ${active ? "" : "disabled"}>เปลี่ยนโมเดลคีย์ที่เลือก</button>
             <button type="button" class="btn-ghost" data-ai-act="close">ปิด</button>
@@ -3184,6 +3187,7 @@ async function connectGoogleAi() {
   await refreshAiLoginState();
   await openAiKeyDialog({
     loggedIn: aiUserLoggedIn,
+    preferredProvider: getClientAiProvider() || aiStatus.effectiveProvider || aiStatus.provider || "",
     providers: aiProvidersCatalog.length
       ? aiProvidersCatalog.map((p) => ({
           id: p.id,
@@ -3245,6 +3249,24 @@ function countUnfilledFields() {
 /** Status pill copy: never claim "ready · Cursor · model" without the user's key / file. */
 function syncAiStatusPill() {
   if (!statusText || !statusDot) return;
+  const pill = document.getElementById("status");
+  if (pill) {
+    pill.classList.add("is-clickable");
+    pill.setAttribute("role", "button");
+    pill.tabIndex = 0;
+    pill.title = "จัดการคีย์ AI";
+    if (!pill.dataset.aiClickWired) {
+      pill.dataset.aiClickWired = "1";
+      const openKeys = (ev) => {
+        ev.preventDefault();
+        void connectGoogleAi();
+      };
+      pill.addEventListener("click", openKeys);
+      pill.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") openKeys(ev);
+      });
+    }
+  }
   const hasFile = !!(state.file || taggerSession);
   const hasKey = hasClientAiCredentials();
   if (!hasKey) {
@@ -3512,7 +3534,7 @@ function renderEmpty() {
       </details>
       <button type="button" class="dropzone dropzone-primary" id="dropzone" aria-label="${escapeAttr(UI_LABELS.dropzoneAriaUploadWord)}">
         <div class="dropzone-title">${escapeHtml(UI_LABELS.dropzoneDrag)}</div>
-        <div class="dropzone-sub home-upload-limit">${escapeHtml(UI_LABELS.dropzoneOrPick)}</div>
+        <div class="dropzone-sub home-upload-limit">${escapeHtml(premiumStatus.paid ? UI_LABELS.dropzoneOrPickPaid(getMaxMultiTemplates()) : UI_LABELS.dropzoneOrPickFree)}</div>
         <span class="btn-primary dropzone-pick">${escapeHtml(UI_LABELS.dropzonePick)}</span>
       </button>
       <input class="sr-only" type="file" id="fileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="${escapeAttr(UI_LABELS.dropzoneAriaUploadTemplates)}" />
@@ -4277,7 +4299,8 @@ async function runTaggerAiDraft() {
     }
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
-      showBanner("ยกเลิก AI ดราฟตัวแปรแล้ว");
+      showBanner(UI_LABELS.aiCancelNeutral, "warn");
+      setTimeout(() => showBanner(""), 2800);
     } else {
       const msg = err instanceof Error ? err.message : "AI ดราฟตัวแปรไม่สำเร็จ";
       showBanner(msg);
@@ -4301,16 +4324,28 @@ function startTaggerAiWaitBanner() {
     "AI กำลังหาจุดที่น่าจะเป็นตัวแปร…",
     "อาจใช้เวลาสักครู่ ตามขนาดไฟล์และโมเดลที่เลือก",
   ];
-  const modelNote = "ความแม่นยำขึ้นอยู่กับโมเดลที่ใช้";
+  const started = Date.now();
   let i = 0;
   const paint = () => {
-    showBanner(lines[i % lines.length] || lines[0], "progress", { note: modelNote });
+    const sec = Math.max(0, Math.floor((Date.now() - started) / 1000));
+    const mm = String(Math.floor(sec / 60));
+    const ss = String(sec % 60).padStart(2, "0");
+    const note = `ผ่านไป ${mm}:${ss} · ความแม่นยำขึ้นอยู่กับโมเดลที่ใช้`;
+    showBanner(lines[i % lines.length] || lines[0], "progress", {
+      note,
+      action: {
+        label: "ยกเลิก",
+        onClick: () => {
+          taggerSuggestAbort?.abort();
+        },
+      },
+    });
   };
   paint();
   const timer = setInterval(() => {
     i += 1;
     paint();
-  }, 4200);
+  }, 1000);
   return () => clearInterval(timer);
 }
 
@@ -4529,7 +4564,7 @@ function renderTaggerWorkspace() {
     endTaggerChipRepResolve();
   }
 
-  const taggerAiOn = !!(aiStatus.connected || hasClientAiCredentials());
+  const taggerAiOn = !!hasClientAiCredentials();
   const taggerAiKeyTitle = taggerAiOn
     ? `คีย์「${getClientAiLabel() || aiStatus.entryLabel || "AI"}」· ${aiStatus.providerLabel || providerLabel(getClientAiProvider())} · ${aiStatus.model || getClientAiModel() || ""} — เลือก provider / โมเดล / คีย์`
     : "ใส่ AI API key ของคุณ (หลายเจ้าได้ · เก็บในเบราว์เซอร์)";
@@ -4618,19 +4653,19 @@ function renderTaggerWorkspace() {
         <fieldset class="tagger-kind">
           <legend>ประเภท</legend>
           <label class="kind-text" data-kind="text"><input type="radio" name="taggerKind" value="text" checked /> ข้อความ <code>{{ชื่อ}}</code></label>
-          <label class="kind-bool" data-kind="bool"><input type="radio" name="taggerKind" value="bool" /> ติ๊ก <code>{{ชื่อ?จริง,เท็จ}}</code></label>
+          <label class="kind-bool" data-kind="bool"><input type="radio" name="taggerKind" value="bool" /> ${escapeHtml(UI_LABELS.taggerKindBoolLabel)} <code>${escapeHtml(UI_LABELS.taggerKindBoolCode)}</code></label>
           <label class="kind-auto" id="taggerKindAuto" data-kind="auto"><input type="radio" name="taggerKind" value="auto" /> รันเลข (auto) <code>{{+ชื่อ}}</code></label>
           <label class="kind-list" id="taggerKindList" data-kind="list" hidden><input type="radio" name="taggerKind" value="list" /> ลิสต์ (ย่อหน้า) <code>{{#ชื่อ}}…{{/}}</code></label>
           <label class="kind-list-table" id="taggerKindTable" data-kind="list-table" hidden><input type="radio" name="taggerKind" value="list-table" /> ตาราง/ลิสต์ (แถว) <code>{{#ชื่อ}}…{{/}}</code></label>
         </fieldset>
         <p class="tagger-kind-hint" id="taggerKindHint" hidden></p>
         <div class="tagger-bool-fields" id="taggerBoolFields" hidden>
-          <label class="field-label" for="taggerTrueText">ข้อความเมื่อติ๊ก (จริง)</label>
+          <label class="field-label" for="taggerTrueText">${escapeHtml(UI_LABELS.taggerKindBoolTrue)}</label>
           <div class="tagger-field-row">
             <input type="text" id="taggerTrueText" class="field-input" />
             <button type="button" class="btn-secondary btn-compact tagger-paste-btn" data-paste-into="taggerTrueText" title="วางข้อความที่คัดลอกไว้">วาง</button>
           </div>
-          <label class="field-label" for="taggerFalseText">ข้อความเมื่อไม่ติ๊ก (เท็จ)</label>
+          <label class="field-label" for="taggerFalseText">${escapeHtml(UI_LABELS.taggerKindBoolFalse)}</label>
           <div class="tagger-field-row">
             <input type="text" id="taggerFalseText" class="field-input" placeholder="ว่างได้" />
             <button type="button" class="btn-secondary btn-compact tagger-paste-btn" data-paste-into="taggerFalseText" title="วางข้อความที่คัดลอกไว้">วาง</button>
@@ -7544,11 +7579,53 @@ function renderTaggerListItemFields() {
   }
 }
 
+/**
+ * Expand a live DOM selection to whole Thai/Latin words via Intl.Segmenter (F33).
+ * @param {HTMLElement} root
+ */
+function snapTaggerSelectionToWords(root) {
+  const sel = window.getSelection();
+  if (!sel || !sel.rangeCount || sel.isCollapsed) return;
+  if (typeof Intl === "undefined" || typeof Intl.Segmenter !== "function") return;
+  try {
+    const range = sel.getRangeAt(0);
+    if (!isInsideTaggerRoot(root, range.commonAncestorContainer)) return;
+    // Only snap when selection lives inside a single text node.
+    if (range.startContainer !== range.endContainer) return;
+    if (range.startContainer.nodeType !== Node.TEXT_NODE) return;
+    const node = /** @type {Text} */ (range.startContainer);
+    const full = node.data || "";
+    if (!full.trim()) return;
+    let start = range.startOffset;
+    let end = range.endOffset;
+    if (end <= start) return;
+    const segmenter = new Intl.Segmenter("th", { granularity: "word" });
+    let snapStart = start;
+    let snapEnd = end;
+    for (const { segment, index, isWordLike } of segmenter.segment(full)) {
+      const segEnd = index + segment.length;
+      if (!isWordLike && !/[฀-๿A-Za-z0-9]/.test(segment)) continue;
+      if (segEnd <= start || index >= end) continue;
+      snapStart = Math.min(snapStart, index);
+      snapEnd = Math.max(snapEnd, segEnd);
+    }
+    if (snapStart === start && snapEnd === end) return;
+    const next = document.createRange();
+    next.setStart(node, Math.max(0, snapStart));
+    next.setEnd(node, Math.min(full.length, snapEnd));
+    sel.removeAllRanges();
+    sel.addRange(next);
+  } catch {
+    /* Segmenter / range edge cases — keep original selection */
+  }
+}
+
 function openTaggerCreateDialog() {
   if (!taggerSession) return;
   // Prefer a fresh live read; if the range already collapsed (float click), keep pending snapshot.
   const liveRoot = /** @type {HTMLElement | null} */ (document.getElementById("taggerSelectRoot"));
   if (liveRoot) {
+    snapTaggerSelectionToWords(liveRoot);
     const fresh = readTaggerSelection(liveRoot);
     if (fresh) taggerPendingSelection = fresh;
   }
@@ -8310,7 +8387,16 @@ async function confirmTaggerVariable() {
   taggerPendingSelection = null;
   closeTaggerDialog();
   window.getSelection()?.removeAllRanges();
-  await commitTaggerOps(toAdd);
+  if (!taggerSession) return;
+  const snapshotReplacements = taggerSession.replacements.map((x) => ({ ...x }));
+  const snapshotTagged = taggerSession.taggedFile;
+  const ok = await commitTaggerOps(toAdd);
+  if (ok && taggerSession) {
+    armTaggerCancelUndo(snapshotReplacements, snapshotTagged, {
+      mode: "toolbar",
+      tip: "เลิกทำ — ลบแท็กที่เพิ่งสร้าง",
+    });
+  }
 }
 
 /**
@@ -8405,7 +8491,7 @@ function openTaggerEditDialog(id) {
         <p class="field-label">ประเภท</p>
         <div class="tagger-kind tagger-edit-kind" role="radiogroup" aria-label="ประเภทตัวแปร">
           <label class="kind-text" data-kind="text"><input type="radio" name="taggerEditKind" value="text" ${kind === "text" ? "checked" : ""} /> ข้อความ <code>{{ชื่อ}}</code></label>
-          <label class="kind-bool" data-kind="bool"><input type="radio" name="taggerEditKind" value="bool" ${kind === "bool" ? "checked" : ""} /> ติ๊ก <code>{{ชื่อ?จริง,เท็จ}}</code></label>
+          <label class="kind-bool" data-kind="bool"><input type="radio" name="taggerEditKind" value="bool" ${kind === "bool" ? "checked" : ""} /> ${escapeHtml(UI_LABELS.taggerKindBoolLabel)} <code>${escapeHtml(UI_LABELS.taggerKindBoolCode)}</code></label>
           <label class="kind-auto" data-kind="auto"><input type="radio" name="taggerEditKind" value="auto" ${kind === "auto" ? "checked" : ""} /> รันเลข <code>{{+ชื่อ}}</code></label>
         </div>`
         : isList
@@ -8416,9 +8502,9 @@ function openTaggerEditDialog(id) {
         <label class="field-label" for="taggerEditName" id="taggerEditNameLabel">${kind === "auto" ? "ชื่อรันเลข" : isList ? "ชื่อลิสต์" : "ชื่อตัวแปร"}</label>
         <input type="text" id="taggerEditName" class="field-input" value="${escapeAttr(r.label || "")}" autocomplete="off" />
         <div id="taggerEditBoolFields" class="tagger-bool-fields" ${kind === "bool" ? "" : "hidden"}>
-          <label class="field-label" for="taggerEditTrue">ข้อความเมื่อติ๊ก (จริง)</label>
+          <label class="field-label" for="taggerEditTrue">${escapeHtml(UI_LABELS.taggerKindBoolTrue)}</label>
           <input type="text" id="taggerEditTrue" class="field-input" value="${escapeAttr(r.kind === "bool" ? r.trueText || trueDefault : trueDefault)}" />
-          <label class="field-label" for="taggerEditFalse">ข้อความเมื่อไม่ติ๊ก (เท็จ)</label>
+          <label class="field-label" for="taggerEditFalse">${escapeHtml(UI_LABELS.taggerKindBoolFalse)}</label>
           <input type="text" id="taggerEditFalse" class="field-input" value="${escapeAttr(r.falseText || "")}" placeholder="ว่างได้" />
         </div>
       `;
@@ -9399,12 +9485,16 @@ function downloadTaggedTemplate() {
   a.download = taggerSession.taggedFile.name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
-  showBanner("ดาวน์โหลดเทมเพลตแล้ว", "success");
-  setTimeout(() => showBanner(""), 2400);
+  showBanner(UI_LABELS.taggerDownloadNext, "success", {
+    action: {
+      label: UI_LABELS.taggerContinueFill,
+      onClick: () => {
+        void openTaggedInFillForm();
+      },
+    },
+  });
 }
 
-/** Kept for potential re-wire; sticky「ใช้กรอกต่อ」was removed. */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars -- intentional dead UI entry
 async function openTaggedInFillForm() {
   if (!taggerSession?.taggedFile) {
     showBanner("ยังไม่มีเทมเพลตที่แท็กแล้ว");
@@ -10405,13 +10495,14 @@ function renderForm() {
       ${fieldsHtmlOutside}
     </div>`;
 
-  const aiBtnLabel = aiStatus.connected
-    ? `${escapeHtml(UI_LABELS.aiConnectedPrefix)}${escapeHtml(getClientAiLabel() || aiStatus.providerLabel || String(aiStatus.model || UI_LABELS.aiReadyFallback).replace(/^gemini-/i, ""))}`
+  const aiReady = hasClientAiCredentials();
+  const aiBtnLabel = aiReady
+    ? `${escapeHtml(UI_LABELS.aiConnectedPrefix)}${escapeHtml(getClientAiLabel() || aiStatus.providerLabel || String(getClientAiModel() || UI_LABELS.aiReadyFallback).replace(/^gemini-/i, ""))}`
     : escapeHtml(UI_LABELS.putAiKey);
   const attachLabel = isMultiMode()
     ? UI_LABELS.attachSourceMulti
     : UI_LABELS.attachSource;
-  const attachTitle = aiStatus.connected
+  const attachTitle = aiReady
     ? isMultiMode()
       ? UI_LABELS.attachSourceTitleMulti
       : UI_LABELS.attachSourceTitleSingle
@@ -10423,10 +10514,10 @@ function renderForm() {
     <div class="file-chip">
       <span class="file-meta">${escapeHtml(summaryText(state.fields))}${isMultiMode() ? escapeHtml(UI_LABELS.multiMetaHint) : ""}</span>
       <div class="file-chip-actions file-chip-actions-desktop">
-        <button type="button" class="btn-secondary btn-compact ${aiStatus.connected ? "is-ai-on" : ""}" id="googleAiBtn" title="${aiStatus.connected ? `คีย์「${getClientAiLabel() || aiStatus.entryLabel || "AI"}」· ${aiStatus.providerLabel || providerLabel(getClientAiProvider())} · ${aiStatus.model || ""} — จัดการคีย์` : "ใส่ AI API key ของคุณ (หลายเจ้าได้ · เก็บในเบราว์เซอร์)"}">
+        <button type="button" class="btn-secondary btn-compact ${aiReady ? "is-ai-on" : ""}" id="googleAiBtn" title="${aiReady ? `คีย์「${getClientAiLabel() || aiStatus.entryLabel || "AI"}」· ${aiStatus.providerLabel || providerLabel(getClientAiProvider())} · ${getClientAiModel() || aiStatus.model || ""} — จัดการคีย์` : "ใส่ AI API key ของคุณ (หลายเจ้าได้ · เก็บในเบราว์เซอร์)"}">
           ${aiBtnLabel}
         </button>
-        <button type="button" class="btn-secondary btn-compact" id="attachSource" ${aiStatus.connected ? "" : "disabled"} title="${escapeAttr(attachTitle)}">${escapeHtml(attachLabel)}</button>
+        <button type="button" class="btn-secondary btn-compact" id="attachSource" ${aiReady ? "" : "disabled"} title="${escapeAttr(attachTitle)}">${escapeHtml(attachLabel)}</button>
         <input class="sr-only" type="file" id="attachSourceInput" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple aria-label="${escapeAttr(UI_LABELS.attachSourceInputAria)}" />
         <button type="button" class="btn-secondary btn-compact" id="exportJson" title="${escapeAttr(UI_LABELS.exportJsonTitle)}">${escapeHtml(UI_LABELS.exportJson)}</button>
         <button type="button" class="btn-secondary btn-compact" id="importJson" title="${escapeAttr(UI_LABELS.importJsonTitle)}">${escapeHtml(UI_LABELS.importJson)}</button>
@@ -10438,8 +10529,8 @@ function renderForm() {
       <details class="file-chip-tools-mobile">
         <summary class="btn-secondary btn-compact tools-menu-summary" title="${escapeAttr(UI_LABELS.toolsMenuHint)}">${escapeHtml(UI_LABELS.toolsMenuHint)} ▾</summary>
         <div class="tools-menu-panel" role="menu">
-          <button type="button" class="btn-secondary btn-compact ${aiStatus.connected ? "is-ai-on" : ""}" id="googleAiBtnMobile" role="menuitem">${aiBtnLabel}</button>
-          <button type="button" class="btn-secondary btn-compact" id="attachSourceMobile" ${aiStatus.connected ? "" : "disabled"} role="menuitem">${escapeHtml(attachLabel)}</button>
+          <button type="button" class="btn-secondary btn-compact ${aiReady ? "is-ai-on" : ""}" id="googleAiBtnMobile" role="menuitem">${aiBtnLabel}</button>
+          <button type="button" class="btn-secondary btn-compact" id="attachSourceMobile" ${aiReady ? "" : "disabled"} role="menuitem">${escapeHtml(attachLabel)}</button>
           <button type="button" class="btn-secondary btn-compact" id="exportJsonMobile" role="menuitem">${escapeHtml(UI_LABELS.exportJson)}</button>
           <button type="button" class="btn-secondary btn-compact" id="importJsonMobile" role="menuitem">${escapeHtml(UI_LABELS.importJson)}</button>
           <button type="button" class="btn-secondary btn-compact" id="openTaggerFromFormMobile" role="menuitem">${escapeHtml(UI_LABELS.createTemplate)}</button>
@@ -12263,7 +12354,7 @@ function renderInlineBlank(name) {
       value: val,
       className: "doc-blank",
       attrs: `data-doc-field="${escapeAttr(name)}" name="${escapeAttr(name)}"`,
-      placeholder: formatExamplePlaceholder(label),
+      placeholder: formatExamplePlaceholder(label, name),
       disabled: skipped,
       ariaLabel: label,
     })}
@@ -12324,7 +12415,7 @@ function renderListCellControl(listName, row, idx, item, itemField, displayOverr
       value: cellVal,
       className: "doc-blank doc-table-input",
       attrs: `data-list="${escapeAttr(listName)}" data-row="${idx}" data-item="${escapeAttr(item)}"`,
-      placeholder: formatExamplePlaceholder(cellLabel),
+      placeholder: formatExamplePlaceholder(cellLabel, item),
       disabled: itemSkipped,
       ariaLabel: cellLabel,
     })}
@@ -12679,7 +12770,7 @@ function renderField(field) {
           id: `f-${cssId(field.name)}`,
           className: "field-text-control",
           attrs: `name="${escapeAttr(field.name)}"`,
-          placeholder: formatExamplePlaceholder(label),
+          placeholder: formatExamplePlaceholder(label, field.name),
           disabled: skipped,
           ariaLabel: label,
         })}
@@ -13299,9 +13390,25 @@ async function onSubmit(e) {
     const cd = res.headers.get("Content-Disposition") || "";
     const star = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(cd);
     const plain = /filename="([^"]+)"/.exec(cd);
-    const filename = star
+    const suggested = star
       ? decodeURIComponent(star[1].trim())
       : plain?.[1] || "filled.docx";
+    const named = await askDialog({
+      title: UI_LABELS.outputNameTitle,
+      body: "ตั้งชื่อไฟล์ก่อนดาวน์โหลด — เปลี่ยนได้ตามต้องการ",
+      input: {
+        label: UI_LABELS.outputNameLabel,
+        type: "text",
+        value: suggested.replace(/\.docx$/i, ""),
+      },
+      actions: [
+        { id: "ok", label: UI_LABELS.outputNameConfirm, kind: "primary" },
+        { id: "abort", label: UI_LABELS.dialogCancel, kind: "ghost" },
+      ],
+    });
+    if (!named || named === "abort" || named.id !== "ok") return;
+    let filename = String(named.value || suggested).trim() || suggested;
+    if (!/\.docx$/i.test(filename)) filename = `${filename}.docx`;
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;

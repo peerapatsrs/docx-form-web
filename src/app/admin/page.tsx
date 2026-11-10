@@ -22,14 +22,7 @@ export default function AdminOverviewPage() {
           ))}
         </ul>
       </section>
-      <section className="admin-panel">
-        <h2 className="admin-panel-title">เพิ่มโมดูลใหม่</h2>
-        <p className="admin-muted">
-          ลงทะเบียนใน <code>src/lib/admin-modules.ts</code> แล้วสร้าง{" "}
-          <code>src/app/admin/&lt;id&gt;/page.tsx</code> + API ใต้{" "}
-          <code>/api/admin/…</code> ถ้าต้องใช้
-        </p>
-      </section>
+      {/* Developer scaffolding notes intentionally omitted from the UI (F03/F18). */}
     </div>
   );
 }

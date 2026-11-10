@@ -200,6 +200,19 @@ body {
   line-height: 1.2;
 }
 
+.status-pill.is-clickable {
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.status-pill.is-clickable:hover,
+.status-pill.is-clickable:focus-visible {
+  border-color: rgba(13, 122, 106, 0.45);
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(13, 122, 106, 0.12);
+  outline: none;
+}
+
 .status-pill #statusText {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -349,6 +362,12 @@ body {
   border-color: #b9dfc5;
 }
 
+.banner.warn {
+  background: #fff8e8;
+  color: #8a5a00;
+  border-color: #efd39a;
+}
+
 .banner.progress {
   display: flex;
   align-items: center;
@@ -385,6 +404,13 @@ body {
   font-weight: 500;
   opacity: 0.78;
   letter-spacing: -0.01em;
+}
+
+.banner.progress .banner-action {
+  margin-left: auto;
+  color: #0b5c52;
+  border-color: rgba(13, 122, 106, 0.35);
+  background: rgba(255, 255, 255, 0.72);
 }
 
 .banner-spinner {
@@ -4030,6 +4056,18 @@ button.danger:hover {
 .auth-foot {
   margin: 1.25rem 0 0;
   font-size: 0.82rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+}
+
+.auth-foot-sep {
+  opacity: 0.55;
+}
+
+.auth-foot-note {
+  color: var(--muted);
 }
 
 .auth-foot a,
@@ -4078,24 +4116,27 @@ button.danger:hover {
 }
 
 .auth-provider-google {
-  background: #fff;
-  border-color: var(--border-strong);
-  color: var(--ink);
-}
-
-.auth-provider-google:hover:not(:disabled) {
-  border-color: #4285f4;
-  box-shadow: 0 0 0 3px rgba(66, 133, 244, 0.12);
-}
-
-.auth-provider-passkey {
   background: #142428;
   border-color: #142428;
   color: #fff;
 }
 
-.auth-provider-passkey:hover:not(:disabled) {
+.auth-provider-google:hover:not(:disabled) {
   filter: brightness(1.08);
+  box-shadow: 0 0 0 3px rgba(66, 133, 244, 0.14);
+}
+
+/* Passkey is secondary — new users usually sign in with Google first (F15). */
+.auth-provider-passkey {
+  background: #fff;
+  border-color: var(--border-strong);
+  color: var(--ink);
+  font-weight: 550;
+}
+
+.auth-provider-passkey:hover:not(:disabled) {
+  border-color: rgba(20, 36, 40, 0.45);
+  box-shadow: 0 0 0 3px rgba(20, 36, 40, 0.08);
 }
 
 .auth-error {
@@ -4564,6 +4605,17 @@ button.danger:hover {
   margin: 0 0 0.75rem;
   font-size: 1rem;
   font-family: var(--font-display);
+}
+
+.admin-link {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.admin-link:hover {
+  color: var(--ink);
 }
 
 .admin-muted {

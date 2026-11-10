@@ -34,7 +34,12 @@ export const UI_LABELS = Object.freeze({
   shortValidationLabel: (label, fallback = "") => {
     const raw = String(label || "").trim();
     const fb = String(fallback || "").trim();
-    const text = raw || fb;
+    // Prefer the field key when the layout label looks like a document sentence.
+    const sentenceLike =
+      raw.length > 28 ||
+      (raw.length > 18 && /[\s，。、]/.test(raw)) ||
+      /^(บริษัท|ตามที่|ขอเรียน|ของจำเลย|ดังนี้)/.test(raw);
+    const text = sentenceLike && fb ? fb : raw || fb;
     if (!text) return "ช่องว่าง";
     if (text.length <= 42) return text;
     return `${text.slice(0, 40)}…`;
@@ -42,6 +47,22 @@ export const UI_LABELS = Object.freeze({
 
   // Placeholders
   placeholderExamplePrefix: "เช่น ",
+  /** Prefer short field key over long surrounding prose for "เช่น …". */
+  examplePlaceholderLabel: (displayLabel, fieldName = "") => {
+    const raw = String(displayLabel || "").trim();
+    const name = String(fieldName || "").trim();
+    // Prefer the field key when the surrounding/layout label is prose, not the key.
+    const sentenceLike =
+      (name &&
+        raw &&
+        raw !== name &&
+        (/\s/.test(raw) || raw.length > Math.max(12, name.length + 2))) ||
+      raw.length > 24 ||
+      (raw.length > 14 && /\s/.test(raw) && raw !== name);
+    const pick = sentenceLike && name ? name : raw || name;
+    if (!pick) return "";
+    return `เช่น ${pick}`;
+  },
 
   // List / table
   listBadgeTable: "ตาราง",
@@ -160,12 +181,12 @@ export const UI_LABELS = Object.freeze({
   loadDraftEmptyLoading: "กำลังโหลดรายการดราฟ…",
   draftListLoadFailed: "อ่านรายการดราฟไม่สำเร็จ",
   loadDraftDialogBody:
-    "เลือกดราฟที่บันทึกไว้ในเบราว์เซอร์นี้ (คงอยู่ข้ามวัน)",
+    "เลือกงานที่บันทึกไว้ในเครื่องนี้ (อยู่ในเบราว์เซอร์นี้เท่านั้น ไม่ใช่บนบัญชี)",
   dialogClose: "ปิด",
   dialogCancel: "ยกเลิก",
   dialogSave: "บันทึก",
   dialogDelete: "ลบ",
-  dialogLoad: "โหลด",
+  dialogLoad: "เปิดดราฟนี้",
 
   // Named drafts (IndexedDB)
   draftFallbackTitle: "ดราฟ",
@@ -173,7 +194,7 @@ export const UI_LABELS = Object.freeze({
   draftSaveNoTemplate: "ยังไม่มีเทมเพลตให้บันทึกดราฟ",
   draftSaveDialogTitle: "บันทึกดราฟ",
   draftSaveDialogBody:
-    "ตั้งชื่อดราฟเพื่อโหลดกลับภายหลัง (ข้ามวัน / สลับงานได้) — เก็บในเบราว์เซอร์นี้ผ่าน IndexedDB",
+    "ตั้งชื่อดราฟเพื่อเปิดกลับภายหลัง (ข้ามวัน / สลับงานได้) — เก็บเฉพาะในเบราว์เซอร์นี้ ไม่ใช่บนบัญชี",
   draftSaveNameLabel: "ชื่อดราฟ (ไม่บังคับ)",
   draftSaveSuccess: (title) => `บันทึกดราฟแล้ว: ${title}`,
   draftSaveFailed: "บันทึกดราฟไม่สำเร็จ",
@@ -194,7 +215,7 @@ export const UI_LABELS = Object.freeze({
   draftDeleteSuccess: "ลบดราฟแล้ว",
   draftDeleteFailed: "ลบดราฟไม่สำเร็จ",
   tipKindText: "ข้อความ",
-  tipKindBool: "ติ๊ก",
+  tipKindBool: "ช่องติ๊กถูก/ไม่ถูก",
   tipKindAuto: "รันเลข",
   tipKindImage: "รูป",
   tipKindListTable: "ลิสต์ / ตาราง",
@@ -204,9 +225,35 @@ export const UI_LABELS = Object.freeze({
   tipCodeImage: "{{logo}}",
   tipCodeList: "{{#รายการ}}…{{/}}",
   tipNoteBoolLead: "หลัง",
-  tipNoteBoolTrail: "คือข้อความเมื่อจริง,เท็จ",
+  tipNoteBoolTrail: "คือข้อความเมื่อถูก / ไม่ถูก (ไม่ใช่ชื่อจริง)",
   tipNoteAuto: "ใช้ได้เฉพาะในลูป {{#…}}…{{/}}",
   tipNoteImage: "วางรูปใน Word แล้วใส่แท็กใน Alt Text",
+  taggerKindBoolLabel: "ช่องติ๊กถูก/ไม่ถูก",
+  taggerKindBoolCode: "{{ชื่อ?ถูก,ไม่ถูก}}",
+  taggerKindBoolTrue: "ข้อความเมื่อถูก",
+  taggerKindBoolFalse: "ข้อความเมื่อไม่ถูก",
+  draftOpenAction: "เปิดดราฟนี้",
+  draftOpenDialogBody:
+    "เลือกงานที่บันทึกไว้ในเครื่องนี้ (อยู่ในเบราว์เซอร์นี้เท่านั้น ไม่ใช่บนบัญชี)",
+  addKeyNeedsUpgrade: "ต้องการหลายคีย์ — อัปเกรด",
+  addKeyUpsellTitle: "แผนฟรีเก็บคีย์ได้ 1 อัน",
+  addKeyUpsellBodyLoggedOut:
+    "บัญชีฟรีเก็บ AI key ได้ 1 อันในเครื่องนี้ หากต้องการหลายคีย์ ให้เข้าสู่ระบบแล้วให้ผู้ดูแลตั้งแผนจ่ายแล้วให้ หรืออัปเกรดที่หน้าบัญชี (ยังไม่มีหน้าชำระเงินอัตโนมัติ)",
+  addKeyUpsellBodyLoggedIn:
+    "บัญชีฟรีเก็บ AI key ได้ 1 อัน หากต้องการหลายคีย์ ให้ผู้ดูแลตั้งแผนจ่ายแล้วให้ที่หน้าบัญชี หรือติดต่อฝ่ายสนับสนุน",
+  addKeyUpsellAccount: "ไปหน้าบัญชี / เข้าสู่ระบบ",
+  taggerDownloadNext:
+    "ดาวน์โหลดเทมเพลตแล้ว — ใช้กรอกต่อได้เลย หรืออัปโหลดไฟล์นี้ภายหลัง",
+  taggerContinueFill: "ใช้กรอกต่อ",
+  outputNameTitle: "ตั้งชื่อไฟล์ที่จะดาวน์โหลด",
+  outputNameLabel: "ชื่อไฟล์ (.docx)",
+  outputNameConfirm: "ดาวน์โหลด",
+  logoutConfirmTitle: "ออกจากระบบ?",
+  logoutConfirmBody: "จะออกจากบัญชีนี้บนเครื่องนี้ — งานในเครื่อง (ดราฟ/คีย์ท้องถิ่น) ยังอยู่",
+  logoutConfirmOk: "ออกจากระบบ",
+  aiCancelNeutral: "ยกเลิกการรอ AI แล้ว",
+  dropzoneOrPickFree: "หรือเลือกไฟล์ · ฟรีสูงสุด 2 ไฟล์ต่อครั้ง",
+  dropzoneOrPickPaid: (n) => `หรือเลือกไฟล์ · สูงสุด ${n} ไฟล์ต่อครั้ง (แผนจ่ายแล้ว)`,
 
   // Doc preview chrome
   docPreviewLabel: "ตัวอย่างเนื้อหาในไฟล์ (กรอกในช่องว่างได้)",
@@ -230,8 +277,9 @@ export function clipValidationItems(items, limit = 12) {
 /**
  * @param {string} fieldLabel
  */
-export function formatInvalidEmailMissing(fieldLabel) {
-  return `${String(fieldLabel || "").trim()} ${UI_LABELS.invalidEmailSuffix}`.trim();
+export function formatInvalidEmailMissing(fieldLabel, fieldName = "") {
+  const label = UI_LABELS.shortValidationLabel(fieldLabel, fieldName);
+  return `${label} ${UI_LABELS.invalidEmailSuffix}`.trim();
 }
 
 /**
@@ -262,18 +310,17 @@ export function fieldDisplayLabel(field, labelMap, fallbackName) {
  * Placeholder for text blanks: "เช่น " + display label (never a raw EN key when label exists).
  * @param {string} displayLabel
  */
-export function formatExamplePlaceholder(displayLabel) {
-  const label = String(displayLabel || "").trim();
-  if (!label) return "";
-  return `${UI_LABELS.placeholderExamplePrefix}${label}`;
+export function formatExamplePlaceholder(displayLabel, fieldName = "") {
+  return UI_LABELS.examplePlaceholderLabel(displayLabel, fieldName);
 }
 
 /**
  * @param {string} displayLabel
  * @param {string} [minRowsNote]
+ * @param {string} [fieldName]
  */
-export function formatMissingFieldLabel(displayLabel, minRowsNote) {
-  const label = UI_LABELS.shortValidationLabel(displayLabel);
+export function formatMissingFieldLabel(displayLabel, minRowsNote, fieldName = "") {
+  const label = UI_LABELS.shortValidationLabel(displayLabel, fieldName);
   if (minRowsNote) return `${label} (${minRowsNote})`;
   return label;
 }

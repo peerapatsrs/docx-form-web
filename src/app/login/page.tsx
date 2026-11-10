@@ -304,7 +304,9 @@ export default function LoginPage() {
             onClick={() => void signInPasskey()}
           >
             <PasskeyMark className="auth-provider-icon" />
-            <span>{busy === "passkey" ? "รอพาสคีย์…" : "เข้าด้วยพาสคีย์"}</span>
+            <span>
+              {busy === "passkey" ? "รอพาสคีย์…" : "เข้าด้วยพาสคีย์ (ถ้ามีแล้ว)"}
+            </span>
           </button>
         </div>
 
@@ -314,6 +316,10 @@ export default function LoginPage() {
           <a className="auth-home-link" href="/" style={{ minHeight: 44, display: "inline-flex", alignItems: "center" }}>
             กลับหน้าหลัก
           </a>
+          <span className="auth-foot-sep" aria-hidden="true">
+            ·
+          </span>
+          <span className="auth-foot-note">เซสชันปลอดภัยบนเบราว์เซอร์นี้</span>
         </p>
       </div>
     </main>

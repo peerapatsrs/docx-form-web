@@ -91,26 +91,32 @@ export default function AdminAiPage() {
   return (
     <div className="admin-overview">
       <section className="admin-panel">
-        <h2 className="admin-panel-title">สถานะ</h2>
+        <h2 className="admin-panel-title">สถานะ AI</h2>
         <ul className="admin-kv">
           <li>
             <span>โหมดคีย์</span>
-            <strong>{status?.byok ? "BYOK (คีย์อยู่ที่เบราว์เซอร์)" : "เซิร์ฟเวอร์เก็บคีย์ได้"}</strong>
+            <strong>
+              {status?.byok
+                ? "ใช้คีย์ของผู้ใช้ (เก็บในเบราว์เซอร์/บัญชี)"
+                : "เซิร์ฟเวอร์เก็บคีย์ได้"}
+            </strong>
           </li>
           <li>
-            <span>คีย์ Gemini จาก env</span>
-            <strong>{status?.hasServerEnvKey ? "มี" : "ไม่มี"}</strong>
+            <span>คีย์ Gemini ของเซิร์ฟเวอร์</span>
+            <strong>{status?.hasServerEnvKey ? "ตั้งไว้แล้ว" : "ยังไม่ตั้ง"}</strong>
           </li>
           <li>
-            <span>คีย์ Cursor จาก env (DOCX_FORM_CURSOR_API_KEY)</span>
-            <strong>{status?.hasServerEnvCursorKey ? "มี" : "ไม่มี"}</strong>
+            <span>คีย์ Cursor ของเซิร์ฟเวอร์</span>
+            <strong>
+              {status?.hasServerEnvCursorKey ? "ตั้งไว้แล้ว" : "ยังไม่ตั้ง"}
+            </strong>
           </li>
           <li>
-            <span>PREMIUM_ENFORCE</span>
+            <span>บังคับแผนจ่ายแล้ว</span>
             <strong>{status?.premiumEnforce ? "เปิด" : "ปิด"}</strong>
           </li>
           <li>
-            <span>ผู้ให้บริการที่ใช้จริง (effective)</span>
+            <span>ผู้ให้บริการที่ใช้อยู่</span>
             <strong>
               {status?.effectiveProviderLabel ||
                 status?.effectiveProvider ||
@@ -118,22 +124,23 @@ export default function AdminAiPage() {
             </strong>
           </li>
           <li>
-            <span>ค่าเริ่มต้นจาก admin</span>
+            <span>ค่าเริ่มต้นที่แอดมินตั้ง</span>
             <strong>{status?.adminDefaultProvider || "google"}</strong>
           </li>
           <li>
-            <span>โมเดลที่ resolve ตอนนี้</span>
+            <span>โมเดลที่ใช้อยู่</span>
             <strong>{status?.model || "—"}</strong>
-          </li>
-          <li>
-            <span>path คอนฟิก</span>
-            <strong>{status?.configPath || "—"}</strong>
           </li>
         </ul>
         {status?.studioUrl ? (
           <p className="admin-muted">
-            <a href={status.studioUrl} target="_blank" rel="noreferrer">
-              Google AI Studio
+            <a
+              className="admin-link"
+              href={status.studioUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              เปิดหน้าสร้างคีย์ Google AI Studio
             </a>
           </p>
         ) : null}
@@ -153,7 +160,7 @@ export default function AdminAiPage() {
         ) : null}
         <form className="admin-form" onSubmit={(e) => void save(e)}>
           <label className="admin-field">
-            <span>defaultModel</span>
+            <span>โมเดลเริ่มต้น</span>
             <select
               className="admin-select"
               value={defaultModel}

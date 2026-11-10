@@ -173,6 +173,7 @@ function showToast(message) {
 /**
  * @param {{
  *   loggedIn?: boolean,
+ *   preferredProvider?: string,
  *   providers?: { id: string, label: string, docsUrl?: string, defaultModel?: string }[],
  *   onChange?: () => void,
  *   onBanner?: (msg: string, kind?: string) => void,
@@ -180,6 +181,7 @@ function showToast(message) {
  */
 export async function openAiKeyDialog(opts = {}) {
   const loggedIn = !!opts.loggedIn;
+  const preferredProvider = String(opts.preferredProvider || "").trim();
   const providers =
     Array.isArray(opts.providers) && opts.providers.length
       ? opts.providers
@@ -191,6 +193,13 @@ export async function openAiKeyDialog(opts = {}) {
             defaultModel: "gemini-3.8-flash",
           },
         ];
+  // Prefer header/active provider when adding a key (F06).
+  if (preferredProvider) {
+    const pref = providers.find((p) => p.id === preferredProvider);
+    if (pref) {
+      providers.splice(0, providers.length, pref, ...providers.filter((p) => p.id !== pref.id));
+    }
+  }
 
   if (loggedIn) {
     const remote = await listAiKeys();
@@ -554,7 +563,11 @@ export async function openAiKeyDialog(opts = {}) {
         busy = false;
         showToast("ลบคีย์แล้ว — ฟังก์ชัน AI จะใช้ได้อีกเมื่อเพิ่มคีย์ใหม่");
         opts.onChange?.();
-        finish({ action: "deleted" });
+        // Keep dialog open so the empty state matches the header pill (F31).
+        replaceMode = false;
+        errorMsg = "";
+        mode = entryHasUsableKey(getActiveEntry()) ? "saved" : "empty";
+        paint();
       } catch {
         busy = false;
         opts.onBanner?.("ลบคีย์ไม่สำเร็จ", "error");

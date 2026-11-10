@@ -190,6 +190,14 @@ async function resolveRouteAiCredentials(
       error: missingAiCredentialsError(creds),
     };
   }
+  // Record last-used only on real AI routes (not /ai/status).
+  if (creds.fromUserVault && creds.keyId && sessionUserId) {
+    void import("./ai-key-vault")
+      .then(({ touchUserAiKeyUsed }) =>
+        touchUserAiKeyUsed(sessionUserId, String(creds.keyId)),
+      )
+      .catch(() => undefined);
+  }
   return {
     ok: true,
     creds: {
@@ -849,36 +857,135 @@ export function createApi(options: {
   }
 
   /**
-   * Logged-in user: list AI keys stored on server.
+   * Logged-in user: list AI keys stored on server (masked meta only).
    * Never returns plaintext secrets — use X-Ai-Key-Id on AI calls to proxy.
    */
   api.get("/ai/keys", async (c) => {
     const gate = await requireSessionUserId(c.req.raw);
-    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
     try {
-      const { listUserAiKeys } = await import("./ai-key-vault");
-      const entries = await listUserAiKeys(gate.userId);
-      return c.json({
-        entries: entries.map((e) => ({
-          id: e.id,
-          provider: e.provider,
-          label: e.label,
-          model: e.model,
-          maskedKey: maskGeminiKey(e.apiKey),
-          hasKey: Boolean(e.apiKey),
-          storeOnServer: true,
-        })),
-      });
+      const { listUserAiKeysPublic } = await import("./ai-key-vault");
+      const entries = await listUserAiKeysPublic(gate.userId);
+      return c.json({ entries });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: message }, 500);
+      return c.json({ error: message, code: "AI_KEY_SERVER_ERROR" }, 500);
     }
   });
 
-  /** Upsert one or many keys the user opted to sync. */
+  /** Own audit trail (create/test/replace/delete/use) — never includes key values. */
+  api.get("/ai/keys/audit", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    try {
+      const { listUserAiKeyAudit, isValidUserAiKeyId } = await import(
+        "./ai-key-vault"
+      );
+      const keyId = String(c.req.query("keyId") || "").trim();
+      if (keyId && !isValidUserAiKeyId(keyId)) {
+        return c.json(
+          { error: "id ไม่ถูกต้อง", code: "AI_KEY_INVALID_ID" },
+          400,
+        );
+      }
+      const limit = Number(c.req.query("limit") || 50);
+      const events = await listUserAiKeyAudit(gate.userId, {
+        keyId: keyId || undefined,
+        limit,
+      });
+      return c.json({ events });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message, code: "AI_KEY_SERVER_ERROR" }, 500);
+    }
+  });
+
+  /** Create one key (auto-id if omitted). */
+  api.post("/ai/keys", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    try {
+      const body = (await c.req.json().catch(() => ({}))) as {
+        id?: string;
+        provider?: string;
+        label?: string;
+        model?: string;
+        apiKey?: string;
+      };
+      const apiKey = String(body.apiKey || "").trim();
+      const providerRaw = String(body.provider || "google").trim();
+      const provider = getAiProvider(providerRaw)?.id;
+      if (!provider) {
+        return c.json(
+          {
+            error: "ผู้ให้บริการไม่รองรับ",
+            code: "AI_KEY_INVALID_PROVIDER",
+          },
+          400,
+        );
+      }
+      const minLen = provider === "google" ? 20 : 8;
+      if (!apiKey || apiKey.length < minLen) {
+        return c.json(
+          {
+            error: "กรุณาใส่ API key ที่ถูกต้อง",
+            code: "AI_KEY_INVALID_VALUE",
+          },
+          400,
+        );
+      }
+      const { createUserAiKey, toPublicAiKey } = await import("./ai-key-vault");
+      const saved = await createUserAiKey(gate.userId, {
+        id: body.id,
+        provider,
+        label: String(body.label || "").trim(),
+        model: String(body.model || "").trim(),
+        apiKey,
+      });
+      return c.json({ ok: true, entry: toPublicAiKey(saved) }, 201);
+    } catch (err) {
+      const code =
+        err && typeof err === "object" && "code" in err
+          ? String((err as { code?: unknown }).code || "")
+          : "";
+      if (code === "AI_KEY_EXISTS") {
+        return c.json(
+          { error: "มีคีย์ id นี้แล้ว", code: "AI_KEY_EXISTS" },
+          400,
+        );
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      if (/id ไม่ถูกต้อง/.test(message)) {
+        return c.json({ error: message, code: "AI_KEY_INVALID_ID" }, 400);
+      }
+      return c.json({ error: message, code: "AI_KEY_MISSING_FIELDS" }, 400);
+    }
+  });
+
+  /** Upsert one or many keys the user opted to sync (compat with existing clients). */
   api.put("/ai/keys", async (c) => {
     const gate = await requireSessionUserId(c.req.raw);
-    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
     try {
       const body = (await c.req.json().catch(() => ({}))) as {
         entries?: Array<{
@@ -902,9 +1009,15 @@ export function createApi(options: {
           ? [body.entry]
           : [];
       if (!rawList.length) {
-        return c.json({ error: "ต้องส่ง entry หรือ entries" }, 400);
+        return c.json(
+          {
+            error: "ต้องส่ง entry หรือ entries",
+            code: "AI_KEY_MISSING_FIELDS",
+          },
+          400,
+        );
       }
-      const { upsertUserAiKeys } = await import("./ai-key-vault");
+      const { upsertUserAiKeys, toPublicAiKey } = await import("./ai-key-vault");
       const saved = await upsertUserAiKeys(
         gate.userId,
         rawList.map((e) => ({
@@ -917,41 +1030,411 @@ export function createApi(options: {
       );
       return c.json({
         ok: true,
-        entries: saved.map((e) => ({
-          id: e.id,
-          provider: e.provider,
-          label: e.label,
-          model: e.model,
-          storeOnServer: true,
-          maskedKey: maskGeminiKey(e.apiKey),
-        })),
+        entries: saved.map((e) => toPublicAiKey(e)),
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: message }, 400);
+      return c.json({ error: message, code: "AI_KEY_MISSING_FIELDS" }, 400);
     }
+  });
+
+  /** Test a plaintext key before save (does not persist). */
+  api.post("/ai/keys/test", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    try {
+      const body = (await c.req.json().catch(() => ({}))) as {
+        provider?: string;
+        apiKey?: string;
+        timeoutMs?: number;
+      };
+      const { testAiProviderKey } = await import("./ai-key-test");
+      const result = await testAiProviderKey({
+        provider: String(body.provider || "google"),
+        apiKey: String(body.apiKey || ""),
+        timeoutMs: body.timeoutMs,
+        signal: c.req.raw.signal,
+      });
+      return c.json(result, result.ok ? 200 : result.code === "AI_KEY_TEST_TIMEOUT" ? 504 : 400);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message, code: "AI_KEY_PROVIDER_ERROR", ok: false }, 400);
+    }
+  });
+
+  api.get("/ai/keys/:id", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    const id = String(c.req.param("id") || "").trim();
+    const { getUserAiKey, isValidUserAiKeyId, toPublicAiKey } = await import(
+      "./ai-key-vault"
+    );
+    if (!isValidUserAiKeyId(id)) {
+      return c.json({ error: "id ไม่ถูกต้อง", code: "AI_KEY_INVALID_ID" }, 400);
+    }
+    const row = await getUserAiKey(gate.userId, id);
+    if (!row) {
+      return c.json({ error: "ไม่พบคีย์", code: "AI_KEY_NOT_FOUND" }, 404);
+    }
+    return c.json({ entry: toPublicAiKey(row) });
+  });
+
+  /** Replace / rotate the secret (and optional label/model/provider) of a saved key. */
+  api.put("/ai/keys/:id", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    const id = String(c.req.param("id") || "").trim();
+    const { isValidUserAiKeyId, replaceUserAiKey, toPublicAiKey } = await import(
+      "./ai-key-vault"
+    );
+    if (!isValidUserAiKeyId(id)) {
+      return c.json({ error: "id ไม่ถูกต้อง", code: "AI_KEY_INVALID_ID" }, 400);
+    }
+    try {
+      const body = (await c.req.json().catch(() => ({}))) as {
+        apiKey?: string;
+        provider?: string;
+        label?: string;
+        model?: string;
+      };
+      const apiKey = String(body.apiKey || "").trim();
+      if (!apiKey || apiKey.length < 8) {
+        return c.json(
+          {
+            error: "กรุณาใส่ API key ที่ถูกต้อง",
+            code: "AI_KEY_INVALID_VALUE",
+          },
+          400,
+        );
+      }
+      if (body.provider && !getAiProvider(body.provider)) {
+        return c.json(
+          {
+            error: "ผู้ให้บริการไม่รองรับ",
+            code: "AI_KEY_INVALID_PROVIDER",
+          },
+          400,
+        );
+      }
+      const saved = await replaceUserAiKey(gate.userId, id, {
+        apiKey,
+        provider: body.provider,
+        label: body.label,
+        model: body.model,
+      });
+      if (!saved) {
+        return c.json({ error: "ไม่พบคีย์", code: "AI_KEY_NOT_FOUND" }, 404);
+      }
+      return c.json({ ok: true, entry: toPublicAiKey(saved) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message, code: "AI_KEY_MISSING_FIELDS" }, 400);
+    }
+  });
+
+  /** Test a saved vault key; updates last-test status + audit. */
+  api.post("/ai/keys/:id/test", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    const id = String(c.req.param("id") || "").trim();
+    const {
+      getUserAiKey,
+      isValidUserAiKeyId,
+      updateUserAiKeyTestResult,
+      toPublicAiKey,
+    } = await import("./ai-key-vault");
+    if (!isValidUserAiKeyId(id)) {
+      return c.json({ error: "id ไม่ถูกต้อง", code: "AI_KEY_INVALID_ID" }, 400);
+    }
+    const row = await getUserAiKey(gate.userId, id);
+    if (!row) {
+      return c.json({ error: "ไม่พบคีย์", code: "AI_KEY_NOT_FOUND" }, 404);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as {
+      timeoutMs?: number;
+    };
+    const { testAiProviderKey } = await import("./ai-key-test");
+    const result = await testAiProviderKey({
+      provider: row.provider,
+      apiKey: row.apiKey,
+      timeoutMs: body.timeoutMs,
+      signal: c.req.raw.signal,
+    });
+    const updated = await updateUserAiKeyTestResult(gate.userId, id, {
+      ok: result.ok,
+      code: result.code,
+      message: result.message,
+    });
+    return c.json(
+      {
+        ...result,
+        entry: updated ? toPublicAiKey(updated) : null,
+      },
+      result.ok ? 200 : result.code === "AI_KEY_TEST_TIMEOUT" ? 504 : 400,
+    );
   });
 
   api.delete("/ai/keys/:id", async (c) => {
     const gate = await requireSessionUserId(c.req.raw);
-    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
     const id = String(c.req.param("id") || "").trim();
     const { deleteUserAiKey, isValidUserAiKeyId } = await import(
       "./ai-key-vault"
     );
     if (!isValidUserAiKeyId(id)) {
-      return c.json({ error: "id ไม่ถูกต้อง" }, 400);
+      return c.json({ error: "id ไม่ถูกต้อง", code: "AI_KEY_INVALID_ID" }, 400);
     }
     try {
       // Ownership enforced in SQL (userId = session). Other users' ids → 404
       // with no existence leak.
       const removed = await deleteUserAiKey(gate.userId, id);
-      if (!removed) return c.json({ error: "ไม่พบคีย์" }, 404);
-      return c.json({ ok: true, removed: true });
+      if (!removed) {
+        return c.json({ error: "ไม่พบคีย์", code: "AI_KEY_NOT_FOUND" }, 404);
+      }
+      return c.json({ ok: true, removed: true, code: "AI_KEY_DELETED" });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: message }, 500);
+      return c.json({ error: message, code: "AI_KEY_SERVER_ERROR" }, 500);
     }
+  });
+
+  // Singular aliases from FIXES.md §9 — operate on one key via ?id= or body.id.
+  api.get("/ai/key", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    const { listUserAiKeysPublic, getUserAiKey, toPublicAiKey, isValidUserAiKeyId } =
+      await import("./ai-key-vault");
+    const id = String(c.req.query("id") || "").trim();
+    if (id) {
+      if (!isValidUserAiKeyId(id)) {
+        return c.json({ error: "id ไม่ถูกต้อง", code: "AI_KEY_INVALID_ID" }, 400);
+      }
+      const row = await getUserAiKey(gate.userId, id);
+      if (!row) {
+        return c.json({ error: "ไม่พบคีย์", code: "AI_KEY_NOT_FOUND" }, 404);
+      }
+      return c.json({ entry: toPublicAiKey(row), connected: true });
+    }
+    const entries = await listUserAiKeysPublic(gate.userId);
+    const entry = entries[0] || null;
+    return c.json({
+      entry,
+      connected: Boolean(entry?.hasKey),
+      entries,
+    });
+  });
+
+  api.put("/ai/key", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    try {
+      const body = (await c.req.json().catch(() => ({}))) as {
+        id?: string;
+        provider?: string;
+        label?: string;
+        model?: string;
+        apiKey?: string;
+      };
+      const apiKey = String(body.apiKey || "").trim();
+      const provider = getAiProvider(body.provider || "google")?.id;
+      if (!provider) {
+        return c.json(
+          {
+            error: "ผู้ให้บริการไม่รองรับ",
+            code: "AI_KEY_INVALID_PROVIDER",
+          },
+          400,
+        );
+      }
+      if (!apiKey || apiKey.length < 8) {
+        return c.json(
+          {
+            error: "กรุณาใส่ API key ที่ถูกต้อง",
+            code: "AI_KEY_INVALID_VALUE",
+          },
+          400,
+        );
+      }
+      const {
+        createUserAiKey,
+        replaceUserAiKey,
+        listUserAiKeys,
+        toPublicAiKey,
+      } = await import("./ai-key-vault");
+      const id = String(body.id || "").trim();
+      let saved;
+      if (id) {
+        saved = await replaceUserAiKey(gate.userId, id, {
+          apiKey,
+          provider,
+          label: body.label,
+          model: body.model,
+        });
+        if (!saved) {
+          saved = await createUserAiKey(gate.userId, {
+            id,
+            provider,
+            label: String(body.label || "").trim(),
+            model: String(body.model || "").trim(),
+            apiKey,
+          });
+        }
+      } else {
+        const existing = await listUserAiKeys(gate.userId);
+        if (existing[0]) {
+          saved = await replaceUserAiKey(gate.userId, existing[0].id, {
+            apiKey,
+            provider,
+            label: body.label,
+            model: body.model,
+          });
+        } else {
+          saved = await createUserAiKey(gate.userId, {
+            provider,
+            label: String(body.label || "").trim(),
+            model: String(body.model || "").trim(),
+            apiKey,
+          });
+        }
+      }
+      if (!saved) {
+        return c.json({ error: "บันทึกคีย์ไม่สำเร็จ", code: "AI_KEY_SERVER_ERROR" }, 500);
+      }
+      return c.json({ ok: true, entry: toPublicAiKey(saved) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message, code: "AI_KEY_MISSING_FIELDS" }, 400);
+    }
+  });
+
+  api.post("/ai/key/test", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    const body = (await c.req.json().catch(() => ({}))) as {
+      id?: string;
+      provider?: string;
+      apiKey?: string;
+      timeoutMs?: number;
+    };
+    const id = String(body.id || c.req.query("id") || "").trim();
+    if (id) {
+      // Reuse saved-key test path.
+      const {
+        getUserAiKey,
+        isValidUserAiKeyId,
+        updateUserAiKeyTestResult,
+        toPublicAiKey,
+      } = await import("./ai-key-vault");
+      if (!isValidUserAiKeyId(id)) {
+        return c.json({ error: "id ไม่ถูกต้อง", code: "AI_KEY_INVALID_ID" }, 400);
+      }
+      const row = await getUserAiKey(gate.userId, id);
+      if (!row) {
+        return c.json({ error: "ไม่พบคีย์", code: "AI_KEY_NOT_FOUND" }, 404);
+      }
+      const { testAiProviderKey } = await import("./ai-key-test");
+      const result = await testAiProviderKey({
+        provider: row.provider,
+        apiKey: row.apiKey,
+        timeoutMs: body.timeoutMs,
+        signal: c.req.raw.signal,
+      });
+      const updated = await updateUserAiKeyTestResult(gate.userId, id, {
+        ok: result.ok,
+        code: result.code,
+        message: result.message,
+      });
+      return c.json(
+        { ...result, entry: updated ? toPublicAiKey(updated) : null },
+        result.ok ? 200 : result.code === "AI_KEY_TEST_TIMEOUT" ? 504 : 400,
+      );
+    }
+    const { testAiProviderKey } = await import("./ai-key-test");
+    const result = await testAiProviderKey({
+      provider: String(body.provider || "google"),
+      apiKey: String(body.apiKey || ""),
+      timeoutMs: body.timeoutMs,
+      signal: c.req.raw.signal,
+    });
+    return c.json(
+      result,
+      result.ok ? 200 : result.code === "AI_KEY_TEST_TIMEOUT" ? 504 : 400,
+    );
+  });
+
+  api.delete("/ai/key", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    const {
+      deleteUserAiKey,
+      isValidUserAiKeyId,
+      listUserAiKeys,
+    } = await import("./ai-key-vault");
+    let id = String(c.req.query("id") || "").trim();
+    if (!id) {
+      const body = (await c.req.json().catch(() => ({}))) as { id?: string };
+      id = String(body.id || "").trim();
+    }
+    if (!id) {
+      const entries = await listUserAiKeys(gate.userId);
+      id = entries[0]?.id || "";
+    }
+    if (!id || !isValidUserAiKeyId(id)) {
+      return c.json(
+        { error: id ? "id ไม่ถูกต้อง" : "ไม่พบคีย์", code: id ? "AI_KEY_INVALID_ID" : "AI_KEY_NOT_FOUND" },
+        id ? 400 : 404,
+      );
+    }
+    const removed = await deleteUserAiKey(gate.userId, id);
+    if (!removed) {
+      return c.json({ error: "ไม่พบคีย์", code: "AI_KEY_NOT_FOUND" }, 404);
+    }
+    return c.json({ ok: true, removed: true, code: "AI_KEY_DELETED" });
   });
 
   api.post("/parse", async (c) => {
@@ -2204,7 +2687,12 @@ export function createApi(options: {
           400,
         );
       }
-      type FillItem = { filename?: string; values?: Record<string, unknown> };
+      type FillItem = {
+        filename?: string;
+        values?: Record<string, unknown>;
+        skip?: Record<string, boolean>;
+        rowSkip?: Record<string, Record<string, boolean>[]>;
+      };
       let items: FillItem[];
       try {
         const parsed = JSON.parse(itemsRaw) as unknown;
@@ -2251,9 +2739,33 @@ export function createApi(options: {
             continue;
           }
           const buffer = Buffer.from(await tmpl.arrayBuffer());
+          const skip = items[i]?.skip;
+          const rowSkip = items[i]?.rowSkip;
+          let fillValues = values;
+          if (
+            (skip && typeof skip === "object") ||
+            (rowSkip && typeof rowSkip === "object")
+          ) {
+            const { toFillValues } = await import("./source-map");
+            const parsed = await parseTemplate(buffer);
+            fillValues = toFillValues(
+              parsed.fields,
+              values,
+              skip && typeof skip === "object" ? skip : {},
+              rowSkip && typeof rowSkip === "object" ? rowSkip : {},
+            );
+          } else {
+            // Empty loop tables are allowed — missing list keys become [].
+            const parsed = await parseTemplate(buffer);
+            for (const f of parsed.fields) {
+              if (f.type === "list" && fillValues[f.name] == null) {
+                fillValues[f.name] = [];
+              }
+            }
+          }
           const out = await fillTemplate({
             template: buffer,
-            values,
+            values: fillValues,
             images: [],
           });
           const filledName = `${name.replace(/\.docx$/i, "") || "document"}-filled.docx`;
@@ -2307,22 +2819,80 @@ export function createApi(options: {
       const form = await c.req.formData();
       const file = form.get("file");
       if (!(file instanceof File)) {
-        return c.json({ error: "กรุณาส่งไฟล์เทมเพลต .docx" }, 400);
+        return c.json(
+          { error: "กรุณาส่งไฟล์เทมเพลต .docx", code: "FILL_MISSING_FILE" },
+          400,
+        );
       }
       if (!isDocx(file) || file.size > MAX_DOCX_BYTES) {
-        return c.json({ error: "ไฟล์เทมเพลตไม่ถูกต้องหรือใหญ่เกินไป" }, 400);
+        return c.json(
+          {
+            error: "ไฟล์เทมเพลตไม่ถูกต้องหรือใหญ่เกินไป",
+            code: "FILL_INVALID_FILE",
+          },
+          400,
+        );
       }
 
       const valuesRaw = form.get("values");
       if (typeof valuesRaw !== "string") {
-        return c.json({ error: "ต้องส่งค่า values เป็น JSON" }, 400);
+        return c.json(
+          {
+            error: "ต้องส่งค่า values เป็น JSON",
+            code: "FILL_MISSING_VALUES",
+          },
+          400,
+        );
       }
 
       let values: Record<string, unknown>;
       try {
         values = JSON.parse(valuesRaw) as Record<string, unknown>;
       } catch {
-        return c.json({ error: "values ต้องเป็น JSON ที่ถูกต้อง" }, 400);
+        return c.json(
+          { error: "values ต้องเป็น JSON ที่ถูกต้อง", code: "FILL_BAD_JSON" },
+          400,
+        );
+      }
+
+      /**
+       * Optional skip maps (docx-form-values style). When present, the server
+       * applies toFillValues so skipped scalars become "" and skipped / empty
+       * loop tables become [] — leftover {{tags}} are removed by the engine.
+       * Existing clients that already send pre-transformed values may omit these.
+       */
+      let skip: Record<string, boolean> = {};
+      let rowSkip: Record<string, Record<string, boolean>[]> = {};
+      const skipRaw = form.get("skip");
+      if (typeof skipRaw === "string" && skipRaw.trim()) {
+        try {
+          const parsed = JSON.parse(skipRaw) as unknown;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            skip = parsed as Record<string, boolean>;
+          }
+        } catch {
+          return c.json(
+            { error: "skip ต้องเป็น JSON object", code: "FILL_BAD_SKIP" },
+            400,
+          );
+        }
+      }
+      const rowSkipRaw = form.get("rowSkip");
+      if (typeof rowSkipRaw === "string" && rowSkipRaw.trim()) {
+        try {
+          const parsed = JSON.parse(rowSkipRaw) as unknown;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            rowSkip = parsed as Record<string, Record<string, boolean>[]>;
+          }
+        } catch {
+          return c.json(
+            {
+              error: "rowSkip ต้องเป็น JSON object",
+              code: "FILL_BAD_ROW_SKIP",
+            },
+            400,
+          );
+        }
       }
 
       const images: {
@@ -2337,8 +2907,12 @@ export function createApi(options: {
         const name = key.slice("image:".length);
         if (!name) continue;
         if (val.size === 0) continue;
+        if (skip[name]) continue;
         if (val.size > MAX_IMAGE_BYTES) {
-          return c.json({ error: `รูป ${name} ใหญ่เกิน 8 MB` }, 400);
+          return c.json(
+            { error: `รูป ${name} ใหญ่เกิน 8 MB`, code: "FILL_IMAGE_TOO_LARGE" },
+            400,
+          );
         }
         const type = (val.type || "").toLowerCase();
         if (
@@ -2346,7 +2920,13 @@ export function createApi(options: {
           !type.startsWith("image/") &&
           type !== "application/octet-stream"
         ) {
-          return c.json({ error: `ไฟล์สำหรับ ${name} ไม่ใช่รูปภาพ` }, 400);
+          return c.json(
+            {
+              error: `ไฟล์สำหรับ ${name} ไม่ใช่รูปภาพ`,
+              code: "FILL_IMAGE_INVALID",
+            },
+            400,
+          );
         }
         images.push({
           name,
@@ -2357,7 +2937,44 @@ export function createApi(options: {
       }
 
       const template = Buffer.from(await file.arrayBuffer());
-      const out = await fillTemplate({ template, values, images });
+      const parsed = await parseTemplate(template);
+      const hasSkipMaps =
+        Object.keys(skip).length > 0 || Object.keys(rowSkip).length > 0;
+      // Always run through toFillValues when skip maps are present so empty
+      // loop tables ([]) and skipped fields render cleanly with no leftover tags.
+      // When skip maps are absent, keep legacy behaviour (client pre-transformed
+      // values) but still normalise empty arrays for list fields found in the
+      // template so generating with [] is never rejected.
+      const { toFillValues } = await import("./source-map");
+      let fillValues = values;
+      if (hasSkipMaps) {
+        fillValues = toFillValues(parsed.fields, values, skip, rowSkip);
+      } else {
+        // Honour empty loop tables already in values (Frontend may send []).
+        for (const f of parsed.fields) {
+          if (f.type !== "list") continue;
+          const v = values[f.name];
+          if (v == null) {
+            // Missing list key → treat as empty loop (no leftover tags).
+            values[f.name] = [];
+          } else if (!Array.isArray(v)) {
+            return c.json(
+              {
+                error: `ฟิลด์ลิสต์「${f.name}」ต้องเป็นอาร์เรย์ (ว่างได้เมื่อข้าม)`,
+                code: "FILL_LIST_NOT_ARRAY",
+              },
+              400,
+            );
+          }
+        }
+        fillValues = values;
+      }
+
+      const out = await fillTemplate({
+        template,
+        values: fillValues,
+        images,
+      });
 
       const base = file.name.replace(/\.docx$/i, "") || "document";
       const utf8Name = `${base}-filled.docx`;

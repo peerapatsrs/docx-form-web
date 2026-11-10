@@ -1,0 +1,231 @@
+# API: AI keys + generate skip
+
+Stable Backend contract for Frontend (session user). Never returns or logs API key values.
+
+Base: same origin `/api`. Auth: session cookie (Better Auth). Unauthenticated → `401` + `AI_KEY_UNAUTHORIZED`.
+
+---
+
+## AI keys (canonical: plural)
+
+### `GET /api/ai/keys`
+
+List the current user’s saved keys (masked meta only).
+
+**Response 200**
+
+```json
+{
+  "entries": [
+    {
+      "id": "k-…",
+      "provider": "google",
+      "label": "งานหลัก",
+      "model": "gemini-3.8-flash",
+      "maskedKey": "••••…abcd",
+      "hint": "••••…abcd",
+      "hasKey": true,
+      "storeOnServer": true,
+      "createdAt": "2026-11-10T11:00:00.000Z",
+      "updatedAt": "2026-11-10T11:00:00.000Z",
+      "lastUsedAt": "2026-11-10T12:00:00.000Z",
+      "lastTestAt": "2026-11-10T11:30:00.000Z",
+      "lastTestOk": true,
+      "lastTestCode": "AI_KEY_TEST_OK",
+      "lastTestMessage": "คีย์ใช้งานได้",
+      "lastTestStatus": "ok"
+    }
+  ]
+}
+```
+
+`lastTestStatus`: `ok` | `error` | `untested`.
+
+### `POST /api/ai/keys` — create
+
+```json
+{
+  "provider": "google",
+  "label": "งานหลัก",
+  "model": "gemini-3.8-flash",
+  "apiKey": "AIza…",
+  "id": "k-optional-client-id"
+}
+```
+
+- `id` optional (server generates `k-…` when omitted).
+- **201** `{ ok: true, entry: <public meta> }`
+- Errors: `AI_KEY_INVALID_PROVIDER`, `AI_KEY_INVALID_VALUE`, `AI_KEY_INVALID_ID`, `AI_KEY_EXISTS`, `AI_KEY_MISSING_FIELDS`
+
+### `PUT /api/ai/keys` — upsert (compat)
+
+Body: `{ "entry": {…} }` or `{ "entries": […] }` (same fields as create; `id` + `apiKey` required).
+
+**200** `{ ok: true, entries: [<public meta>] }`
+
+### `GET /api/ai/keys/:id`
+
+**200** `{ entry: <public meta> }` · **404** `AI_KEY_NOT_FOUND` (also for other users’ ids — no existence leak)
+
+### `PUT /api/ai/keys/:id` — replace / rotate value
+
+```json
+{ "apiKey": "new-secret", "label": "optional", "model": "optional", "provider": "optional" }
+```
+
+**200** `{ ok: true, entry }` · **404** `AI_KEY_NOT_FOUND`
+
+### `POST /api/ai/keys/:id/test` — test saved key
+
+Optional body: `{ "timeoutMs": 15000 }` (capped). Runs a minimal live provider call under `DOCX_FORM_AI_TIMEOUT_MS` (default ≤ 20s for tests).
+
+**200** (ok)
+
+```json
+{
+  "ok": true,
+  "code": "AI_KEY_TEST_OK",
+  "message": "คีย์ใช้งานได้",
+  "provider": "google",
+  "durationMs": 123,
+  "entry": { "…updated lastTest…": true }
+}
+```
+
+**400 / 504** when not ok — `code` is one of `AI_KEY_PROVIDER_AUTH`, `AI_KEY_PROVIDER_ERROR`, `AI_KEY_TEST_TIMEOUT`, …
+
+Updates `lastTest*` and writes an audit `test` event. On success also refreshes `lastUsedAt`.
+
+### `POST /api/ai/keys/test` — test plaintext before save
+
+```json
+{ "provider": "google", "apiKey": "AIza…", "timeoutMs": 15000 }
+```
+
+Does **not** persist. Same result shape as saved-key test (no `entry`).
+
+### `DELETE /api/ai/keys/:id`
+
+Ownership enforced in SQL. **200** `{ ok: true, removed: true, code: "AI_KEY_DELETED" }` · **404** `AI_KEY_NOT_FOUND`
+
+### `GET /api/ai/keys/audit`
+
+Own audit events only.
+
+Query: `?keyId=k-…` (optional), `?limit=50` (max 200).
+
+**200**
+
+```json
+{
+  "events": [
+    {
+      "id": "1",
+      "keyId": "k-…",
+      "action": "create",
+      "provider": "google",
+      "ok": true,
+      "code": "AI_KEY_CREATED",
+      "message": "สร้างคีย์แล้ว",
+      "actorUserId": "user-…",
+      "createdAt": "2026-11-10T11:00:00.000Z"
+    }
+  ]
+}
+```
+
+`action`: `create` | `test` | `replace` | `delete` | `use`  
+Never includes key material.
+
+---
+
+## Singular aliases (FIXES.md §9)
+
+| Method | Path | Behaviour |
+|--------|------|-----------|
+| GET | `/api/ai/key` | `?id=` → one entry; else `{ entry: first\|null, entries, connected }` |
+| PUT | `/api/ai/key` | create or replace primary / given `id` |
+| POST | `/api/ai/key/test` | saved (`id`) or plaintext |
+| DELETE | `/api/ai/key` | `?id=` / body.id / else first key |
+
+Prefer plural endpoints for new UI work.
+
+---
+
+## Error codes (AI keys)
+
+| Code | HTTP | Meaning |
+|------|------|---------|
+| `AI_KEY_UNAUTHORIZED` | 401 | Not logged in |
+| `AI_KEY_NOT_FOUND` | 404 | Missing or not owned |
+| `AI_KEY_INVALID_ID` | 400 | Bad id format |
+| `AI_KEY_INVALID_PROVIDER` | 400 | Unknown provider |
+| `AI_KEY_INVALID_VALUE` | 400 | Missing / too-short key |
+| `AI_KEY_MISSING_FIELDS` | 400 | Body incomplete |
+| `AI_KEY_EXISTS` | 400 | Create with existing id |
+| `AI_KEY_CREATED` | — | Audit only |
+| `AI_KEY_REPLACED` | — | Audit only |
+| `AI_KEY_DELETED` | 200 | Delete ok / audit |
+| `AI_KEY_USED` | — | Audit when vault key used on AI routes |
+| `AI_KEY_TEST_OK` | 200 | Probe succeeded |
+| `AI_KEY_PROVIDER_AUTH` | 400 | Provider rejected key |
+| `AI_KEY_PROVIDER_ERROR` | 400 | Other provider failure |
+| `AI_KEY_TEST_TIMEOUT` | 504 | Probe timed out |
+| `AI_KEY_SERVER_ERROR` | 500 | Unexpected |
+
+Frontend should map these to TH/EN copy (see FIXES.md dialog strings).
+
+Env:
+
+- `DOCX_FORM_AI_TIMEOUT_MS` — shared AI call budget (also caps key tests ≤ 20s)
+- `DOCX_FORM_AI_KEY_TEST_MOCK=ok\|401\|hang` — local/CI mock for key probe
+
+---
+
+## Generate / fill — skipped fields & empty loops
+
+### How the client marks skip
+
+**Preferred (raw values + maps)** — multipart `POST /api/fill`:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `file` | `.docx` | Template |
+| `values` | JSON object | Field values as edited (lists are arrays of row objects) |
+| `skip` | JSON object | `{ "<fieldName>": true }` — field/table skipped (“ข้าม”) |
+| `rowSkip` | JSON object | `{ "<listName>": [ { "<item>": true }, … ] }` — per-cell skip inside rows |
+| `image:<name>` | file | Optional; omitted automatically when `skip[name]` |
+
+When `skip` / `rowSkip` are present, the server runs `toFillValues(fields, values, skip, rowSkip)`:
+
+- skipped **text** → `""` (engine removes tag; `skipEmptyTags: false`)
+- skipped **list / table** → `[]` (loop body removed; no leftover `{{#…}}` / `{{/}}`)
+- skipped **bool** → `falseText`
+- empty loop with **no skip map** but `values[listName] = []` (or missing list key) is also accepted and rendered empty
+
+**Legacy:** clients that already send pre-transformed values (empty string / `[]` for skipped fields) may omit `skip` / `rowSkip`. Still supported.
+
+### `POST /api/batch-fill`
+
+Each `items[]` entry may include optional `skip` / `rowSkip` alongside `values` (same semantics).
+
+### Error codes (fill)
+
+| Code | HTTP | Meaning |
+|------|------|---------|
+| `FILL_MISSING_FILE` | 400 | No template file |
+| `FILL_INVALID_FILE` | 400 | Not a usable `.docx` |
+| `FILL_MISSING_VALUES` | 400 | No `values` |
+| `FILL_BAD_JSON` | 400 | `values` not JSON |
+| `FILL_BAD_SKIP` | 400 | `skip` not a JSON object |
+| `FILL_BAD_ROW_SKIP` | 400 | `rowSkip` not a JSON object |
+| `FILL_LIST_NOT_ARRAY` | 400 | List field value is not an array |
+| `FILL_IMAGE_TOO_LARGE` | 400 | Image > 8 MB |
+| `FILL_IMAGE_INVALID` | 400 | Non-image upload |
+
+There is **no** server-side “must have ≥1 row” rule. Empty / skipped tables are valid; validation UX is Frontend-only.
+
+### Contract note for Frontend validation
+
+- Ticking **ข้าม** on a field or whole table must set `skip[fieldName]=true` (and ideally still send the field in `values`).
+- Tables with only an empty starter row should either be skipped or sent as `[]` once the user confirms skip — Backend will not block generate for empty loops.

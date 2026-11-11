@@ -39,5 +39,13 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
-      - name: Unit tests
-        run: npm run test:unit
+      # Offline OIDC / mw-shared checks only (no Postgres service in this workflow).
+      - name: OIDC + mw-shared unit tests
+        run: |
+          set -euo pipefail
+          node --import tsx scripts/oidc-sso-unit-test.mjs
+          node --import tsx scripts/oidc-only-login-unit-test.mjs
+          node --import tsx scripts/oidc-passkey-aia-unit-test.mjs
+          node --import tsx scripts/oidc-link-loop-unit-test.mjs
+          node --import tsx scripts/oidc-silent-sso-unit-test.mjs
+          node --import tsx scripts/oidc-backchannel-unit-test.mjs

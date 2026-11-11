@@ -287,46 +287,162 @@ await check("logout → hub login → /logged-out plain anchor /?sso=1", async (
   assert.match(page, /full document navigation|plain <a/i);
 });
 
+async function signSessionCookie(payload, secret) {
+  const secretBuf = new TextEncoder().encode(secret);
+  const key = await crypto.subtle.importKey(
+    "raw",
+    secretBuf,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(payload),
+  );
+  const bytes = new Uint8Array(sig);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  const signature = btoa(bin);
+  assert.equal(signature.length, 44);
+  assert.ok(signature.endsWith("="));
+  return `${payload}.${signature}`;
+}
+
 await check("expired DB session + live Keycloak → typed / can silent SSO", async () => {
+  process.env.BETTER_AUTH_SECRET = "unit-test-secret-32chars-min!!!!";
   const { resolveProxySession, verifySignedCookieValue } = await load(
     "src/server/oidc-session-edge.ts",
   );
   // Forged cookie → absent
-  const headers = new Headers({
-    cookie: "better-auth.session_token=forged.value========",
-  });
-  const bad = await resolveProxySession({
-    request: { headers },
+  const forged = await resolveProxySession({
+    request: {
+      headers: new Headers({
+        cookie: "better-auth.session_token=forged.value========",
+      }),
+    },
     secure: false,
     validateInDb: true,
   });
-  assert.equal(bad.hasSession, false);
-  assert.ok(bad.clearCookies.length > 0);
+  assert.equal(forged.hasSession, false);
+  assert.ok(forged.clearCookies.length > 0);
 
-  // validateInDb is wired for top-level page loads in proxy
+  // Valid HMAC + definitive null/expired DB session → clear so silent SSO can run
+  const signed = await signSessionCookie(
+    "token.payload",
+    process.env.BETTER_AUTH_SECRET,
+  );
+  assert.equal(await verifySignedCookieValue(signed), "token.payload");
+  const expired = await resolveProxySession({
+    request: {
+      headers: new Headers({ cookie: `better-auth.session_token=${signed}` }),
+    },
+    secure: false,
+    validateInDb: true,
+    getSession: async () => null,
+  });
+  assert.equal(expired.hasSession, false);
+  assert.ok(expired.clearCookies.length > 0);
+
   const proxy = readFileSync(join(root, "src/proxy.ts"), "utf8");
   assert.match(proxy, /validateInDb:\s*topLevelDoc/);
   assert.match(proxy, /resolveSilentSsoStart/);
   assert.match(proxy, /bypass=1|bypass/);
-
-  // Unit seam: when getSession would return null, clearCookies path is used
-  // (covered by resolveProxySession catch / null session above for forged).
   assert.equal(await verifySignedCookieValue("x.y"), null);
 });
 
-await check("shared BETTER_AUTH_SECRET helper; prod fail-fast", async () => {
+await check("DB session lookup throw keeps cookie; no silent SSO", async () => {
+  process.env.BETTER_AUTH_SECRET = "unit-test-secret-32chars-min!!!!";
+  const { resolveProxySession } = await load("src/server/oidc-session-edge.ts");
+  const signed = await signSessionCookie(
+    "live.token",
+    process.env.BETTER_AUTH_SECRET,
+  );
+  const down = await resolveProxySession({
+    request: {
+      headers: new Headers({ cookie: `better-auth.session_token=${signed}` }),
+    },
+    secure: false,
+    validateInDb: true,
+    getSession: async () => {
+      throw new Error("DB timeout");
+    },
+  });
+  assert.equal(down.hasSession, true);
+  assert.equal(down.clearCookies.length, 0);
+
+  const edgeSrc = readFileSync(
+    join(root, "src/server/oidc-session-edge.ts"),
+    "utf8",
+  );
+  assert.match(edgeSrc, /Transient DB|keep cookie|do not silent/i);
+});
+
+await check("refused ?sso=1 is stripped once from the URL", async () => {
+  process.env.OIDC_SSO_COOLDOWN_SEC = "60";
+  const {
+    resolveSilentSsoStart,
+    oidcSsoCooldownSetCookie,
+    stripSsoBypassParam,
+    hasSsoBypassQuery,
+  } = await load("src/server/oidc-silent.ts");
+  const t0 = 1_700_000_000_000;
+  const bypassFail = cookieVal(
+    oidcSsoCooldownSetCookie(false, {
+      nowMs: t0,
+      outcome: "login_required",
+      viaBypass: true,
+    }),
+  );
+  assert.match(bypassFail, /\.b$/);
+  const refused = resolveSilentSsoStart({
+    pathname: "/",
+    search: "?sso=1",
+    hasSession: false,
+    cooldownCookie: bypassFail,
+    nowMs: t0 + 5_000,
+    cooldownSec: 60,
+    hubOrigins: [],
+    referer: null,
+    oidcEnabled: true,
+    isDocumentNavigation: true,
+  });
+  assert.equal(refused.start, false);
+  assert.equal(hasSsoBypassQuery("?sso=1"), true);
+  assert.equal(stripSsoBypassParam("/?sso=1"), "/");
+  assert.equal(stripSsoBypassParam("/?sso=1&x=2"), "/?x=2");
+
+  const proxy = readFileSync(join(root, "src/proxy.ts"), "utf8");
+  assert.match(proxy, /hasSsoBypassQuery/);
+  assert.match(proxy, /stripSsoBypassParam/);
+  assert.match(proxy, /stripped !== current/);
+});
+
+await check("shared BETTER_AUTH_SECRET helper; prod fail-fast + health", async () => {
   const {
     resolveBetterAuthSecret,
     DEV_AUTH_SECRET_FALLBACK,
+    getBetterAuthSecretHealth,
+    checkBetterAuthSecretAtStartup,
   } = await load("src/server/auth-secret.ts");
   delete process.env.BETTER_AUTH_SECRET;
   delete process.env.AUTH_SECRET;
   process.env.NODE_ENV = "development";
   assert.equal(resolveBetterAuthSecret(), DEV_AUTH_SECRET_FALLBACK);
+  assert.equal(getBetterAuthSecretHealth().ready, true);
+  assert.equal(getBetterAuthSecretHealth().configured, false);
+
   process.env.NODE_ENV = "production";
   assert.throws(() => resolveBetterAuthSecret(), /BETTER_AUTH_SECRET/);
+  const notReady = getBetterAuthSecretHealth();
+  assert.equal(notReady.ready, false);
+  assert.equal(notReady.configured, false);
+  assert.equal(checkBetterAuthSecretAtStartup().ready, false);
+
   process.env.BETTER_AUTH_SECRET = "prod-secret-value-32chars-minimum!!";
   assert.equal(resolveBetterAuthSecret(), "prod-secret-value-32chars-minimum!!");
+  assert.equal(getBetterAuthSecretHealth().ready, true);
 
   const authSrc = readFileSync(join(root, "src/server/auth.ts"), "utf8");
   assert.match(authSrc, /resolveBetterAuthSecret/);
@@ -337,6 +453,12 @@ await check("shared BETTER_AUTH_SECRET helper; prod fail-fast", async () => {
   );
   assert.match(edgeSrc, /resolveBetterAuthSecret/);
   assert.doesNotMatch(edgeSrc, /docx-form-dev-secret-change-me-32b/);
+  const instr = readFileSync(join(root, "src/instrumentation.ts"), "utf8");
+  assert.match(instr, /checkBetterAuthSecretAtStartup/);
+  const apiSrc = readFileSync(join(root, "src/server/api.ts"), "utf8");
+  assert.match(apiSrc, /getBetterAuthSecretHealth/);
+  assert.match(apiSrc, /not-ready/);
+  assert.match(apiSrc, /BETTER_AUTH_SECRET/);
 });
 
 await check("interactive login_required still shows error page", async () => {

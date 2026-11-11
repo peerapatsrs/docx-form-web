@@ -28,7 +28,7 @@ configure per environment via `OIDC_ISSUER`.
 | `OIDC_PASSKEY_MANAGE_URL` | no | Optional external help URL only (no account-console default) |
 | `APP_BASE_URL` (or `NEXT_PUBLIC_APP_URL` / `BETTER_AUTH_URL` / `RENDER_EXTERNAL_URL`) | yes for redirects | Public base URL |
 | `SUPERADMIN_EMAILS` | recommended | Comma-separated emails promoted to `superadmin` when they match an OIDC-verified email |
-| `BETTER_AUTH_SECRET` | yes | Session signing |
+| `BETTER_AUTH_SECRET` | yes | Session signing (checked at startup; `/api/health` → `not-ready` when missing in production) |
 
 When any of `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` is missing,
 **SSO is not configured**: `/login` shows a clear error page, the failure is
@@ -67,8 +67,10 @@ Pattern: `https://auth.tps18.space/realms/tps18-{env}` where `{env}` is
    Cooldown blocks normal re-checks for `OIDC_SSO_COOLDOWN_SEC` (default 60).
    Hub Referer / `OIDC_SSO_HUB_ORIGINS` or `?sso=1` may bypass after a
    **normal** fail so a later hub login can silent-SSO; a second bypass in the
-   same window (`.b`) is refused (stops Referer-sticky loops). On real page
-   loads, forged or DB-expired session cookies are cleared so silent SSO runs.
+   same window (`.b`) is refused (stops Referer-sticky loops) and `?sso=1` is
+   stripped from the URL once. On real page loads, forged or **definitively**
+   DB-expired session cookies are cleared so silent SSO runs; a DB
+   down/timeout keeps the cookie and does **not** start silent SSO.
    Info logs: `[oidc] silent …` (no PII).
 3. **Protected pages** (`/account`, `/admin`, …) without a session → interactive
    `/login?next=…` preserving path + query (then Keycloak authorize **without**

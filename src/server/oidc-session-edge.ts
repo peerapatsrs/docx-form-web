@@ -67,11 +67,17 @@ export function expireAppSessionCookies(secure: boolean): string[] {
   );
 }
 
+export type ProxySessionLookup = (headers: Headers) => Promise<{
+  session?: unknown;
+  user?: unknown;
+} | null>;
+
 /**
  * Resolve whether the request has a live app session.
  * - Always HMAC-verify the cookie (forged → clear).
  * - When validateInDb (top-level document navigations only), also call
- *   auth.api.getSession; missing/expired DB session → clear + absent.
+ *   auth.api.getSession; definitive missing/expired DB session → clear + absent.
+ * - DB down/timeout (throw) → keep cookie, treat as present (no silent SSO).
  */
 export async function resolveProxySession(input: {
   request: {
@@ -81,6 +87,8 @@ export async function resolveProxySession(input: {
   secure?: boolean;
   /** Page-load only — skip on RSC/prefetch to avoid DB load. */
   validateInDb?: boolean;
+  /** Test seam — defaults to auth.api.getSession. */
+  getSession?: ProxySessionLookup;
 }): Promise<{ hasSession: boolean; clearCookies: string[] }> {
   const secure = input.secure ?? process.env.NODE_ENV === "production";
   const raw = getSessionCookie(
@@ -99,10 +107,13 @@ export async function resolveProxySession(input: {
 
   if (input.validateInDb) {
     try {
-      const { auth } = await import("./auth");
-      const session = await auth.api.getSession({
-        headers: input.request.headers,
-      });
+      const getSession =
+        input.getSession ??
+        (async (headers: Headers) => {
+          const { auth } = await import("./auth");
+          return auth.api.getSession({ headers });
+        });
+      const session = await getSession(input.request.headers);
       if (!session?.session || !session?.user) {
         return {
           hasSession: false,
@@ -110,11 +121,8 @@ export async function resolveProxySession(input: {
         };
       }
     } catch {
-      // Treat lookup failure as absent so silent SSO can still run.
-      return {
-        hasSession: false,
-        clearCookies: expireAppSessionCookies(secure),
-      };
+      // Transient DB / session-store failure — keep cookie; do not silent-SSO.
+      return { hasSession: true, clearCookies: [] };
     }
   }
 

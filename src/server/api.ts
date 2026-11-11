@@ -351,8 +351,25 @@ export function createApi(options: {
     }
   });
 
-  /** Public liveness — status only (no version / author / AI inventory). */
-  api.get("/health", (c) => c.json({ ok: true, status: "ok" }));
+  /**
+   * Public liveness / readiness — status only (no version / author / AI inventory).
+   * Production missing BETTER_AUTH_SECRET → not-ready (503).
+   */
+  api.get("/health", async (c) => {
+    const { getBetterAuthSecretHealth } = await import("./auth-secret");
+    const secret = getBetterAuthSecretHealth();
+    if (!secret.ready) {
+      return c.json(
+        {
+          ok: false,
+          status: "not-ready",
+          reason: "BETTER_AUTH_SECRET",
+        },
+        503,
+      );
+    }
+    return c.json({ ok: true, status: "ok" });
+  });
 
   /** Removed DEV test-login routes — always 404 (OIDC-only). */
   api.get("/dev/test-accounts", (c) => c.json({ error: "ไม่พบ" }, 404));

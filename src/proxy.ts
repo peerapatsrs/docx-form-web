@@ -11,6 +11,7 @@ import {
 import { isOidcEnabled } from "@/server/oidc-config";
 import {
   getOidcSsoCooldownSec,
+  hasSsoBypassQuery,
   isProtectedAppPath,
   isTopLevelDocumentNavigation,
   OIDC_SSO_COOLDOWN_COOKIE,
@@ -140,6 +141,22 @@ export async function proxy(request: NextRequest) {
       redirect.headers.set("Cache-Control", documentCacheControl(pathname));
     }
     return redirect;
+  }
+
+  // Refused or unused ?sso=1 — strip once so it does not stick in the address bar.
+  if (topLevelDoc && hasSsoBypassQuery(search)) {
+    const current = safeAppReturnPath(pathname, search);
+    const stripped = stripSsoBypassParam(current);
+    if (stripped !== current) {
+      const redirect = applySecurityHeaders(
+        NextResponse.redirect(new URL(safeAppPathUrl(stripped)), 307),
+      );
+      applySetCookies(redirect, session.clearCookies);
+      if (htmlish) {
+        redirect.headers.set("Cache-Control", documentCacheControl(pathname));
+      }
+      return redirect;
+    }
   }
 
   if (isProtectedAppPath(pathname) && !hasSession) {

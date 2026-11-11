@@ -36,9 +36,16 @@ export function ProfileAvatar({
   const src = String(image || "").trim();
   const showImg = Boolean(src) && !failed;
 
+  const boxStyle = {
+    width: size,
+    height: size,
+    minWidth: size,
+    minHeight: size,
+  } as const;
+
   if (!showImg) {
     return (
-      <span className={fallbackClassName} aria-hidden>
+      <span className={fallbackClassName} style={boxStyle} aria-hidden>
         {initialOf(name, email)}
       </span>
     );
@@ -55,6 +62,7 @@ export function ProfileAvatar({
       alt=""
       width={size}
       height={size}
+      style={boxStyle}
       referrerPolicy="no-referrer"
       decoding="async"
       onError={() => setFailed(true)}

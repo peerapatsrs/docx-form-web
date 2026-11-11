@@ -33,6 +33,11 @@ assert.ok(
 
 const codes = [
   "AI_KEY_UNAUTHORIZED",
+  "AI_KEY_REQUIRED",
+  "AI_MODEL_SOURCE_MISMATCH",
+  "AI_SERVER_KEY_INVALID",
+  "AI_SERVER_KEY_UNAVAILABLE",
+  "AI_KEY_INVALID_MODE",
   "AI_KEY_NOT_FOUND",
   "AI_KEY_INVALID_ID",
   "AI_KEY_INVALID_PROVIDER",
@@ -53,6 +58,15 @@ const codes = [
   "AI_PROVIDER_BAD_REQUEST",
   "AI_PROVIDER_ERROR",
 ];
+assert.equal(
+  mapAiKeyError({ code: "AI_SERVER_KEY_INVALID" }),
+  "คีย์กลางของระบบใช้ไม่ได้ชั่วคราว กรุณาแจ้งผู้ดูแลระบบ",
+);
+assert.ok(!mapAiKeyError({ code: "AI_SERVER_KEY_INVALID" }).includes("ของฉัน"));
+assert.equal(
+  mapAiKeyError({ code: "AI_MODEL_SOURCE_MISMATCH" }),
+  "โมเดลนี้ไม่ตรงกับคีย์ที่เลือก กรุณาเลือกใหม่",
+);
 for (const code of codes) {
   const th = mapAiKeyError({ code }, 400, "th");
   const en = mapAiKeyError({ code }, 400, "en");

@@ -17,8 +17,28 @@ export const AI_KEY_TEST_ENABLED = true;
 /** @type {Record<string, LocaleCopy>} */
 const AI_CODE_MESSAGES = {
   AI_KEY_UNAUTHORIZED: {
-    th: "ต้องเข้าสู่ระบบก่อนจึงจะจัดการคีย์บนเซิร์ฟเวอร์ได้",
-    en: "Sign in to manage server-stored AI keys.",
+    th: "เซสชันหมดอายุ — กรุณาเข้าสู่ระบบใหม่",
+    en: "Session expired — please sign in again.",
+  },
+  AI_KEY_REQUIRED: {
+    th: "ต้องตั้งค่าคีย์ AI ก่อน",
+    en: "Set up an AI key first",
+  },
+  AI_MODEL_SOURCE_MISMATCH: {
+    th: "โมเดลนี้ไม่ตรงกับคีย์ที่เลือก กรุณาเลือกใหม่",
+    en: "This model does not match the selected key — please pick again.",
+  },
+  AI_SERVER_KEY_INVALID: {
+    th: "คีย์กลางของระบบใช้ไม่ได้ชั่วคราว กรุณาแจ้งผู้ดูแลระบบ",
+    en: "The system key is temporarily unavailable — please tell an admin.",
+  },
+  AI_SERVER_KEY_UNAVAILABLE: {
+    th: "คีย์กลางของระบบยังไม่พร้อม — เลือกคีย์ของฉัน หรือติดต่อผู้ดูแล",
+    en: "System key is unavailable — use your own key or contact an admin.",
+  },
+  AI_KEY_INVALID_MODE: {
+    th: "โหมดคีย์ไม่ถูกต้อง — เลือกคีย์กลางของระบบ หรือคีย์ของฉัน",
+    en: "Invalid key mode — choose system key or your own key.",
   },
   AI_KEY_NOT_FOUND: {
     th: "ไม่พบคีย์นี้ — อาจถูกลบไปแล้ว",
@@ -117,6 +137,25 @@ const AI_CODE_MESSAGES = {
     en: "Provider error.",
   },
 };
+
+/**
+ * Append request-wiring fields for AI multipart POSTs.
+ * source = group of the selected model ('server' | 'byok').
+ * @param {FormData} fd
+ * @param {{ source?: string|null, aiModel?: string|null, aiProvider?: string|null }} opts
+ */
+export function appendAiKeyRequestFields(fd, opts = {}) {
+  const source = opts.source === "server" ? "server" : "byok";
+  const aiModel = String(opts.aiModel || "").trim();
+  const aiProvider = String(opts.aiProvider || "").trim();
+  fd.append("source", source);
+  if (aiModel) {
+    fd.append("aiModel", aiModel);
+    fd.append("geminiModel", aiModel);
+  }
+  if (aiProvider) fd.append("aiProvider", aiProvider);
+  return { source, aiModel, aiProvider };
+}
 
 /** @type {Record<string, LocaleCopy>} */
 const FILL_CODE_MESSAGES = {

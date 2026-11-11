@@ -2,22 +2,20 @@
 
 import { useEffect, useId, useState } from "react";
 import {
-  deleteUserAiKey,
   fetchAiKeySettingsState,
-  saveUserAiKey,
-  updateAiKeySettingsMode,
+  putAiKeySettings,
   type AiKeySettingsMode,
   type AiKeySettingsState,
 } from "@/lib/ai-key-settings-adapter";
 import {
   aiKeySettingsCopy,
+  mapAiKeySettingsError,
   modeDisplayLabel,
 } from "@/components/ai-key-settings-copy";
 
 const INITIAL: AiKeySettingsState = {
   mode: "server",
   serverKeyAvailable: false,
-  serverKeyAvailabilityKnown: false,
   userKeySet: false,
 };
 
@@ -48,8 +46,19 @@ export function AiKeysSection() {
         if (cancelled) return;
         setState(next);
         setError("");
-      } catch {
-        if (!cancelled) setError(copy.loadError);
+      } catch (err) {
+        if (cancelled) return;
+        const code =
+          err && typeof err === "object" && "code" in err
+            ? String((err as { code?: string }).code || "")
+            : "";
+        const status =
+          err && typeof err === "object" && "status" in err
+            ? Number((err as { status?: number }).status || 0)
+            : 0;
+        setError(
+          mapAiKeySettingsError(code, status) || copy.loadError,
+        );
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -61,20 +70,16 @@ export function AiKeysSection() {
 
   async function selectMode(mode: AiKeySettingsMode) {
     if (busy) return;
-    if (
-      mode === "server" &&
-      state.serverKeyAvailabilityKnown &&
-      !state.serverKeyAvailable
-    ) {
+    if (mode === "server" && !state.serverKeyAvailable) {
       return;
     }
     setBusy(true);
     setError("");
     setBanner("");
     try {
-      const res = await updateAiKeySettingsMode(mode);
+      const res = await putAiKeySettings({ mode });
       if (!res.ok) {
-        setError(res.error);
+        setError(mapAiKeySettingsError(res.code, res.status) || res.error);
         return;
       }
       setState(res.state);
@@ -92,9 +97,14 @@ export function AiKeysSection() {
     setError("");
     setBanner("");
     try {
-      const res = await saveUserAiKey(draftKey);
+      const res = await putAiKeySettings({
+        apiKey: draftKey,
+        provider: "google",
+        label: "คีย์ของฉัน",
+        model: "gemini-3.8-flash",
+      });
       if (!res.ok) {
-        setError(res.error);
+        setError(mapAiKeySettingsError(res.code, res.status) || res.error);
         return;
       }
       setState(res.state);
@@ -109,14 +119,14 @@ export function AiKeysSection() {
 
   async function onDeleteKey() {
     if (busy) return;
-    if (!window.confirm(`${copy.deleteKey}?`)) return;
+    if (!window.confirm(copy.deleteConfirm)) return;
     setBusy(true);
     setError("");
     setBanner("");
     try {
-      const res = await deleteUserAiKey();
+      const res = await putAiKeySettings({ deleteKey: true });
       if (!res.ok) {
-        setError(res.error);
+        setError(mapAiKeySettingsError(res.code, res.status) || res.error);
         return;
       }
       setState(res.state);
@@ -127,8 +137,7 @@ export function AiKeysSection() {
     }
   }
 
-  const serverDisabled =
-    state.serverKeyAvailabilityKnown && !state.serverKeyAvailable;
+  const serverDisabled = !state.serverKeyAvailable;
   const showByokEditor =
     state.mode === "byok" && (!state.userKeySet || replacing);
 
@@ -175,12 +184,11 @@ export function AiKeysSection() {
                 <span className="ai-key-settings-card-status is-warn">
                   {copy.modeServerUnavailable}
                 </span>
-              ) : state.serverKeyAvailable || !state.serverKeyAvailabilityKnown ? (
+              ) : (
                 <span className="ai-key-settings-card-status is-ready">
                   {copy.modeServerReady}
-                  {!state.serverKeyAvailabilityKnown ? " · …" : ""}
                 </span>
-              ) : null}
+              )}
             </span>
           </label>
 

@@ -17,6 +17,8 @@ import {
 import { openAiKeyDialog } from "./ai-key-dialog.js";
 import {
   aiKeyAuthHeaders,
+  appendAiKeyRequestFields,
+  mapAiKeyError,
   mapFillError,
   maskAiKeyLocal,
 } from "./ai-key-client.js";
@@ -32,6 +34,7 @@ import {
   bindAiModelPicker,
   buildAiModelGroups,
   renderAiModelPickerHtml,
+  resolveModelSource,
 } from "./ai-model-picker.js";
 
 /** @typedef {{ name: string, type: 'text', aliases?: string[] }} TextField */
@@ -1580,11 +1583,28 @@ function askDialog(opts) {
       const select = /** @type {HTMLSelectElement | null} */ (overlay.querySelector("#dialogSelect"));
       const custom = /** @type {HTMLInputElement | null} */ (overlay.querySelector("#dialogCustomModel"));
       const check = /** @type {HTMLInputElement | null} */ (overlay.querySelector("#dialogCheck"));
+      const badge = /** @type {HTMLElement | null} */ (
+        overlay.querySelector("#dialogSelectSource")
+      );
       let model = select?.value || "";
-      if (model === "__custom__") model = String(custom?.value || "").trim();
+      let source = "byok";
+      if (model === "__custom__") {
+        model = String(custom?.value || "").trim();
+        source = "byok";
+      } else if (selectGroups) {
+        const opt = select?.selectedOptions?.[0];
+        const fromOpt = opt?.getAttribute("data-source");
+        source =
+          fromOpt === "server" || fromOpt === "byok"
+            ? fromOpt
+            : badge?.dataset?.source === "server"
+              ? "server"
+              : resolveModelSource(selectGroups, model);
+      }
       return {
         value: input?.value || "",
         model,
+        source,
         checked: check ? !!check.checked : false,
       };
     };
@@ -1648,6 +1668,7 @@ function askDialog(opts) {
               id: a.id,
               value: fields.value,
               model: fields.model,
+              source: fields.source,
               checked: fields.checked,
             });
             return;
@@ -2172,6 +2193,67 @@ function setCreditsVersion(version) {
 
 const AI_KEY_SS = "docx-form-web:geminiKey";
 const AI_MODEL_SS = "docx-form-web:geminiModel";
+/** Selected model group for AI multipart `source` (server | byok). */
+const AI_MODEL_SOURCE_SS = "docx-form-web:aiModelSource";
+
+function getAiRequestSource() {
+  try {
+    const s = String(sessionStorage.getItem(AI_MODEL_SOURCE_SS) || "").trim();
+    if (s === "server" || s === "byok") return s;
+  } catch {
+    /* private mode */
+  }
+  if (aiStatus?.mode === "server") return "server";
+  if (
+    (aiStatus?.keySource === "shared" || aiStatus?.serverAiKeyConfigured) &&
+    !getClientAiKey()
+  ) {
+    return "server";
+  }
+  return "byok";
+}
+
+function setAiRequestSource(source) {
+  const s = source === "server" ? "server" : "byok";
+  try {
+    sessionStorage.setItem(AI_MODEL_SOURCE_SS, s);
+  } catch {
+    /* private mode */
+  }
+}
+
+/**
+ * Show AI feature errors mapped by stable `code` (not raw text).
+ * @param {{ error?: string, code?: string, message?: string } | null | undefined} data
+ * @param {number} [status]
+ */
+function showAiApiError(data, status = 0) {
+  const code = String(data?.code || "").trim();
+  const msg = mapAiKeyError(data, status);
+  if (status === 401 || code === "AI_KEY_UNAUTHORIZED") {
+    showBanner(msg || "เซสชันหมดอายุ — กรุณาเข้าสู่ระบบใหม่", "error", {
+      action: {
+        label: "เข้าสู่ระบบ",
+        onClick: () => {
+          window.location.assign("/login");
+        },
+      },
+    });
+    return;
+  }
+  if (code === "AI_KEY_REQUIRED") {
+    showBanner(msg || "ต้องตั้งค่าคีย์ AI ก่อน", "error", {
+      action: {
+        label: "ตั้งค่าคีย์",
+        onClick: () => {
+          window.location.assign("/account#account-ai-keys");
+        },
+      },
+    });
+    return;
+  }
+  showBanner(msg || data?.error || "คำขอ AI ไม่สำเร็จ");
+}
 const AI_VAULT_LS = "docx-form-web:aiVault:v1";
 /** Tagger AI draft: variable-name language (`th` | `en`). Default Thai. */
 const TAGGER_NAME_LANG_SS = "docx-form-web:taggerNameLang";
@@ -2620,15 +2702,27 @@ async function pollAiJobResult(jobId, { signal, onProgress } = {}) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      throw new Error(data.error || "ติดตามงาน AI ไม่สำเร็จ");
+      const err = new Error(
+        mapAiKeyError(data, res.status) || data.error || "ติดตามงาน AI ไม่สำเร็จ",
+      );
+      err.code = data.code;
+      err.status = res.status;
+      throw err;
     }
     if (onProgress && data.progress) onProgress(data.progress);
     if (data.status === "done") return data.result ?? data;
     if (data.status === "error") {
-      throw new Error(data.error || "งาน AI ล้มเหลว");
+      const err = new Error(
+        mapAiKeyError(data, 500) || data.error || "งาน AI ล้มเหลว",
+      );
+      err.code = data.code;
+      err.status = 500;
+      throw err;
     }
     if (data.status === "cancelled") {
-      throw new Error(data.error || "ยกเลิกแล้ว");
+      const err = new Error(data.error || "ยกเลิกแล้ว");
+      err.code = data.code;
+      throw err;
     }
     await sleepMs(1500);
   }
@@ -2644,7 +2738,12 @@ async function postSuggestTagsAsync(fd, { signal, onProgress } = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.error || "AI ดราฟตัวแปรไม่สำเร็จ");
+    const err = new Error(
+      mapAiKeyError(data, res.status) || data.error || "AI ดราฟตัวแปรไม่สำเร็จ",
+    );
+    err.code = data.code;
+    err.status = res.status;
+    throw err;
   }
   if (data.jobId) {
     return pollAiJobResult(data.jobId, { signal, onProgress });
@@ -2924,6 +3023,9 @@ async function promptAddAiKey() {
     showBanner("ยังไม่ได้เลือกโมเดล");
     return false;
   }
+  setAiRequestSource(
+    modelPick.source || resolveModelSource(modelGroups, model),
+  );
 
   try {
     const res = await fetch("/api/ai/connect", {
@@ -3182,6 +3284,9 @@ async function openAiKeysManager() {
               entry.model = model;
               vaultNow.activeId = entry.id;
               writeAiVault(vaultNow);
+              setAiRequestSource(
+                choice.source || resolveModelSource(editGroups, model),
+              );
               if (entry.storeOnServer) void pushServerAiKey(entry);
               applyAiStatus({
                 connected: true,
@@ -4101,11 +4206,11 @@ async function runTaggerAiDraft() {
       fd.append("geminiApiKey", byokKey);
       fd.append("aiApiKey", byokKey);
     }
-    if (byokModel) {
-      fd.append("geminiModel", byokModel);
-      fd.append("aiModel", byokModel);
-    }
-    if (byokProvider) fd.append("aiProvider", byokProvider);
+    appendAiKeyRequestFields(fd, {
+      source: getAiRequestSource(),
+      aiModel: byokModel,
+      aiProvider: byokProvider,
+    });
     fd.append("nameLanguage", getTaggerAiNameLanguage());
 
     taggerSuggestAbort?.abort();
@@ -4435,8 +4540,15 @@ async function runTaggerAiDraft() {
       showBanner(UI_LABELS.aiCancelNeutral, "warn");
       setTimeout(() => showBanner(""), 2800);
     } else {
-      const msg = err instanceof Error ? err.message : "AI ดราฟตัวแปรไม่สำเร็จ";
-      showBanner(msg);
+      const data = {
+        error: err instanceof Error ? err.message : "AI ดราฟตัวแปรไม่สำเร็จ",
+        code: err && typeof err === "object" && "code" in err ? err.code : undefined,
+      };
+      const status =
+        err && typeof err === "object" && "status" in err
+          ? Number(err.status) || 0
+          : 0;
+      showAiApiError(data, status);
     }
   } finally {
     stopAiWaitBanner?.();
@@ -10441,11 +10553,11 @@ async function runBatchFromSource(sourceFiles) {
     fd.append("geminiApiKey", byokKey);
     fd.append("aiApiKey", byokKey);
   }
-  if (byokModel) {
-    fd.append("geminiModel", byokModel);
-    fd.append("aiModel", byokModel);
-  }
-  if (byokProvider) fd.append("aiProvider", byokProvider);
+  appendAiKeyRequestFields(fd, {
+    source: getAiRequestSource(),
+    aiModel: byokModel,
+    aiProvider: byokProvider,
+  });
 
   try {
     appendSourceMapLog("ส่งคำขอ batch-from-source (สตรีมล็อกละเอียด)…");
@@ -10460,7 +10572,7 @@ async function runBatchFromSource(sourceFiles) {
       const data = await res.json().catch(() => ({}));
       sourceMapSession = null;
       renderForm();
-      showBanner(data.error || "แมป JSON ไม่สำเร็จ");
+      showAiApiError(data, res.status);
       return;
     }
 
@@ -10469,7 +10581,7 @@ async function runBatchFromSource(sourceFiles) {
       if (!res.ok) {
         sourceMapSession = null;
         renderForm();
-        showBanner(data.error || "แมป JSON ไม่สำเร็จ");
+        showAiApiError(data, res.status);
         return;
       }
       applyBatchFromSourceResults(data);
@@ -11797,6 +11909,18 @@ async function runSourceMap(files) {
       JSON.stringify(buildExportJsonNow(state, { blank: true })),
     );
     for (const f of files) form.append("files", f, f.name);
+    {
+      const byokKey = getClientAiKey();
+      if (byokKey) {
+        form.append("geminiApiKey", byokKey);
+        form.append("aiApiKey", byokKey);
+      }
+      appendAiKeyRequestFields(form, {
+        source: getAiRequestSource(),
+        aiModel: getClientAiModel(),
+        aiProvider: getClientAiProvider(),
+      });
+    }
 
     appendSourceMapLog("ส่งคำขอไปเซิร์ฟเวอร์ (สตรีมล็อกละเอียด)…");
     const res = await fetch("/api/source-map?stream=1", {
@@ -11811,7 +11935,7 @@ async function runSourceMap(files) {
       const data = await res.json().catch(() => ({}));
       sourceMapSession = null;
       renderForm();
-      showBanner(data.error || "แมปเอกสารต้นทางไม่สำเร็จ — ไม่ทราบสาเหตุ");
+      showAiApiError(data, res.status);
       return;
     }
 
@@ -11821,7 +11945,7 @@ async function runSourceMap(files) {
       if (!res.ok) {
         sourceMapSession = null;
         renderForm();
-        showBanner(data.error || "แมปเอกสารต้นทางไม่สำเร็จ — ไม่ทราบสาเหตุ");
+        showAiApiError(data, res.status);
         return;
       }
       finishSourceMapResult(data);

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * AI key settings + model picker screenshots (feat/ai-key-ui).
- * Mocks session + settings state; never injects a system key value.
+ * Mocks GET/PUT /api/ai/keys/status + GET /api/ai/keys/models — never injects a system key value.
  */
 import { createRequire } from "node:module";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -11,6 +11,7 @@ import {
   buildAiModelGroups,
   renderAiModelPickerHtml,
 } from "../public/ai-model-picker.js";
+import { mapAiKeyError } from "../public/ai-key-client.js";
 
 const require = createRequire(import.meta.url);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -42,6 +43,29 @@ function assertNoSecrets(text) {
   }
 }
 
+function statusBody(mock) {
+  return {
+    mode: mock.mode || "server",
+    serverKeyAvailable: !!mock.serverKeyAvailable,
+    userKeySet: !!mock.userKeySet,
+    ...(mock.userKeyHint ? { userKeyHint: mock.userKeyHint } : {}),
+  };
+}
+
+function modelsBody(mock) {
+  return {
+    ...statusBody(mock),
+    models: [
+      ...(mock.serverKeyAvailable
+        ? [{ id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", provider: "google", source: "server" }]
+        : []),
+      ...(mock.userKeySet
+        ? [{ id: "gpt-4.1-mini", label: "GPT-4.1 mini", provider: "openai", source: "byok" }]
+        : []),
+    ],
+  };
+}
+
 async function withPage(browserType, label, width, height, deviceOpts, fn) {
   const browser = await browserType.launch({ headless: true });
   const context = await browser.newContext({
@@ -59,6 +83,7 @@ async function withPage(browserType, label, width, height, deviceOpts, fn) {
   await page.route("**/*", async (route) => {
     try {
       const url = route.request().url();
+      const method = route.request().method();
       if (url.includes("/api/auth/") && (url.includes("get-session") || url.includes("session"))) {
         await route.fulfill({
           status: 200,
@@ -67,7 +92,46 @@ async function withPage(browserType, label, width, height, deviceOpts, fn) {
         });
         return;
       }
-      if (url.includes("/api/ai/status") || url.includes("/api/ai/key-settings")) {
+      if (url.includes("/api/ai/keys/status")) {
+        const mock = page.__aiKeyMock || {
+          mode: "server",
+          serverKeyAvailable: true,
+          userKeySet: false,
+        };
+        if (method === "PUT") {
+          let body = {};
+          try {
+            body = route.request().postDataJSON() || {};
+          } catch {
+            body = {};
+          }
+          const next = { ...mock };
+          if (body.mode === "server" || body.mode === "byok") next.mode = body.mode;
+          if (body.deleteKey) {
+            next.userKeySet = false;
+            delete next.userKeyHint;
+          }
+          if (body.apiKey) {
+            next.userKeySet = true;
+            next.mode = "byok";
+            next.userKeyHint = `••••${String(body.apiKey).slice(-4)}`;
+          }
+          page.__aiKeyMock = next;
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify(statusBody(next)),
+          });
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(statusBody(mock)),
+        });
+        return;
+      }
+      if (url.includes("/api/ai/keys/models")) {
         const mock = page.__aiKeyMock || {
           mode: "server",
           serverKeyAvailable: true,
@@ -76,41 +140,7 @@ async function withPage(browserType, label, width, height, deviceOpts, fn) {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify({
-            connected: mock.serverKeyAvailable || mock.userKeySet,
-            mode: mock.mode,
-            serverKeyAvailable: mock.serverKeyAvailable,
-            serverAiKeyConfigured: mock.serverKeyAvailable,
-            userKeySet: mock.userKeySet,
-            userKeyHint: mock.userKeyHint,
-            keySource: mock.userKeySet ? "user" : mock.serverKeyAvailable ? "shared" : "none",
-            models: [
-              { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", source: "server" },
-              { id: "gpt-4.1-mini", label: "GPT-4.1 mini", source: "byok" },
-            ],
-          }),
-        });
-        return;
-      }
-      if (url.includes("/api/ai/keys") && route.request().method() === "GET") {
-        const mock = page.__aiKeyMock || {};
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            entries: mock.userKeySet
-              ? [
-                  {
-                    id: "k-user",
-                    provider: "google",
-                    label: "คีย์ของฉัน",
-                    model: "gemini-3.8-flash",
-                    maskedKey: mock.userKeyHint || "••••1234",
-                    hasKey: true,
-                  },
-                ]
-              : [],
-          }),
+          body: JSON.stringify(modelsBody(mock)),
         });
         return;
       }
@@ -154,7 +184,6 @@ async function shotSettings(page, name, mock) {
     window.__DOCX_FORM_AI_KEY_SETTINGS_MOCK__ = { ...m, force: true };
   }, mock);
   await page.goto(`${baseUrl}/account`, { waitUntil: "networkidle", timeout: 90000 });
-  // Account may redirect to login without real session — inject settings panel if needed.
   const hasSection = await page.locator("#account-ai-keys").count();
   if (!hasSection) {
     await page.setContent(`<!doctype html><html><head>
@@ -164,23 +193,19 @@ async function shotSettings(page, name, mock) {
       <main class="shell" style="padding:1rem">
         <section class="account-panel ai-key-settings" id="account-ai-keys"></section>
       </main>
-      <script type="module">
-        import { createRoot } from '${baseUrl}/_next/static/chunks/does-not-exist.js';
-      </script>
       </body></html>`);
-    // Fallback: render static markup matching AiKeysSection for visual verify.
-    const serverDisabled = mock.serverKeyAvailabilityKnown && !mock.serverKeyAvailable;
     await page.evaluate((m) => {
       const el = document.getElementById("account-ai-keys");
       const modeLabel =
         m.mode === "byok" ? "ใช้คีย์ของฉันเอง" : "ใช้คีย์กลางของระบบ";
+      const serverDisabled = !m.serverKeyAvailable;
       el.innerHTML = `
         <div class="account-panel-head"><h2 class="auth-section-title">คีย์ AI</h2></div>
         <p class="ai-key-settings-active"><span class="ai-key-settings-active-badge">กำลังใช้: ${modeLabel}</span></p>
         <p class="auth-hint ai-key-settings-privacy">ระบบจะไม่แสดงหรือขอค่าคีย์กลางของระบบ</p>
         <div class="ai-key-settings-choices" role="radiogroup">
-          <label class="ai-key-settings-card ${m.mode === "server" ? "is-selected" : ""} ${!m.serverKeyAvailable && m.serverKeyAvailabilityKnown !== false ? "is-disabled" : ""}">
-            <input type="radio" name="ai-key-mode" ${m.mode === "server" ? "checked" : ""} ${!m.serverKeyAvailable && m.serverKeyAvailabilityKnown !== false ? "disabled" : ""} />
+          <label class="ai-key-settings-card ${m.mode === "server" ? "is-selected" : ""} ${serverDisabled ? "is-disabled" : ""}">
+            <input type="radio" name="ai-key-mode" ${m.mode === "server" ? "checked" : ""} ${serverDisabled ? "disabled" : ""} />
             <span class="ai-key-settings-card-body">
               <span class="ai-key-settings-card-title">ใช้คีย์กลางของระบบ</span>
               <span class="ai-key-settings-card-sub">ไม่ต้องกรอกอะไร ระบบใช้คีย์ของบริษัทให้</span>
@@ -223,8 +248,7 @@ async function shotSettings(page, name, mock) {
               : ""
         }
       `;
-    }, { ...mock, serverKeyAvailabilityKnown: true });
-    // Ensure stylesheet applied
+    }, mock);
     await page.addStyleTag({ url: `${baseUrl}/style.css` });
   } else {
     await page.waitForSelector(".ai-key-settings-card", { timeout: 20000 });
@@ -252,10 +276,15 @@ async function shotSettings(page, name, mock) {
 async function shotPicker(page, name, mock) {
   const groups = buildAiModelGroups({
     serverKeyAvailable: !!mock.serverKeyAvailable,
-    serverKeyAvailabilityKnown: true,
     userKeySet: !!mock.userKeySet,
-    serverModels: [{ id: "gemini-3.8-flash", label: "Gemini 3.8 Flash" }],
-    byokModels: [{ id: "gpt-4.1-mini", label: "GPT-4.1 mini" }],
+    models: [
+      ...(mock.serverKeyAvailable
+        ? [{ id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", source: "server" }]
+        : []),
+      ...(mock.userKeySet
+        ? [{ id: "gpt-4.1-mini", label: "GPT-4.1 mini", source: "byok" }]
+        : []),
+    ],
   });
   const selected =
     mock.mode === "byok" && mock.userKeySet
@@ -287,8 +316,8 @@ async function shotPicker(page, name, mock) {
   }
   assertNoSecrets(metrics.text + metrics.html);
   if (
-    !metrics.html.includes('label="คีย์กลางของระบบ"') ||
-    !metrics.html.includes('label="คีย์ของฉัน"')
+    !metrics.html.includes('label="คีย์กลางของระบบ') ||
+    !metrics.html.includes('label="คีย์ของฉัน')
   ) {
     throw new Error(`${name}: missing optgroup labels in picker HTML`);
   }
@@ -297,6 +326,38 @@ async function shotPicker(page, name, mock) {
   }
   const path = join(outDir, name);
   await page.locator("#pickerRoot").screenshot({ path });
+  console.log(`✓ ${name}`);
+  return path;
+}
+
+async function shotErrorToast(page, name) {
+  const msg = mapAiKeyError({ code: "AI_MODEL_SOURCE_MISMATCH" });
+  await page.setContent(`<!doctype html><html><head>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="${baseUrl}/style.css" />
+    <style>body{margin:0;background:#eef3f2;padding:1rem}</style>
+  </head><body>
+    <div id="banner" class="banner" role="alert">
+      <span class="banner-msg">${msg}</span>
+      <button type="button" class="banner-close" aria-label="ปิด">×</button>
+    </div>
+  </body></html>`);
+  await page.addStyleTag({ url: `${baseUrl}/style.css` });
+  const metrics = await page.evaluate(() => ({
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+    text: document.body.innerText,
+    html: document.body.innerHTML,
+  }));
+  if (metrics.scrollWidth > metrics.clientWidth + 1) {
+    throw new Error(`${name}: toast overflow`);
+  }
+  assertNoSecrets(metrics.text + metrics.html);
+  if (!metrics.text.includes("โมเดลนี้ไม่ตรงกับคีย์ที่เลือก")) {
+    throw new Error(`${name}: missing mapped error copy`);
+  }
+  const path = join(outDir, name);
+  await page.locator("#banner").screenshot({ path });
   console.log(`✓ ${name}`);
   return path;
 }
@@ -331,6 +392,9 @@ async function main() {
           serverKeyAvailable: true,
           userKeySet: true,
         });
+        if (label === "chromium-1280") {
+          await shotErrorToast(page, "ai-key-error-toast-chromium-1280.png");
+        }
       } catch (err) {
         failures.push(`${label}: ${err.message || err}`);
       }
@@ -349,12 +413,18 @@ async function main() {
     join(outDir, "ai-key-settings-contract.json"),
     JSON.stringify(
       {
+        endpoints: {
+          status: "GET|PUT /api/ai/keys/status",
+          models: "GET /api/ai/keys/models",
+        },
         state: {
           mode: "server|byok",
           serverKeyAvailable: "boolean",
           userKeySet: "boolean",
           userKeyHint: "string? (user key only)",
         },
+        putBodies: ["{mode}", "{apiKey,provider?,label?,model?}", "{deleteKey:true}"],
+        requestFields: ["source", "aiModel", "aiProvider"],
         adapter: "src/lib/ai-key-settings-adapter.ts",
         backendFieldNeed: "models[].source: 'server'|'byok'",
       },

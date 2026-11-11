@@ -1,10 +1,24 @@
 {
+  "endpoints": {
+    "status": "GET|PUT /api/ai/keys/status",
+    "models": "GET /api/ai/keys/models"
+  },
   "state": {
     "mode": "server|byok",
     "serverKeyAvailable": "boolean",
     "userKeySet": "boolean",
     "userKeyHint": "string? (user key only)"
   },
+  "putBodies": [
+    "{mode}",
+    "{apiKey,provider?,label?,model?}",
+    "{deleteKey:true}"
+  ],
+  "requestFields": [
+    "source",
+    "aiModel",
+    "aiProvider"
+  ],
   "adapter": "src/lib/ai-key-settings-adapter.ts",
   "backendFieldNeed": "models[].source: 'server'|'byok'"
 }

@@ -50,15 +50,23 @@ export function buildAiModelGroups(input = {}) {
     }
   }
 
-  const serverDisabled = serverKnown && !serverAvailable;
-  const byokDisabled = !userKeySet;
+  const serverUnavailable = serverKnown && !serverAvailable;
+  const serverEmpty = !serverUnavailable && serverModels.length === 0;
+  const serverDisabled = serverUnavailable || serverEmpty;
+  const byokNoKey = !userKeySet;
+  const byokEmpty = userKeySet && byokModels.length === 0;
+  const byokDisabled = byokNoKey || byokEmpty;
 
   return [
     {
       id: "server",
       label: "คีย์กลางของระบบ",
       disabled: serverDisabled,
-      reason: serverDisabled ? "ระบบยังไม่ได้ตั้งคีย์กลาง" : undefined,
+      reason: serverUnavailable
+        ? "ระบบยังไม่ได้ตั้งคีย์กลาง"
+        : serverEmpty
+          ? "ยังไม่มีโมเดลจากคีย์กลาง"
+          : undefined,
       options: serverDisabled
         ? []
         : serverModels.map((m) => ({
@@ -71,7 +79,11 @@ export function buildAiModelGroups(input = {}) {
       id: "byok",
       label: "คีย์ของฉัน",
       disabled: byokDisabled,
-      reason: byokDisabled ? "ยังไม่ได้บันทึกคีย์ของฉัน" : undefined,
+      reason: byokNoKey
+        ? "ยังไม่ได้บันทึกคีย์ของฉัน"
+        : byokEmpty
+          ? "ยังไม่มีโมเดลจากคีย์ของฉัน"
+          : undefined,
       options: byokDisabled
         ? []
         : byokModels.map((m) => ({

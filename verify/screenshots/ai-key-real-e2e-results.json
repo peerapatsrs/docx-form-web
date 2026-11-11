@@ -1,0 +1,50 @@
+{
+  "baseUrl": "http://127.0.0.1:3000",
+  "results": [
+    {
+      "name": "a) server mode status + models + gate accepts source=server",
+      "ok": true,
+      "detail": "models=7 source=server status=202 code=5b2f75f3-6b57-404c-b499-a5f03e622e4f"
+    },
+    {
+      "name": "b) byok no key → AI_KEY_REQUIRED 400 mapped by code",
+      "ok": true,
+      "detail": "ต้องตั้งค่าคีย์ AI ก่อน"
+    },
+    {
+      "name": "c) PUT mode persists + deleteKey clears all user keys",
+      "ok": true,
+      "detail": "hint=••••1234"
+    },
+    {
+      "name": "d) AI_MODEL_SOURCE_MISMATCH / unavailable + Thai map",
+      "ok": true,
+      "detail": "AI_MODEL_SOURCE_MISMATCH → โมเดลนี้ไม่ตรงกับคีย์ที่เลือก กรุณาเลือกใหม่"
+    },
+    {
+      "name": "e) async job error carries code",
+      "ok": true,
+      "detail": "AI_SERVER_KEY_INVALID → คีย์กลางของระบบใช้ไม่ได้ชั่วคราว กรุณาแจ้งผู้ดูแลระบบ"
+    },
+    {
+      "name": "f) no server-key material in API responses",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "screenshots refreshed for real backend",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "c) delete confirm copy present",
+      "ok": true,
+      "detail": "ลบคีย์ของฉันทั้งหมด?"
+    }
+  ],
+  "health": {
+    "ok": true,
+    "status": "ok",
+    "serverAiKeyConfigured": true
+  }
+}

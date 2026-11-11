@@ -74,24 +74,25 @@ function LogoutButton({
   children: ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      className={className}
-      onClick={() => {
+    <form
+      method="POST"
+      action={SSO_LOGOUT_PATH}
+      className="auth-bar-logout-form"
+      onSubmit={(e) => {
         if (
           !window.confirm(
             "ออกจากระบบ?\nจะออกจากบัญชีนี้บนเครื่องนี้และที่ Keycloak",
           )
         ) {
-          return;
+          e.preventDefault();
         }
-        // Always RP-initiated OIDC logout (clears app session + IdP).
-        // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- hard nav to logout
-        window.location.assign(SSO_LOGOUT_PATH);
       }}
     >
-      {children}
-    </button>
+      {/* Top-level document POST — required so the browser follows 303 to end_session. */}
+      <button type="submit" className={className}>
+        {children}
+      </button>
+    </form>
   );
 }
 

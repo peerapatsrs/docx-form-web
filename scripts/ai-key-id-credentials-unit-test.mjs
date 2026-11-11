@@ -88,6 +88,11 @@ await check("shared dialog + account + pill wiring present", async () => {
   assert.match(app, /!!data\.connected/);
   assert.match(app, /aiStatus\.keySource === "shared"/);
   assert.match(app, /คีย์เซิร์ฟเวอร์/);
+  // Attach button must enable for shared/server key (not personal-only).
+  assert.match(app, /function hasSharedServerAiCredentials/);
+  assert.match(app, /function hasUsableAiCredentials/);
+  assert.match(app, /const aiReady = hasUsableAiCredentials\(\)/);
+  assert.match(app, /attachSource[\s\S]{0,200}hasUsableAiCredentials|hasUsableAiCredentials[\s\S]{0,80}attachSourceNeedKeyBanner/);
   assert.match(account, /AiKeysSection/);
   // Account settings: server vs BYOK radio cards via adapter (no system key values).
   assert.match(section, /ai-key-settings-adapter/);
@@ -100,6 +105,66 @@ await check("shared dialog + account + pill wiring present", async () => {
   assert.doesNotMatch(admin, /คีย์ Gemini ของเซิร์ฟเวอร์/);
   assert.doesNotMatch(admin, /คีย์ Gemini บนเซิร์ฟเวอร์ \(ไฟล์\)/);
   assert.doesNotMatch(admin, /คีย์ Cursor ของเซิร์ฟเวอร์/);
+});
+
+await check("shared server key auth error + health configured flag", async () => {
+  const {
+    hasServerAiKeyConfigured,
+    formatSharedServerKeyAuthError,
+    geminiStatus,
+  } = await loadFresh("../src/server/ai-config.ts");
+  const { aiProviderErrorJsonBody } = await loadFresh(
+    "../src/server/ai-request.ts",
+  );
+
+  await withEnv(
+    {
+      DOCX_FORM_BYOK_ONLY: "0",
+      DOCX_FORM_CURSOR_API_KEY: "crsr_shared_health_flag_abcdef",
+    },
+    async () => {
+      assert.equal(hasServerAiKeyConfigured(), true);
+      const status = geminiStatus({});
+      assert.equal(status.serverAiKeyConfigured, true);
+      assert.equal(status.keySource, "shared");
+    },
+  );
+
+  await withEnv({ DOCX_FORM_BYOK_ONLY: "1" }, async () => {
+    delete process.env.DOCX_FORM_CURSOR_API_KEY;
+    delete process.env.DOCX_FORM_GEMINI_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
+    delete process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+    assert.equal(hasServerAiKeyConfigured(), false);
+  });
+
+  const msg = formatSharedServerKeyAuthError("Cursor");
+  assert.match(msg, /คีย์เซิร์ฟเวอร์/);
+  assert.match(msg, /ไม่ใช่คีย์ส่วนตัว/);
+  assert.doesNotMatch(msg, /crsr_|AIza|DOCX_FORM_CURSOR/);
+
+  const body = aiProviderErrorJsonBody(new Error("Invalid User API Key"), {
+    usedSharedEnvFallback: true,
+    keySource: "shared",
+    providerLabel: "Cursor",
+  });
+  assert.equal(body.code, "AI_SERVER_KEY_INVALID");
+  assert.match(body.error, /คีย์เซิร์ฟเวอร์/);
+  assert.doesNotMatch(body.error, /crsr_|DOCX_FORM/);
+
+  const personal = aiProviderErrorJsonBody(new Error("Invalid User API Key"), {
+    usedSharedEnvFallback: false,
+  });
+  assert.equal(personal.code, "AI_AUTH");
+
+  const api = readFileSync(join(root, "src/server/api.ts"), "utf8");
+  assert.match(api, /serverAiKeyConfigured/);
+  assert.match(api, /hasServerAiKeyConfigured/);
+  assert.match(api, /AI_SERVER_KEY_INVALID|sharedServerKeyErrorOpts/);
+
+  const client = readFileSync(join(root, "public/ai-key-client.js"), "utf8");
+  assert.match(client, /AI_SERVER_KEY_INVALID/);
 });
 
 await check("resolveEffectiveModelForProvider remaps gemini id under cursor", async () => {
@@ -502,6 +567,22 @@ await check("vault delete ownership + id validation (local Postgres)", async () 
   assert.equal(isValidUserAiKeyId("k-abc-1"), true);
   assert.equal(isValidUserAiKeyId("../etc/passwd"), false);
   assert.equal(isValidUserAiKeyId(""), false);
+
+  // Reachability probe — skip quietly when CI has no Postgres (unit suite is mostly offline).
+  try {
+    const { Client } = await import("pg");
+    const client = new Client({
+      connectionString: ENV.DATABASE_URL,
+      connectionTimeoutMillis: 1500,
+    });
+    await client.connect();
+    await client.end();
+  } catch (err) {
+    console.log(
+      `⊘ skip vault ownership (Postgres unavailable: ${err?.code || err?.message || "error"})`,
+    );
+    return;
+  }
 
   const owner = "unit-owner-" + Date.now();
   const other = "unit-other-" + Date.now();

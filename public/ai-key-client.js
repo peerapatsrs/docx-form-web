@@ -64,6 +64,10 @@ const AI_CODE_MESSAGES = {
     th: "คีย์นี้ใช้ไม่ได้ — ตรวจว่าคัดลอกครบ และเป็นคีย์ของผู้ให้บริการที่เลือก จากนั้นลองอีกครั้ง",
     en: "This API key was rejected — check that it is complete and for the selected provider.",
   },
+  AI_AUTH: {
+    th: "คีย์ AI หรือสิทธิ์ไม่ถูกต้อง",
+    en: "AI API key or permission was rejected.",
+  },
   AI_KEY_MISSING_FIELDS: {
     th: "ข้อมูลคีย์ไม่ครบ — ตรวจผู้ให้บริการและคีย์แล้วลองใหม่",
     en: "Key request body is incomplete.",
@@ -289,6 +293,12 @@ export function mapFillError(data, status = 0, locale, generic) {
   if (code && FILL_CODE_MESSAGES[code]) return pickCopy(FILL_CODE_MESSAGES[code], lang);
   // Provider / AI codes can surface on generate when BYOK fails mid-fill.
   if (code && AI_CODE_MESSAGES[code]) return pickCopy(AI_CODE_MESSAGES[code], lang);
+  if (
+    /คีย์เซิร์ฟเวอร์|server shared ai key|AI_SERVER_KEY_INVALID/i.test(fallback) ||
+    (/invalid user api key/i.test(fallback) && /เซิร์ฟเวอร์|server/i.test(fallback))
+  ) {
+    return pickCopy(AI_CODE_MESSAGES.AI_SERVER_KEY_INVALID, lang) || fallback;
+  }
   if (fallback) return fallback;
   if (generic) return generic;
   return lang === "en" ? "Could not generate the document." : "สร้างเอกสารไม่สำเร็จ";

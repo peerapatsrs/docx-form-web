@@ -212,7 +212,14 @@ export function aiTimeoutJsonBody(err: AiTimeoutError | Error): {
   };
 }
 
-export function aiProviderErrorJsonBody(err: unknown): {
+export function aiProviderErrorJsonBody(
+  err: unknown,
+  opts?: {
+    usedSharedEnvFallback?: boolean;
+    keySource?: "user" | "shared" | "none" | null;
+    providerLabel?: string | null;
+  },
+): {
   error: string;
   code: string;
 } {
@@ -222,9 +229,22 @@ export function aiProviderErrorJsonBody(err: unknown): {
     );
   }
   const message = err instanceof Error ? err.message : String(err || "AI error");
-  const code =
-    /API key|สิทธิ์ไม่ถูกต้อง|หมดอายุ|Authentication|unauthorized/i.test(message)
-      ? "AI_AUTH"
-      : "AI_PROVIDER_ERROR";
+  const isAuth =
+    /API key|สิทธิ์ไม่ถูกต้อง|หมดอายุ|Authentication|unauthorized|Invalid User API Key|invalid.?api.?key/i.test(
+      message,
+    );
+  const usedShared =
+    Boolean(opts?.usedSharedEnvFallback) || opts?.keySource === "shared";
+  if (isAuth && usedShared) {
+    // Keep message here (ai-config imports this module — no circular import).
+    const label = String(opts?.providerLabel || "").trim();
+    return {
+      code: "AI_SERVER_KEY_INVALID",
+      error: label
+        ? `คีย์เซิร์ฟเวอร์ (${label}) ถูกผู้ให้บริการปฏิเสธ — ไม่ใช่คีย์ส่วนตัวของคุณ แจ้งผู้ดูแลระบบให้ตรวจคีย์เซิร์ฟเวอร์`
+        : "คีย์เซิร์ฟเวอร์ถูกผู้ให้บริการปฏิเสธ — ไม่ใช่คีย์ส่วนตัวของคุณ แจ้งผู้ดูแลระบบให้ตรวจคีย์เซิร์ฟเวอร์",
+    };
+  }
+  const code = isAuth ? "AI_AUTH" : "AI_PROVIDER_ERROR";
   return { code, error: message };
 }

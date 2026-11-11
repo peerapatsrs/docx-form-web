@@ -108,6 +108,115 @@ Admin AI default model / optional server Gemini key live in Postgres `app_settin
 
 ---
 
+## AI key choice (system vs own) — FE contract
+
+Shared gate helper: `src/server/ai-key-choice.ts` / `public/ai-key-choice.js`
+(`canUseAi`). Frontend settings UI owns presentation; Backend exposes status +
+models with `source` for the attach-page picker groups (**คีย์เซิร์ฟเวอร์** /
+**คีย์ของฉัน**).
+
+### `GET /api/ai/keys/status`
+
+Exact non-secret status (never includes system key material):
+
+```json
+{
+  "mode": "server",
+  "serverKeyAvailable": true,
+  "userKeySet": false,
+  "userKeyHint": "••••1234"
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `mode` | Saved preference: `server` (system key) or `byok` (own key) |
+| `serverKeyAvailable` | Shared server key configured and BYOK-only off |
+| `userKeySet` | User has at least one vault key |
+| `userKeyHint` | Optional masked last-4 of the **first** saved user vault key only (`••••1234`) — never the system key |
+
+`canUseAi(status)` → `mode===server` ? `serverKeyAvailable` : `userKeySet`.
+
+Signed-out → **401** + `AI_KEY_UNAUTHORIZED` (same as other `/ai/keys*` routes).
+
+### `PUT /api/ai/keys/status`
+
+Update command. Body (all optional):
+
+```json
+{
+  "mode": "byok",
+  "apiKey": "…",
+  "provider": "google",
+  "label": "…",
+  "model": "…",
+  "deleteKey": false
+}
+```
+
+- `mode` → persist preference (`AI_KEY_INVALID_MODE` / `AI_SERVER_KEY_UNAVAILABLE` on bad choice).
+- `apiKey` (+ optional provider/label/model) → create/replace own vault key (live-validated; existing `POST/PUT /api/ai/keys*` still work).
+- `deleteKey: true` → **deletes all** of the user's vault keys (not a single row).
+- **200** returns the same status shape as GET.
+
+### `GET /api/ai/keys/models`
+
+Models for the attach picker, derived from the live provider catalog (not a
+hardcoded per-model list). Server models only when `serverKeyAvailable` (for
+configured server providers). BYOK models are limited to providers the user
+**actually has a saved vault key for** — never the whole catalog.
+
+```json
+{
+  "models": [
+    { "id": "composer-2.5", "label": "Composer 2.5", "provider": "cursor", "source": "server" },
+    { "id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash", "provider": "google", "source": "byok" }
+  ],
+  "mode": "server",
+  "serverKeyAvailable": true,
+  "userKeySet": true,
+  "userKeyHint": "••••1234"
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `models[].id` | Model id |
+| `models[].label` | Display label |
+| `models[].provider` | Provider id from catalog |
+| `models[].source` | `server` \| `byok` — FE groups the picker |
+
+Also echoes the status fields above.
+
+### Fill / suggest — optional `source`
+
+`POST /api/template/suggest-tags`, `POST /api/source-map`, and
+`POST /api/batch-from-source` accept optional form/query field:
+
+| Field | Meaning |
+|-------|---------|
+| `source` | `server` \| `byok` — overrides saved `mode` for this call |
+| `aiModel` / `geminiModel` | Chosen model (must belong to that source) |
+| `aiProvider` | Optional provider hint |
+
+When `source` is omitted, the saved `mode` from status is used. Server validates
+the model belongs to that source and that a matching vault key exists for the
+model's provider; otherwise **4xx** with `AI_SERVER_KEY_UNAVAILABLE`,
+`AI_KEY_REQUIRED` (signed-in, missing key — never 401), or
+`AI_MODEL_SOURCE_MISMATCH` (e.g. `source=byok` + OpenAI model when the user only
+has a Google key). **401** is only for not signed in (`AI_KEY_UNAUTHORIZED`).
+BYOK calls never silently fall back to a shared server key or non-AI heuristics
+on provider rejection — the error is returned to the client.
+The credential gate uses the same `canUseAi` rule.
+
+### `GET /api/ai/jobs/:id`
+
+Async AI jobs (`suggest-tags?async=1`, etc.). On `status: "error"`, the payload
+includes both `error` (message) and `code` (e.g. `AI_SERVER_KEY_INVALID`,
+`AI_KEY_REQUIRED`, `AI_PROVIDER_ERROR`).
+
+---
+
 ## AI keys (canonical: plural)
 
 ### `GET /api/ai/keys`
@@ -267,6 +376,10 @@ Shared mapper: `classifyProviderError` in `src/server/ai-http-errors.ts` (one pl
 | Code | HTTP | Meaning |
 |------|------|---------|
 | `AI_KEY_UNAUTHORIZED` | 401 | Not logged in |
+| `AI_KEY_REQUIRED` | 400 | Signed-in user missing a usable key for the chosen source/provider |
+| `AI_MODEL_SOURCE_MISMATCH` | 400 | Model not available for that source / vault provider |
+| `AI_SERVER_KEY_UNAVAILABLE` | 400 | Server key path selected but no shared key configured |
+| `AI_SERVER_KEY_INVALID` | 400 | Shared server key rejected by provider |
 | `AI_KEY_NOT_FOUND` | 404 | Missing or not owned |
 | `AI_KEY_INVALID_ID` | 400 | Bad id format |
 | `AI_KEY_INVALID_PROVIDER` | 400 | Unknown provider |

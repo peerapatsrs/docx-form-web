@@ -112,6 +112,23 @@ await check("vault CRUD + ownership + audit + mask (Postgres)", async () => {
     toPublicAiKey,
   } = await loadFresh("src/server/ai-key-vault.ts");
 
+  try {
+    const { Client } = await import("pg");
+    const client = new Client({
+      connectionString:
+        process.env.DATABASE_URL ||
+        "postgres://docx:docx@127.0.0.1:5432/docx_form",
+      connectionTimeoutMillis: 1500,
+    });
+    await client.connect();
+    await client.end();
+  } catch (err) {
+    console.log(
+      `⊘ skip vault CRUD (Postgres unavailable: ${err?.code || err?.message || "error"})`,
+    );
+    return;
+  }
+
   const owner = `keys-owner-${Date.now()}`;
   const other = `keys-other-${Date.now()}`;
   const created = await createUserAiKey(owner, {

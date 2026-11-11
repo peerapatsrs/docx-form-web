@@ -123,8 +123,8 @@ function assertNotAborted(signal: AbortSignal | null | undefined) {
 
 /**
  * Shared AI credential gate for routes that accept X-Ai-Key-Id and/or
- * per-request keys. Resolves vault → coalesce missing id to shared env →
- * effective provider/model. Generic — no per-route special cases.
+ * per-request keys. Honours per-user mode (server|byok) and optional
+ * request `source` override from the attach-page model picker.
  */
 async function resolveRouteAiCredentials(
   req: Request,
@@ -132,6 +132,8 @@ async function resolveRouteAiCredentials(
     formKey?: string;
     formModel?: string;
     formProvider?: string;
+    /** Optional override from attach picker — falls back to saved mode. */
+    source?: string | null;
   },
 ): Promise<
   | {
@@ -140,8 +142,9 @@ async function resolveRouteAiCredentials(
       provider: string;
       apiKey: string;
       model: string;
+      choiceSource: "server" | "byok";
     }
-  | { ok: false; status: 401 | 400; error: string }
+  | { ok: false; status: 401 | 400; error: string; code?: string }
 > {
   const sessionGate = await (async () => {
     try {
@@ -154,6 +157,107 @@ async function resolveRouteAiCredentials(
     }
   })();
   const sessionUserId = sessionGate.ok ? sessionGate.userId : null;
+
+  const {
+    buildAiKeyChoiceStatus,
+    normalizeAiKeyMode,
+    resolveFillCredentialPolicy,
+    validateModelForSource,
+    resolveServerFillApiKey,
+    canUseAi,
+    isServerKeyAvailable,
+  } = await import("./ai-key-choice");
+
+  const sourceOverride = normalizeAiKeyMode(extras?.source);
+  let choiceStatus = sessionUserId
+    ? await buildAiKeyChoiceStatus(sessionUserId)
+    : {
+        mode: "byok" as const,
+        serverKeyAvailable: false,
+        userKeySet: false,
+      };
+
+  // Guests: header/form key → byok; otherwise shared server key when available.
+  if (!sessionUserId) {
+    const headerCreds = await resolveRequestAiCredentials(req, null);
+    const formKey = String(extras?.formKey || "").trim();
+    const hasKey = Boolean(headerCreds.apiKey || formKey);
+    const serverKeyAvailable = isServerKeyAvailable();
+    choiceStatus = {
+      mode: hasKey
+        ? "byok"
+        : serverKeyAvailable
+          ? "server"
+          : "byok",
+      serverKeyAvailable,
+      userKeySet: hasKey,
+    };
+  }
+
+  const policy = resolveFillCredentialPolicy(choiceStatus, sourceOverride);
+  if (policy === "none") {
+    return {
+      ok: false,
+      status: 401,
+      code: "AI_KEY_REQUIRED",
+      error: canUseAi({
+        ...choiceStatus,
+        mode: sourceOverride || choiceStatus.mode,
+      })
+        ? missingAiCredentialsError()
+        : sourceOverride === "server" ||
+            (!sourceOverride && choiceStatus.mode === "server")
+          ? "ยังไม่มีคีย์เซิร์ฟเวอร์ — เลือกคีย์ของฉันหรือให้ผู้ดูแลตั้งคีย์เซิร์ฟเวอร์"
+          : "ต้องตั้งค่าคีย์ AI ก่อน (คีย์ของฉันหรือคีย์เซิร์ฟเวอร์)",
+    };
+  }
+
+  const modelCheck = validateModelForSource({
+    status: choiceStatus,
+    source: policy,
+    model: extras?.formModel,
+    provider: extras?.formProvider,
+  });
+  if (!modelCheck.ok) {
+    return {
+      ok: false,
+      status: modelCheck.status,
+      error: modelCheck.error,
+      code: modelCheck.code,
+    };
+  }
+
+  if (policy === "server") {
+    const serverKey = resolveServerFillApiKey(modelCheck.provider);
+    if (!serverKey) {
+      return {
+        ok: false,
+        status: 400,
+        code: "AI_SERVER_KEY_UNAVAILABLE",
+        error: "คีย์เซิร์ฟเวอร์ไม่พร้อมใช้งาน",
+      };
+    }
+    const model = resolveEffectiveModelForProvider(
+      modelCheck.provider,
+      modelCheck.model,
+    );
+    return {
+      ok: true,
+      choiceSource: "server",
+      provider: modelCheck.provider,
+      apiKey: serverKey,
+      model,
+      creds: {
+        provider: modelCheck.provider,
+        apiKey: serverKey,
+        model,
+        fromUserVault: false,
+        usedSharedEnvFallback: true,
+      },
+    };
+  }
+
+  // BYOK / own key path — no shared-env fallback.
   let creds = await resolveRequestAiCredentials(req, sessionUserId);
   const formKey = String(extras?.formKey || "").trim();
   if (!creds.apiKey && formKey) {
@@ -163,34 +267,42 @@ async function resolveRouteAiCredentials(
       fromUserVault: false,
     };
   }
-  creds = coalesceAiCredentialsWithSharedEnv(creds);
-  const aiAdmin = await getAiAdminSettings().catch(() => ({
-    defaultModel: "gemini-3.8-flash",
-  }));
-  const adminDefaultProvider = adminDefaultProviderFromSettings(aiAdmin);
-  const formProvider = String(extras?.formProvider || "").trim();
-  const requestedProvider =
-    getAiProvider(formProvider)?.id || creds.provider;
-  const provider = resolveEffectiveAiProvider({
-    requestProvider: requestedProvider,
-    explicitProvider:
-      requestHasExplicitAiProvider(req) || Boolean(formProvider),
-    requestKey: creds.apiKey,
-    adminDefaultProvider,
-  });
-  const apiKey = resolveProviderApiKey(provider, creds.apiKey);
+  if (!creds.apiKey && sessionUserId) {
+    try {
+      const { listUserAiKeys } = await import("./ai-key-vault");
+      const rows = await listUserAiKeys(sessionUserId);
+      const primary = rows[0];
+      if (primary?.apiKey) {
+        creds = {
+          provider: primary.provider || modelCheck.provider,
+          apiKey: primary.apiKey,
+          model: primary.model || modelCheck.model,
+          keyId: primary.id,
+          fromUserVault: true,
+        };
+      }
+    } catch {
+      /* keep empty */
+    }
+  }
+
+  const provider =
+    getAiProvider(extras?.formProvider)?.id ||
+    getAiProvider(creds.provider)?.id ||
+    modelCheck.provider;
+  const apiKey = String(creds.apiKey || "").trim();
   const model = resolveEffectiveModelForProvider(
     provider,
-    extras?.formModel || creds.model,
+    extras?.formModel || creds.model || modelCheck.model,
   );
   if (!hasRequestAiKey(provider, apiKey) || !apiKey) {
     return {
       ok: false,
       status: 401,
+      code: "AI_USER_KEY_MISSING",
       error: missingAiCredentialsError(creds),
     };
   }
-  // Record last-used only on real AI routes (not /ai/status).
   if (creds.fromUserVault && creds.keyId && sessionUserId) {
     void import("./ai-key-vault")
       .then(({ touchUserAiKeyUsed }) =>
@@ -200,15 +312,16 @@ async function resolveRouteAiCredentials(
   }
   return {
     ok: true,
+    choiceSource: "byok",
+    provider,
+    apiKey,
+    model,
     creds: {
       ...creds,
       provider,
       apiKey,
       model,
     },
-    provider,
-    apiKey,
-    model,
   };
 }
 
@@ -997,6 +1110,170 @@ export function createApi(options: {
   }
 
   /**
+   * Key-choice status for settings + attach gate.
+   * Shape: { mode, serverKeyAvailable, userKeySet, userKeyHint? }
+   * Never includes system/server key material.
+   */
+  api.get("/ai/keys/status", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: gate.code || "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    try {
+      const { buildAiKeyChoiceStatus } = await import("./ai-key-choice");
+      const status = await buildAiKeyChoiceStatus(gate.userId);
+      return c.json(status);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message, code: "AI_KEY_SERVER_ERROR" }, 500);
+    }
+  });
+
+  /**
+   * Update saved mode (server|byok). Optional apiKey/provider/label/model
+   * upserts the user's own vault key via existing vault helpers.
+   * Body: { mode?, apiKey?, provider?, label?, model?, deleteKey?: true }
+   */
+  api.put("/ai/keys/status", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    try {
+      const body = (await c.req.json().catch(() => ({}))) as {
+        mode?: string;
+        apiKey?: string;
+        provider?: string;
+        label?: string;
+        model?: string;
+        deleteKey?: boolean;
+      };
+      const {
+        normalizeAiKeyMode,
+        setUserAiKeyMode,
+        buildAiKeyChoiceStatus,
+      } = await import("./ai-key-choice");
+
+      if (body.deleteKey === true) {
+        const { listUserAiKeys, deleteUserAiKey } = await import(
+          "./ai-key-vault"
+        );
+        const rows = await listUserAiKeys(gate.userId);
+        for (const row of rows) {
+          await deleteUserAiKey(gate.userId, row.id);
+        }
+      }
+
+      const apiKey = String(body.apiKey || "").trim();
+      if (apiKey) {
+        const provider = String(body.provider || "google").trim() || "google";
+        const { validateAiKeyForSave } = await import("./ai-key-test");
+        const probe = await validateAiKeyForSave({
+          provider,
+          apiKey,
+          signal: c.req.raw.signal,
+        });
+        if (!probe.ok) {
+          return c.json(
+            {
+              error: probe.message,
+              code: probe.code || "AI_KEY_INVALID",
+              ok: false as const,
+              provider: probe.provider,
+              durationMs: probe.durationMs,
+            },
+            400,
+          );
+        }
+        const { createUserAiKey, upsertUserAiKey, listUserAiKeys } =
+          await import("./ai-key-vault");
+        const existing = await listUserAiKeys(gate.userId);
+        const label = String(body.label || existing[0]?.label || "").trim();
+        const model = String(body.model || existing[0]?.model || "").trim();
+        if (existing[0]?.id) {
+          await upsertUserAiKey(gate.userId, {
+            id: existing[0].id,
+            provider,
+            label,
+            model,
+            apiKey,
+          });
+        } else {
+          await createUserAiKey(gate.userId, {
+            provider,
+            label,
+            model,
+            apiKey,
+          });
+        }
+      }
+
+      const mode = normalizeAiKeyMode(body.mode);
+      if (body.mode != null && body.mode !== "" && !mode) {
+        return c.json(
+          {
+            error: "mode ต้องเป็น server หรือ byok",
+            code: "AI_KEY_INVALID_MODE",
+          },
+          400,
+        );
+      }
+      if (mode) {
+        try {
+          await setUserAiKeyMode(gate.userId, mode);
+        } catch (err) {
+          const e = err as Error & { code?: string };
+          return c.json(
+            {
+              error: e.message || String(err),
+              code: e.code || "AI_KEY_INVALID_MODE",
+            },
+            400,
+          );
+        }
+      }
+
+      const status = await buildAiKeyChoiceStatus(gate.userId);
+      return c.json(status);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message, code: "AI_KEY_SERVER_ERROR" }, 500);
+    }
+  });
+
+  /**
+   * Models for the attach-page picker, tagged with source server|byok.
+   * Server models only when serverKeyAvailable; BYOK only when userKeySet.
+   * Derived from the live provider catalog — not a hardcoded list.
+   */
+  api.get("/ai/keys/models", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    try {
+      const { buildAiKeyChoiceStatus, listAiModelsForChoice } = await import(
+        "./ai-key-choice"
+      );
+      const status = await buildAiKeyChoiceStatus(gate.userId);
+      const models = listAiModelsForChoice(status);
+      return c.json({ models, ...status });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message, code: "AI_KEY_SERVER_ERROR" }, 500);
+    }
+  });
+
+  /**
    * Logged-in user: list AI keys stored on server (masked meta only).
    * Never returns plaintext secrets — use X-Ai-Key-Id on AI calls to proxy.
    */
@@ -1767,23 +2044,59 @@ export function createApi(options: {
     const denied = await requirePremium(c, PremiumFeature.AiSourceMap);
     if (denied) return denied;
 
-    const routed = await resolveRouteAiCredentials(c.req.raw);
-    if (!routed.ok) {
-      return c.json({ error: routed.error }, routed.status);
-    }
-    const {
-      creds: aiCreds,
-      provider: clientProvider,
-      apiKey: clientKey,
-      model: clientModel,
-    } = routed;
-
     const wantStream =
       c.req.query("stream") === "1" ||
       (c.req.header("accept") || "").includes("application/x-ndjson");
 
+    // Populated after credential resolve; declared outside try for catch/stream.
+    let aiCreds = {
+      provider: "",
+      apiKey: "",
+      model: "",
+    } as ResolvedRequestAiCredentials;
+    let clientProvider = "";
+    let clientKey = "";
+    let clientModel = "";
+
     try {
       const form = await c.req.formData();
+      const formKey =
+        typeof form.get("geminiApiKey") === "string"
+          ? String(form.get("geminiApiKey") || "").trim()
+          : typeof form.get("aiApiKey") === "string"
+            ? String(form.get("aiApiKey") || "").trim()
+            : "";
+      const formModel =
+        typeof form.get("geminiModel") === "string"
+          ? String(form.get("geminiModel") || "").trim()
+          : typeof form.get("aiModel") === "string"
+            ? String(form.get("aiModel") || "").trim()
+            : "";
+      const formProvider =
+        typeof form.get("aiProvider") === "string"
+          ? String(form.get("aiProvider") || "").trim()
+          : "";
+      const formSource =
+        typeof form.get("source") === "string"
+          ? String(form.get("source") || "").trim()
+          : String(c.req.query("source") || "").trim();
+      const routed = await resolveRouteAiCredentials(c.req.raw, {
+        formKey,
+        formModel,
+        formProvider,
+        source: formSource || null,
+      });
+      if (!routed.ok) {
+        return c.json(
+          { error: routed.error, ...(routed.code ? { code: routed.code } : {}) },
+          routed.status,
+        );
+      }
+      aiCreds = routed.creds;
+      clientProvider = routed.provider;
+      clientKey = routed.apiKey;
+      clientModel = routed.model;
+
       const fieldsRaw = form.get("fields");
       if (typeof fieldsRaw !== "string") {
         return c.json({ error: "ต้องส่ง fields เป็น JSON ของฟิลด์เทมเพลต" }, 400);
@@ -2206,6 +2519,10 @@ export function createApi(options: {
         typeof form.get("aiProvider") === "string"
           ? String(form.get("aiProvider") || "").trim()
           : "";
+      const formSource =
+        typeof form.get("source") === "string"
+          ? String(form.get("source") || "").trim()
+          : String(c.req.query("source") || "").trim();
       const formNameLanguage =
         typeof form.get("nameLanguage") === "string"
           ? String(form.get("nameLanguage") || "").trim()
@@ -2218,10 +2535,14 @@ export function createApi(options: {
         formKey,
         formModel,
         formProvider,
+        source: formSource || null,
       });
       if (!routed.ok) {
         return c.json(
-          { error: routed.error },
+          {
+            error: routed.error,
+            ...(routed.code ? { code: routed.code } : {}),
+          },
           routed.status === 401 ? 400 : routed.status,
         );
       }
@@ -2429,13 +2750,21 @@ export function createApi(options: {
         typeof form.get("aiProvider") === "string"
           ? String(form.get("aiProvider") || "").trim()
           : "";
+      const formSource =
+        typeof form.get("source") === "string"
+          ? String(form.get("source") || "").trim()
+          : String(c.req.query("source") || "").trim();
       const routed = await resolveRouteAiCredentials(c.req.raw, {
         formKey,
         formModel,
         formProvider,
+        source: formSource || null,
       });
       if (!routed.ok) {
-        return c.json({ error: routed.error }, routed.status);
+        return c.json(
+          { error: routed.error, ...(routed.code ? { code: routed.code } : {}) },
+          routed.status,
+        );
       }
       const {
         creds: headerCreds,

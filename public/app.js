@@ -20,6 +20,7 @@ import {
   mapFillError,
   maskAiKeyLocal,
 } from "./ai-key-client.js";
+import { canUseAi } from "./ai-key-choice.js";
 import {
   collectSelfTagsFromLayout,
   collectSelfTagsFromText,
@@ -249,6 +250,12 @@ let aiStatus = {
   serverKeySources: [],
   serverAiKeyConfigured: false,
 };
+
+/**
+ * Exact FE contract from GET /api/ai/keys/status.
+ * @type {{ mode: 'server'|'byok', serverKeyAvailable: boolean, userKeySet: boolean, userKeyHint?: string } | null}
+ */
+let aiKeyChoiceStatus = null;
 
 /**
  * Entitlement for multi-template caps (from /api/health).
@@ -2306,6 +2313,7 @@ function hasClientAiCredentials() {
  * Driven by server config state — not a hardcoded entitlement flag.
  */
 function hasSharedServerAiCredentials() {
+  if (aiKeyChoiceStatus?.serverKeyAvailable) return true;
   if (aiStatus.keySource === "shared" && aiStatus.connected) return true;
   if (
     Array.isArray(aiStatus.serverKeySources) &&
@@ -2322,8 +2330,20 @@ function hasSharedServerAiCredentials() {
   return false;
 }
 
-/** Personal vault/local key OR shared server key — enables attach / AI actions. */
+/**
+ * Attach / AI-fill gate — same rule as server `canUseAi`.
+ * When status is loaded, mode decides server vs own key.
+ * Local/unsynced plaintext still counts as own key for byok mode.
+ * Guests / before status fetch: personal key or shared-server fallback.
+ */
 function hasUsableAiCredentials() {
+  if (aiKeyChoiceStatus) {
+    if (canUseAi(aiKeyChoiceStatus)) return true;
+    if (aiKeyChoiceStatus.mode === "byok" && hasClientAiCredentials()) {
+      return true;
+    }
+    return false;
+  }
   return hasClientAiCredentials() || hasSharedServerAiCredentials();
 }
 
@@ -2680,6 +2700,40 @@ async function ensureAiProviders() {
   return aiProvidersCatalog;
 }
 
+async function refreshAiKeyChoiceStatus() {
+  if (!aiUserLoggedIn) {
+    aiKeyChoiceStatus = null;
+    return null;
+  }
+  try {
+    const res = await fetch("/api/ai/keys/status", {
+      credentials: "include",
+      headers: aiAuthHeaders(),
+    });
+    if (!res.ok) {
+      if (res.status === 401) aiKeyChoiceStatus = null;
+      return aiKeyChoiceStatus;
+    }
+    const data = await res.json().catch(() => null);
+    if (
+      data &&
+      (data.mode === "server" || data.mode === "byok") &&
+      typeof data.serverKeyAvailable === "boolean" &&
+      typeof data.userKeySet === "boolean"
+    ) {
+      aiKeyChoiceStatus = {
+        mode: data.mode,
+        serverKeyAvailable: data.serverKeyAvailable,
+        userKeySet: data.userKeySet,
+        ...(data.userKeyHint ? { userKeyHint: String(data.userKeyHint) } : {}),
+      };
+    }
+  } catch {
+    /* keep previous */
+  }
+  return aiKeyChoiceStatus;
+}
+
 async function refreshAiStatus() {
   try {
     await ensureAiProviders();
@@ -2687,6 +2741,7 @@ async function refreshAiStatus() {
     if (!res.ok) return;
     const data = await res.json().catch(() => ({}));
     applyAiStatus(data);
+    await refreshAiKeyChoiceStatus();
   } catch {
     /* ignore */
   }
@@ -3357,8 +3412,15 @@ function syncAiStatusPill() {
   }
   const hasFile = !!(state.file || taggerSession);
   const hasPersonalKey = hasClientAiCredentials();
-  const sharedReady = !hasPersonalKey && hasSharedServerAiCredentials();
-  if (!hasPersonalKey && !sharedReady) {
+  const choiceReady = hasUsableAiCredentials();
+  const sharedReady =
+    choiceReady &&
+    ((aiKeyChoiceStatus?.mode === "server" &&
+      aiKeyChoiceStatus.serverKeyAvailable) ||
+      (!hasPersonalKey &&
+        !aiKeyChoiceStatus &&
+        hasSharedServerAiCredentials()));
+  if (!choiceReady) {
     statusText.textContent = UI_LABELS.aiStatusNoKey;
     statusDot.classList.remove("ok");
     statusDot.classList.add("bad");

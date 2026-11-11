@@ -26,10 +26,44 @@ Does **not** include `uploadLimitText`.
 `premium.uploadLimitText` (plan-aware Thai quota copy) and `premium.upgradeUrl`
 (same resolver: admin `limits.upgradeUrl` → env `DOCX_FORM_UPGRADE_URL` → `""`).
 
+## Key choice (system vs own) — exact status
+
+Helpers: `public/ai-key-choice.js` ↔ `src/server/ai-key-choice.ts` (`canUseAi`).
+
+### `GET /api/ai/keys/status`
+
+```json
+{ "mode": "server"|"byok", "serverKeyAvailable": true, "userKeySet": false, "userKeyHint": "••••1234" }
+```
+
+`userKeyHint` = masked last-4 of **user** key only — never the system key.
+Attach gate: `canUseAi(status)`.
+
+### `PUT /api/ai/keys/status`
+
+Update `mode` and/or save/delete own key (`apiKey`, `deleteKey`). Returns status.
+
+### `GET /api/ai/keys/models`
+
+```json
+{ "models": [{ "id", "label", "provider", "source": "server"|"byok" }], "mode", "serverKeyAvailable", "userKeySet", "userKeyHint?" }
+```
+
+FE groups the attach-page picker by `source`. Server lists server models only when
+`serverKeyAvailable`, BYOK models only when `userKeySet`.
+
+### Fill optional `source`
+
+Suggest-tags / source-map / batch-from-source accept form/query `source=server|byok`
+with the chosen model. Omit → saved `mode`. Mismatch / missing key → 4xx.
+
 ## Endpoints (FE uses)
 
 | Method | Path | FE usage |
 |--------|------|----------|
+| GET | `/api/ai/keys/status` | Mode + availability for settings / attach gate |
+| PUT | `/api/ai/keys/status` | Set mode; optional save/delete own key |
+| GET | `/api/ai/keys/models` | Model picker rows with `source` |
 | GET | `/api/ai/keys` | List masked entries |
 | PUT | `/api/ai/keys` | Create / upsert (`{ entry }` or `{ entries }`) — live-validated |
 | PUT | `/api/ai/keys/:id` | Replace / rotate value — live-validated |
@@ -115,6 +149,7 @@ Do **not** send `X-Ai-Api-Key` / `X-Gemini-Api-Key` in that case.
 ## Client modules
 
 - `public/ai-key-client.js` — typed client + mappers (`AI_KEY_TEST_ENABLED = true`)
+- `public/ai-key-choice.js` — `canUseAi` / `normalizeAiKeyMode` (mirrors server)
 - `public/ai-key-dialog.js` — empty / saved / test / replace / delete UI
   (shim: `public/ai-keys-dialog.js`)
 

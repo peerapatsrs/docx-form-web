@@ -108,6 +108,101 @@ Admin AI default model / optional server Gemini key live in Postgres `app_settin
 
 ---
 
+## AI key choice (system vs own) — FE contract
+
+Shared gate helper: `src/server/ai-key-choice.ts` / `public/ai-key-choice.js`
+(`canUseAi`). Frontend settings UI owns presentation; Backend exposes status +
+models with `source` for the attach-page picker groups (**คีย์เซิร์ฟเวอร์** /
+**คีย์ของฉัน**).
+
+### `GET /api/ai/keys/status`
+
+Exact non-secret status (never includes system key material):
+
+```json
+{
+  "mode": "server",
+  "serverKeyAvailable": true,
+  "userKeySet": false,
+  "userKeyHint": "••••1234"
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `mode` | Saved preference: `server` (system key) or `byok` (own key) |
+| `serverKeyAvailable` | Shared server key configured and BYOK-only off |
+| `userKeySet` | User has at least one vault key |
+| `userKeyHint` | Optional masked last-4 of **user** key only (`••••1234`) |
+
+`canUseAi(status)` → `mode===server` ? `serverKeyAvailable` : `userKeySet`.
+
+### `PUT /api/ai/keys/status`
+
+Update command. Body (all optional):
+
+```json
+{
+  "mode": "byok",
+  "apiKey": "…",
+  "provider": "google",
+  "label": "…",
+  "model": "…",
+  "deleteKey": false
+}
+```
+
+- `mode` → persist preference (`AI_KEY_INVALID_MODE` / `AI_SERVER_KEY_UNAVAILABLE` on bad choice).
+- `apiKey` (+ optional provider/label/model) → create/replace own vault key (live-validated; existing `POST/PUT /api/ai/keys*` still work).
+- `deleteKey: true` → delete all own vault keys.
+- **200** returns the same status shape as GET.
+
+### `GET /api/ai/keys/models`
+
+Models for the attach picker, derived from the live provider catalog (not a
+hardcoded per-model list). Server models only when `serverKeyAvailable`; BYOK
+models only when `userKeySet`.
+
+```json
+{
+  "models": [
+    { "id": "composer-2.5", "label": "Composer 2.5", "provider": "cursor", "source": "server" },
+    { "id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash", "provider": "google", "source": "byok" }
+  ],
+  "mode": "server",
+  "serverKeyAvailable": true,
+  "userKeySet": true,
+  "userKeyHint": "••••1234"
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `models[].id` | Model id |
+| `models[].label` | Display label |
+| `models[].provider` | Provider id from catalog |
+| `models[].source` | `server` \| `byok` — FE groups the picker |
+
+Also echoes the status fields above.
+
+### Fill / suggest — optional `source`
+
+`POST /api/template/suggest-tags`, `POST /api/source-map`, and
+`POST /api/batch-from-source` accept optional form/query field:
+
+| Field | Meaning |
+|-------|---------|
+| `source` | `server` \| `byok` — overrides saved `mode` for this call |
+| `aiModel` / `geminiModel` | Chosen model (must belong to that source) |
+| `aiProvider` | Optional provider hint |
+
+When `source` is omitted, the saved `mode` from status is used. Server validates
+the model belongs to that source and that the key exists; otherwise **4xx** with
+`AI_SERVER_KEY_UNAVAILABLE`, `AI_USER_KEY_MISSING`, or `AI_MODEL_SOURCE_MISMATCH`.
+The credential gate uses the same `canUseAi` rule.
+
+---
+
 ## AI keys (canonical: plural)
 
 ### `GET /api/ai/keys`

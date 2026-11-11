@@ -68,6 +68,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify vendored mw-shared pin (before any auth install)
+        run: node scripts/mw-shared-verify.mjs
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:

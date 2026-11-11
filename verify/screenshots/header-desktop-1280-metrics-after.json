@@ -1,0 +1,52 @@
+{
+  "scrollWidth": 1280,
+  "clientWidth": 1280,
+  "overflow": false,
+  "topbar": {
+    "x": 0,
+    "y": 0,
+    "width": 1280,
+    "height": 64,
+    "text": "docx-formv0.1.0PPeerapat Surasingจ่ายแล้วAdminออกจากระบบPเมนูบัญชีAI ยังไม่พร้อม · ยังไม่มีคีย์"
+  },
+  "brand": {
+    "x": 32,
+    "y": 14.828125,
+    "width": 127.65625,
+    "height": 33.34375,
+    "text": "docx-formv0.1.0"
+  },
+  "brandText": {
+    "x": 71.1875,
+    "y": 14.828125,
+    "width": 88.46875,
+    "height": 19.3125,
+    "text": "docx-form"
+  },
+  "brandVer": {
+    "x": 71.1875,
+    "y": 34.9375,
+    "width": 88.46875,
+    "height": 13.234375,
+    "text": "v0.1.0"
+  },
+  "avatar": {
+    "x": 0,
+    "y": 0,
+    "width": 0,
+    "height": 0,
+    "text": "Pเมนูบัญชี"
+  },
+  "name": {
+    "x": 706.53125,
+    "y": 23.046875,
+    "width": 120,
+    "height": 16.890625,
+    "text": "Peerapat Surasing"
+  },
+  "nameDecoration": "none",
+  "nameColor": "rgb(20, 36, 40)",
+  "userDecoration": "none",
+  "menuOpen": false,
+  "avatarExpanded": "false"
+}

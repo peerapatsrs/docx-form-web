@@ -10,13 +10,15 @@
     "start": "next start",
     "lint": "eslint",
     "test:smoke": "node scripts/smoke-test.mjs",
-    "auth:migrate": "tsx --env-file=.env.local scripts/auth-migrate.ts",
-    "auth:seed-qa": "tsx --env-file=.env.local scripts/auth-seed-qa.ts",
+    "auth:migrate": "node --import tsx --env-file=.env.local scripts/auth-migrate.ts",
     "scan:embedded-data": "node scripts/ci/scan-embedded-data.mjs",
-    "test:unit": "tsx scripts/public-origin-unit-test.mjs && tsx scripts/qa-unit-test.mjs && tsx scripts/ui-labels-unit-test.mjs && tsx scripts/dev-auth-auto-login-unit-test.mjs && tsx scripts/dev-auth-unit-test.mjs && tsx scripts/cache-and-auth-url-unit-test.mjs && tsx scripts/auth-seed-qa-unit-test.mjs",
+    "test:unit": "node --import tsx scripts/public-js-syntax-unit-test.mjs && node --import tsx scripts/public-origin-unit-test.mjs && node --import tsx scripts/qa-unit-test.mjs && node --import tsx scripts/ui-labels-unit-test.mjs && node --import tsx scripts/ai-key-client-unit-test.mjs && node --import tsx scripts/cache-and-auth-url-unit-test.mjs && node --import tsx scripts/ai-config-unit-test.mjs && node --import tsx scripts/ai-jobs-unit-test.mjs && node --import tsx scripts/app-js-no-dup-helpers-unit-test.mjs && node --import tsx scripts/ai-key-id-credentials-unit-test.mjs && node --import tsx scripts/ai-key-choice-unit-test.mjs && node --import tsx scripts/ai-timeout-unit-test.mjs && node --import tsx scripts/ai-keys-api-unit-test.mjs && node --import tsx scripts/findings-ai-backend-unit-test.mjs && node --import tsx scripts/fill-skip-unit-test.mjs && node --import tsx scripts/table-cell-fields-unit-test.mjs && node --import tsx scripts/doc-table-fields-unit-test.mjs && node --import tsx scripts/doc-table-fields-fixture-test.mjs && node --import tsx scripts/app-build-info-unit-test.mjs && node --import tsx scripts/admin-ai-server-keys-unit-test.mjs && node --import tsx scripts/oidc-sso-unit-test.mjs && node --import tsx scripts/oidc-only-login-unit-test.mjs && node --import tsx scripts/oidc-passkey-aia-unit-test.mjs && node --import tsx scripts/oidc-link-loop-unit-test.mjs && node --import tsx scripts/oidc-silent-sso-unit-test.mjs && node --import tsx scripts/oidc-backchannel-unit-test.mjs",
     "test:docker": "docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from test",
     "docker:up": "docker compose up --build -d",
-    "docker:down": "docker compose down"
+    "docker:down": "docker compose down",
+    "mw-shared:verify": "node scripts/mw-shared-verify.mjs",
+    "mw-shared:build": "node -e \"require(\\\"fs\\\").accessSync(\\\"vendor/mw-shared/auth/dist/index.js\\\")\" 2>/dev/null || (npm --prefix vendor/mw-shared/auth ci && npm --prefix vendor/mw-shared/auth run build)",
+    "postinstall": "npm run mw-shared:build"
   },
   "author": {
     "name": "Peerapat Surasing",
@@ -28,11 +30,12 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@better-auth/passkey": "^1.7.14",
     "@cursor/sdk": "^1.2.0",
+    "@mw-shared/auth": "file:vendor/mw-shared/auth",
     "better-auth": "^1.7.14",
     "easy-template-x": "^8.0.0",
     "hono": "^4.13.14",
+    "jose": "^6.2.17",
     "jszip": "^3.10.2",
     "next": "16.4.3",
     "pdfjs-dist": "^6.4.299",
@@ -51,6 +54,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.4.3",
+    "playwright": "^1.56.1",
     "tailwindcss": "^4",
     "tsx": "^4.23.15",
     "typescript": "^5"

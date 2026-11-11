@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { SiteJsonLd } from "@/components/SiteJsonLd";
+import { publicAssetUrl } from "@/lib/public-asset-version";
 import {
   SITE_DESCRIPTION,
   SITE_KEYWORDS,
@@ -94,7 +95,7 @@ export default function RootLayout({
           rel="stylesheet"
         />
         {/* eslint-disable-next-line @next/next/no-css-tags */}
-        <link rel="stylesheet" href="/style.css?v=web29" />
+        <link rel="stylesheet" href={publicAssetUrl("style.css")} />
       </head>
       <body>
         <SiteJsonLd />

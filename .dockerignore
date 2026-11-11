@@ -8,3 +8,7 @@ AGENTS.md
 Dockerfile*
 docker-compose*
 .env*
+# Keep Docker verify step on a clean pin tree (build artifacts are local-only).
+vendor/mw-shared/auth/dist
+vendor/mw-shared/auth/node_modules
+vendor/mw-shared/auth/coverage

@@ -1,318 +1,110 @@
-"use client";
-
-import { useEffect, useMemo, useState, type ComponentType } from "react";
-import { authClient } from "@/lib/auth-client";
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+import { getOidcConfig, logOidcNotConfigured } from "@/server/oidc-config";
+import { safeOidcReturnTo } from "@/server/oidc-identities";
 import {
-  ExternalAccountMark,
-  GoogleMark,
-  PasskeyMark,
-} from "@/components/AuthIcons";
-import { BrandLogo, BRAND_NAME } from "@/components/BrandLogo";
-import { resolveDevAutoLoginUser } from "@/lib/dev-auth-auto-login";
-type ProviderInfo = { id: string; label: string };
+  OIDC_FAIL_COOKIE,
+  oidcLoginErrorCopy,
+  shouldBlockOidcAutoRedirect,
+} from "@/server/oidc-login-guard";
+import { BrandLockup } from "@/components/BrandLogo";
+import { redirectIfAuthenticated } from "@/lib/server-auth";
 
-type DevUser = {
-  id: string;
-  name?: string | null;
-  email: string;
-  role?: string;
-  plan?: string;
-  banned?: boolean;
+export const dynamic = "force-dynamic";
+
+type LoginPageProps = {
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 };
 
-const INCLUDE_DEV_AUTH_CLIENT =
-  process.env.NODE_ENV !== "production" ||
-  process.env.NEXT_PUBLIC_DEV_AUTH === "1";
-
-const PROVIDER_LABELS: Record<string, string> = {
-  google: "Google",
-  github: "GitHub",
-  microsoft: "Microsoft",
-  apple: "Apple",
-  discord: "Discord",
-  facebook: "Facebook",
-  gitlab: "GitLab",
-  linkedin: "LinkedIn",
-  twitch: "Twitch",
-  twitter: "X (Twitter)",
-  spotify: "Spotify",
-  tiktok: "TikTok",
-  reddit: "Reddit",
-  line: "LINE",
-  kakao: "Kakao",
-  notion: "Notion",
-  slack: "Slack",
-  dropbox: "Dropbox",
-  huggingface: "Hugging Face",
-  paypal: "PayPal",
-  salesforce: "Salesforce",
-  zoom: "Zoom",
-};
-
-/** Only allow same-origin relative paths (block open redirects). */
-function safeNextPath(raw: string | null | undefined, fallback = "/"): string {
-  const v = String(raw || "").trim();
-  if (!v.startsWith("/") || v.startsWith("//")) return fallback;
+function firstParam(
+  v: string | string[] | undefined,
+): string | undefined {
+  if (Array.isArray(v)) return v[0];
   return v;
 }
 
-const AUTH_ERROR_HINTS: Record<string, string> = {
-  state_mismatch:
-    "การยืนยัน OAuth ไม่สำเร็จ — อย่ารีเฟรช/ย้อนกลับหน้า callback ให้กดเข้าสู่ระบบใหม่จากหน้านี้",
-  state_invalid: "สถานะล็อกอินหมดอายุหรือเสีย — ลองเข้าสู่ระบบใหม่",
-  please_restart:
-    "รอบล็อกอินนี้ใช้ไม่ได้แล้ว — เริ่มเข้าสู่ระบบใหม่จากหน้านี้",
-};
-
-function readLoginErrorFromQuery(): string {
-  if (typeof window === "undefined") return "";
-  try {
-    const fromQuery = new URLSearchParams(window.location.search).get("error");
-    if (!fromQuery) return "";
-    return AUTH_ERROR_HINTS[fromQuery] || `ล็อกอินไม่สำเร็จ (${fromQuery})`;
-  } catch {
-    return "";
-  }
-}
-
-type DevPickerProps = {
-  users: DevUser[];
-  busy: string | null;
-  onPick: (user: DevUser) => void;
-};
-
-export default function LoginPage() {
-  const [providers, setProviders] = useState<ProviderInfo[]>([]);
-  const [devAuth, setDevAuth] = useState(false);
-  const [devUsers, setDevUsers] = useState<DevUser[]>([]);
-  const [DevPicker, setDevPicker] = useState<ComponentType<DevPickerProps> | null>(
-    null,
-  );
-  const [error, setError] = useState(readLoginErrorFromQuery);
-  const [busy, setBusy] = useState<string | null>(null);
-
-  useEffect(() => {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      if (params.get("error")) {
-        const url = new URL(window.location.href);
-        url.searchParams.delete("error");
-        window.history.replaceState({}, "", url.pathname + url.search);
-      }
-    } catch {
-      /* ignore */
-    }
-
-    void (async () => {
-      const data = (await fetch("/api/auth-config")
-        .then((r) => r.json())
-        .catch(() => ({}))) as {
-        providers?: string[];
-        devAuth?: boolean;
-        devAuthDefaultEmail?: string | null;
-      };
-      const list = Array.isArray(data.providers) ? data.providers : [];
-      setProviders(
-        list.map((id) => ({
-          id,
-          label: PROVIDER_LABELS[id] || id,
-        })),
-      );
-
-      if (INCLUDE_DEV_AUTH_CLIENT && data.devAuth) {
-        const mod = await import("@/components/DevAuthControls");
-        setDevPicker(() => mod.DevUserPicker);
-        setDevAuth(true);
-        const users = await mod.listDevUsers();
-        setDevUsers(users);
-        // When auth-config returns null/empty default email (no env), show
-        // the picker only — never fall back to users[0] auto login-as.
-        const target = resolveDevAutoLoginUser(
-          users,
-          data.devAuthDefaultEmail,
-        );
-        if (target) {
-          void loginAsDev(target, mod.loginAsDevUser);
-        }
-      } else {
-        setDevAuth(false);
-      }
-    })();
-
-    // Conditional UI: offer existing passkeys when browser supports it
-    if (
-      typeof PublicKeyCredential !== "undefined" &&
-      "isConditionalMediationAvailable" in PublicKeyCredential &&
-      typeof PublicKeyCredential.isConditionalMediationAvailable === "function"
-    ) {
-      void PublicKeyCredential.isConditionalMediationAvailable().then((ok) => {
-        if (ok) void authClient.signIn.passkey({ autoFill: true });
-      });
-    }
-  }, []);
-
-  const googleFirst = useMemo(() => {
-    const g = providers.find((p) => p.id === "google");
-    const rest = providers.filter((p) => p.id !== "google");
-    return g ? [g, ...rest] : rest;
-  }, [providers]);
-
-  function postLoginPath(): string {
-    try {
-      return safeNextPath(
-        new URLSearchParams(window.location.search).get("next"),
-        "/",
-      );
-    } catch {
-      return "/";
-    }
-  }
-
-  async function signInSocial(id: string) {
-    setError("");
-    setBusy(id);
-    try {
-      await authClient.signIn.social({
-        provider: id as "google",
-        callbackURL: postLoginPath(),
-      });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "เข้าสู่ระบบไม่สำเร็จ");
-      setBusy(null);
-    }
-  }
-
-  async function signInPasskey() {
-    setError("");
-    setBusy("passkey");
-    try {
-      const { error: err } = await authClient.signIn.passkey({
-        autoFill: false,
-      });
-      if (err) {
-        setError(err.message || "พาสคีย์ไม่สำเร็จ");
-        setBusy(null);
-        return;
-      }
-      window.location.assign(postLoginPath());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "พาสคีย์ไม่สำเร็จ");
-      setBusy(null);
-    }
-  }
-
-  async function loginAsDev(
-    user: DevUser,
-    loginFn?: (input: {
-      userId?: string;
-      email?: string;
-    }) => Promise<{ ok: boolean; message?: string }>,
-  ) {
-    if (!INCLUDE_DEV_AUTH_CLIENT) return;
-    if (user.banned) {
-      setError("ผู้ใช้นี้ถูกแบน");
-      return;
-    }
-    setError("");
-    setBusy(`dev-${user.id}`);
-    try {
-      const loginAsDevUser =
-        loginFn ||
-        (await import("@/components/DevAuthControls")).loginAsDevUser;
-      const result = await loginAsDevUser({ userId: user.id });
-      if (!result.ok) {
-        setError(result.message || "เลือก user ไม่สำเร็จ");
-        setBusy(null);
-        return;
-      }
-      const next = postLoginPath();
-      window.location.assign(next === "/" ? "/account" : next);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "เลือก user ไม่สำเร็จ");
-      setBusy(null);
-    }
-  }
-
+function LoginErrorPanel(props: {
+  errorCode: string;
+  next: string;
+}) {
+  const copy = oidcLoginErrorCopy(props.errorCode);
+  const retryHref = `/api/auth/oidc/login?next=${encodeURIComponent(props.next)}`;
+  const logoutHref = "/api/auth/oidc/logout";
   return (
     <main className="auth-page">
-      <div className={`auth-card${devAuth ? " auth-card-wide" : ""}`}>
+      <div className="auth-card">
         <div className="auth-brand">
-          <BrandLogo size={40} className="brand-logo auth-brand-logo" />
-          <p className="auth-eyebrow">{BRAND_NAME}</p>
+          <BrandLockup />
         </div>
-        <h1 className="auth-title">เข้าสู่ระบบ</h1>
-        <p className="auth-lead">
-          ใช้บัญชีภายนอกที่เชื่อถือได้ — ไม่เก็บรหัสผ่านในระบบนี้ หลังล็อกอินสำเร็จ
-          สามารถลงทะเบียนพาสคีย์เพื่อเข้าครั้งถัดไปได้เร็วและปลอดภัยขึ้น
+        <h1 className="auth-title">{copy.title}</h1>
+        <p className="auth-lead" role="alert">
+          {copy.lead}
         </p>
-
-        <input
-          type="text"
-          name="username"
-          autoComplete="username webauthn"
-          className="auth-webauthn-trap"
-          aria-hidden="true"
-          tabIndex={-1}
-        />
-
-        {error ? (
-          <p className="auth-error" role="alert">
-            {error}
-          </p>
-        ) : null}
-
-        {devAuth && DevPicker ? (
-          <DevPicker
-            users={devUsers}
-            busy={busy}
-            onPick={(u) => void loginAsDev(u)}
-          />
-        ) : null}
-
-        <div className="auth-actions">
-          <button
-            type="button"
-            className="auth-provider auth-provider-passkey"
-            disabled={busy !== null}
-            onClick={() => void signInPasskey()}
-          >
-            <PasskeyMark className="auth-provider-icon" />
-            <span>{busy === "passkey" ? "รอพาสคีย์…" : "เข้าด้วยพาสคีย์"}</span>
-          </button>
-
-          {googleFirst.length === 0 ? (
-            <p className="auth-hint">
-              ยังไม่ได้ตั้งค่า OAuth — ใส่ <code>GOOGLE_CLIENT_ID</code> /{" "}
-              <code>GOOGLE_CLIENT_SECRET</code> ใน <code>.env.local</code> แล้วรีสตาร์ทเซิร์ฟเวอร์
-            </p>
-          ) : (
-            googleFirst.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                className={`auth-provider${p.id === "google" ? " auth-provider-google" : ""}`}
-                disabled={busy !== null}
-                onClick={() => void signInSocial(p.id)}
-              >
-                {p.id === "google" ? (
-                  <GoogleMark className="auth-provider-icon" />
-                ) : (
-                  <ExternalAccountMark className="auth-provider-icon" />
-                )}
-                <span>{busy === p.id ? "กำลังเปิด…" : `เข้าด้วย ${p.label}`}</span>
-              </button>
-            ))
-          )}
-        </div>
-
-        <p className="auth-foot">
-          {/* Hard nav so home remounts cleanly with app.js (soft Link leaves a broken shell). */}
-          {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- intentional full reload for guest shell */}
-          <a href="/">กลับหน้าหลัก</a>
-          {" · "}
-          เซสชันเข้ารหัสในคุกกี้ HttpOnly · OAuth ผ่าน HTTPS ในโปรดักชัน
+        <p className="auth-hint">{copy.hint}</p>
+        <p className="auth-foot" style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
+          <a className="admin-btn admin-btn-primary" href={retryHref}>
+            ลองเข้าใหม่
+          </a>
+          <form method="POST" action={logoutHref} style={{ display: "inline" }}>
+            <button type="submit" className="admin-btn">
+              ออกจากระบบ Keycloak
+            </button>
+          </form>
         </p>
       </div>
     </main>
+  );
+}
+
+/**
+ * Interactive OIDC entry (button / protected redirect).
+ * Silent SSO is middleware → /api/auth/oidc/silent (prompt=none).
+ * With ?error= (or fail-cookie loop guard) → static error page, never auto-redirect.
+ */
+export default async function LoginPage({ searchParams }: LoginPageProps) {
+  const params = (await searchParams) || {};
+  const nextRaw = firstParam(params.next) || firstParam(params.returnTo) || "/";
+  const next = safeOidcReturnTo(nextRaw, "/");
+  const errorRaw = firstParam(params.error);
+
+  await redirectIfAuthenticated(next === "/" ? "/account" : next);
+
+  if (errorRaw) {
+    return <LoginErrorPanel errorCode={String(errorRaw)} next={next} />;
+  }
+
+  const jar = await cookies();
+  const failRaw = jar.get(OIDC_FAIL_COOKIE)?.value;
+  if (shouldBlockOidcAutoRedirect(failRaw)) {
+    return <LoginErrorPanel errorCode="oidc_loop_guard" next={next} />;
+  }
+
+  const config = getOidcConfig();
+  if (!config) {
+    logOidcNotConfigured("login");
+    return (
+      <main className="auth-page">
+        <div className="auth-card">
+          <div className="auth-brand">
+            <BrandLockup />
+          </div>
+          <h1 className="auth-title">SSO not configured</h1>
+          <p className="auth-lead" role="alert">
+            Central Keycloak login is not configured on this deployment. Set{" "}
+            <code>OIDC_ISSUER</code>, <code>OIDC_CLIENT_ID</code>, and{" "}
+            <code>OIDC_CLIENT_SECRET</code> (realm via issuer path, e.g.
+            …/realms/tps18-dev). There is no alternate login.
+          </p>
+          <p className="auth-hint">
+            ระบบล็อกอินกลางยังไม่ได้ตั้งค่า — ไม่มีช่องทางเข้าอื่น
+          </p>
+        </div>
+      </main>
+    );
+  }
+
+  // Interactive authorize via API (clears post-logout silent-skip cookie).
+  redirect(
+    `/api/auth/oidc/login?next=${encodeURIComponent(next)}`,
   );
 }

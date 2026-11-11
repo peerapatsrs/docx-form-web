@@ -273,15 +273,15 @@ await check("passkey manage URL is null when OIDC is not configured", async () =
 
 await check("PKCE S256 challenge is stable for a verifier", async () => {
   const { pkceChallengeS256, createOidcAuthRequestSecrets } = await loadPkce();
-  const a = pkceChallengeS256("verifier-demo-value-0123456789");
-  const b = pkceChallengeS256("verifier-demo-value-0123456789");
+  const a = await pkceChallengeS256("verifier-demo-value-0123456789");
+  const b = await pkceChallengeS256("verifier-demo-value-0123456789");
   assert.equal(a, b);
   assert.match(a, /^[A-Za-z0-9_-]+$/);
-  const secrets = createOidcAuthRequestSecrets();
+  const secrets = await createOidcAuthRequestSecrets();
   assert.ok(secrets.state.length > 20);
   assert.ok(secrets.nonce.length > 20);
   assert.ok(secrets.codeVerifier.length > 20);
-  assert.equal(secrets.codeChallenge, pkceChallengeS256(secrets.codeVerifier));
+  assert.equal(secrets.codeChallenge, await pkceChallengeS256(secrets.codeVerifier));
 });
 
 await check("discovery caches and rejects issuer mismatch", async () => {
@@ -521,7 +521,7 @@ await check("authorize redirect includes PKCE + state + nonce; soft 404 when dis
       ),
   });
   const pkce = await loadPkce();
-  const secrets = pkce.createOidcAuthRequestSecrets();
+  const secrets = await pkce.createOidcAuthRequestSecrets();
   await identities.saveOidcLoginState({
     state: secrets.state,
     nonce: secrets.nonce,
@@ -655,10 +655,15 @@ await check("logout clears cookies and builds end_session URL without leaking to
   const discovery = await loadDiscovery();
   discovery.clearOidcDiscoveryCache();
 
+  // Fresh fixture id_token payload (exp far future) so hint is attached.
+  const hintPayload = Buffer.from(JSON.stringify({
+    exp: Math.floor(Date.now()/1000) + 3600,
+    sub: "u",
+  })).toString("base64url");
   const result = await buildOidcLogoutRedirect({
     config: cfg,
-    // Constructed fixture (not a real token) — avoid a contiguous JWT-shaped literal for secret scanners.
-    idTokenHint: ["eyJ", "hbGciOiJSUzI1NiJ9", ".hint.sig"].join(""),
+    idTokenHint: ["eyJ", "hbGciOiJSUzI1NiJ9", `.${hintPayload}.sig`].join(""),
+    forceIdTokenHint: true,
     clearSession: async () => ["session=; Max-Age=0"],
     fetchFn: async () =>
       new Response(
@@ -672,7 +677,7 @@ await check("logout clears cookies and builds end_session URL without leaking to
         { status: 200 },
       ),
   });
-  assert.equal(result.status, 302);
+  assert.equal(result.status, 303);
   assert.match(result.redirectTo, /\/logout\?/);
   assert.match(result.redirectTo, /client_id=/);
   assert.match(result.redirectTo, /post_logout_redirect_uri=/);

@@ -1,0 +1,43 @@
+name: mw-shared verify
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - feat/oidc-sso
+      - "cursor/**"
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-build:
+    name: verify-pin-then-build-auth
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify vendored mw-shared pin (before any auth install)
+        run: node scripts/mw-shared-verify.mjs
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build @mw-shared/auth from vendored tree only
+        run: |
+          set -euo pipefail
+          npm --prefix vendor/mw-shared/auth ci
+          npm --prefix vendor/mw-shared/auth run build
+
+      - name: Install app deps (uses file:vendor/mw-shared/auth)
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        run: npm run test:unit

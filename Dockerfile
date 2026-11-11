@@ -2,12 +2,23 @@
 
 FROM node:22-bookworm-slim AS deps
 WORKDIR /app
+# Vendored mw-shared must be present before npm ci (file: dependency).
+# Verify pin BEFORE any install inside vendor/mw-shared/auth.
 COPY package.json package-lock.json ./
-RUN npm ci
+COPY scripts/mw-shared-verify.mjs ./scripts/mw-shared-verify.mjs
+COPY vendor/mw-shared ./vendor/mw-shared
+RUN node scripts/mw-shared-verify.mjs
+RUN npm --prefix vendor/mw-shared/auth ci \
+  && npm --prefix vendor/mw-shared/auth run build
+# Skip recursive postinstall rebuild during root ci (auth already built).
+RUN npm ci --ignore-scripts \
+  && npm run mw-shared:build --if-present \
+  && node -e "require('fs').accessSync('vendor/mw-shared/auth/dist/index.js')"
 
 FROM node:22-bookworm-slim AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/vendor/mw-shared/auth ./vendor/mw-shared/auth
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 # Public origin + optional local-only dev-auth client flag (build-args).

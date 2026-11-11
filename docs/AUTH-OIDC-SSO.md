@@ -110,11 +110,17 @@ Pattern: `https://auth.tps18.space/realms/tps18-{env}` where `{env}` is
 | GET | `/api/auth/oidc/login` | Interactive authorize (no `prompt`) |
 | GET | `/api/auth/oidc/silent` | Silent authorize (`prompt=none`) |
 | GET | `/api/auth/oidc/callback` | Code callback (+ optional `kc_action_status`) |
-| GET/POST | `/api/auth/oidc/logout` | RP logout (clears silent cooldown) |
+| POST | `/api/auth/oidc/logout` | RP logout (POST-only; GET → 405). Top-level form → 303 `end_session`; `id_token_hint` only while fresh |
+| POST | `/api/auth/oidc/backchannel-logout` | Back-Channel Logout 1.0 (`logout_token`; RS256/ES256; jti replay) |
 | GET | `/api/auth/oidc/passkey/add` | AIA register passkey (session) |
 | GET | `/api/auth/oidc/passkey/remove` | AIA delete passkey (session) |
 | GET | `/api/auth/oidc/passkey` | List own passkeys (Admin API; optional) |
 | GET | `/api/auth-config` | Paths + `passkeyListEnabled` |
+
+OIDC core (authorize/callback/silent/logout/back-channel) is provided by
+vendored `@mw-shared/auth` (`vendor/mw-shared`, pin in `MW_SHARED_PIN.json`).
+App owns Postgres stores, Better Auth session bridge, and cookie names
+(`docx_sso_checked`, `docx_oidc_id_token`, `docx_oidc`).
 
 Removed (404): `/api/dev/test-accounts`, `/api/dev/test-login`, `/api/auth/dev/*`,
 `/api/auth/passkey` (+ `/*` — legacy Better Auth), social OAuth callbacks.
@@ -131,6 +137,8 @@ App DB roles (`user` / `admin` / `superadmin`) stay local. On user create / boot
 - Confidential client, Standard flow on, Direct access grants off
 - Valid redirect URIs: `{APP_BASE_URL}/api/auth/oidc/callback`
 - Valid post logout redirect URIs: `{APP_BASE_URL}/logged-out`
+- Backchannel logout URL: `{APP_BASE_URL}/api/auth/oidc/backchannel-logout`
+- **Backchannel logout session required: ON**
 - PKCE S256 required
 - Scopes: `openid email profile` (login); AIA uses `openid`
 - Enable AIA actions: `webauthn-register-passwordless`, `delete_credential`

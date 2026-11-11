@@ -10,15 +10,15 @@ import {
 } from "@/lib/public-origin";
 import { isOidcEnabled } from "@/server/oidc-config";
 import {
-  getOidcSsoCooldownSec,
   hasSsoBypassQuery,
-  isProtectedAppPath,
   isTopLevelDocumentNavigation,
-  OIDC_SSO_COOLDOWN_COOKIE,
-  parseOidcSsoHubOrigins,
   resolveSilentSsoStart,
-  safeAppReturnPath,
   stripSsoBypassParam,
+  safeAppReturnPath,
+  getOidcSsoCooldownSec,
+  parseOidcSsoHubOrigins,
+  OIDC_SSO_COOLDOWN_COOKIE,
+  isProtectedAppPath,
 } from "@/server/oidc-silent";
 import { resolveProxySession } from "@/server/oidc-session-edge";
 
@@ -79,6 +79,8 @@ function maybeRedirectToHttps(request: NextRequest): NextResponse | null {
 
 /**
  * Network boundary: HTTPS redirect, security headers, auth gates, silent SSO.
+ * Silent/protected decisions use @mw-shared/auth rules via oidc-silent wrappers;
+ * session presence stays Better Auth HMAC (+ optional DB check).
  */
 export async function proxy(request: NextRequest) {
   const httpsRedirect = maybeRedirectToHttps(request);
@@ -144,7 +146,10 @@ export async function proxy(request: NextRequest) {
   }
 
   // Refused or unused ?sso=1 — strip once so it does not stick in the address bar.
-  if (topLevelDoc && hasSsoBypassQuery(search)) {
+  if (
+    topLevelDoc &&
+    (decision.stripSsoParam || hasSsoBypassQuery(search))
+  ) {
     const current = safeAppReturnPath(pathname, search);
     const stripped = stripSsoBypassParam(current);
     if (stripped !== current) {
@@ -173,6 +178,13 @@ export async function proxy(request: NextRequest) {
 
   const response = NextResponse.next();
   applySecurityHeaders(response);
+  // Land hop must not leak Referer (module sets no-referrer; proxy must not override).
+  if (
+    pathname === "/api/auth/oidc/silent/land" ||
+    pathname.startsWith("/api/auth/oidc/silent/land/")
+  ) {
+    response.headers.set("Referrer-Policy", "no-referrer");
+  }
   applySetCookies(response, session.clearCookies);
   if (htmlish) {
     response.headers.set("Cache-Control", documentCacheControl(pathname));

@@ -45,9 +45,11 @@ function LoginErrorPanel(props: {
           <a className="admin-btn admin-btn-primary" href={retryHref}>
             ลองเข้าใหม่
           </a>
-          <a className="admin-btn" href={logoutHref}>
-            ออกจากระบบ Keycloak
-          </a>
+          <form method="POST" action={logoutHref} style={{ display: "inline" }}>
+            <button type="submit" className="admin-btn">
+              ออกจากระบบ Keycloak
+            </button>
+          </form>
         </p>
       </div>
     </main>

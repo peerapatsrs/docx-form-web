@@ -82,16 +82,16 @@ await check("visit → hub login → hub link within cooldown = bypass allowed",
   const t0 = 1_700_000_000_000;
   const hubs = parseOidcSsoHubOrigins();
 
-  // Normal visit → login_required (non-bypass).
+  // Normal visit → login_required (non-bypass). Module format: until:pending:bypassUsed
   const normalFail = cookieVal(
     oidcSsoCooldownSetCookie(false, {
       nowMs: t0,
       outcome: "login_required",
       viaBypass: false,
+      cooldownSec: 60,
     }),
   );
-  assert.match(normalFail, /\.login_required$/);
-  assert.doesNotMatch(normalFail, /\.b$/);
+  assert.match(normalFail, new RegExp(`^${t0 + 60_000}:0:0$`));
   assert.equal(canUseSilentSsoBypass(normalFail, t0 + 5_000, 60), true);
 
   // Hub link within cooldown after hub login → must start (viaBypass).
@@ -120,8 +120,10 @@ await check("same via ?sso=1 after normal cooldown fail", async () => {
       nowMs: t0,
       outcome: "login_required",
       viaBypass: false,
+      cooldownSec: 60,
     }),
   );
+  assert.match(normalFail, new RegExp(`^${t0 + 60_000}:0:0$`));
   const d = resolveSilentSsoStart({
     pathname: "/",
     search: "?sso=1",
@@ -158,9 +160,10 @@ await check("second bypass in same window with no KC session = 0 extra trips", a
       nowMs: t0,
       outcome: "pending",
       viaBypass: true,
+      cooldownSec: 60,
     }),
   );
-  assert.match(pendingB, /\.pending\.b$/);
+  assert.match(pendingB, new RegExp(`^${t0 + 60_000}:1:1$`));
   assert.equal(canUseSilentSsoBypass(pendingB, t0 + 100, 60), false);
   assert.equal(
     resolveSilentSsoStart({
@@ -195,7 +198,8 @@ await check("second bypass in same window with no KC session = 0 extra trips", a
   const failB = cookieVal(
     result.setCookies.find((c) => c.startsWith("docx_sso_checked=")),
   );
-  assert.match(failB, /\.login_required\.b$/);
+  // pending cleared, bypassUsed retained → until:0:1
+  assert.match(failB, /:0:1$/);
   assert.equal(
     resolveSilentSsoStart({
       pathname: "/",
@@ -260,8 +264,7 @@ await check("no Keycloak session = exactly 1 round trip (normal, no loop)", asyn
   const fail = cookieVal(
     result.setCookies.find((c) => c.startsWith("docx_sso_checked=")),
   );
-  assert.match(fail, /\.login_required$/);
-  assert.doesNotMatch(fail, /\.b$/);
+  assert.match(fail, /:0:0$/);
   assert.equal(
     resolveSilentSsoStart({
       pathname: "/",
@@ -393,9 +396,10 @@ await check("refused ?sso=1 is stripped once from the URL", async () => {
       nowMs: t0,
       outcome: "login_required",
       viaBypass: true,
+      cooldownSec: 60,
     }),
   );
-  assert.match(bypassFail, /\.b$/);
+  assert.match(bypassFail, new RegExp(`^${t0 + 60_000}:0:1$`));
   const refused = resolveSilentSsoStart({
     pathname: "/",
     search: "?sso=1",
@@ -538,13 +542,24 @@ await check("env example + compose + silent pending.b wiring", async () => {
     join(root, "src/app/api/auth/oidc/silent/route.ts"),
     "utf8",
   );
-  assert.match(silent, /viaBypass/);
-  assert.match(silent, /bypass/);
-  const land = readFileSync(
+  assert.match(silent, /runMwOidcHandler/);
+  // Bypass / viaBypass live in @mw-shared/auth (+ thin app wrappers).
+  const silentCore = readFileSync(
+    join(root, "vendor/mw-shared/auth/src/core/silent-sso.ts"),
+    "utf8",
+  );
+  assert.match(silentCore, /viaBypass/);
+  assert.match(silentCore, /canUseSilentSsoBypass/);
+  const landRoute = readFileSync(
     join(root, "src/app/api/auth/oidc/silent/land/route.ts"),
     "utf8",
   );
-  assert.match(land, /no-referrer/);
+  assert.match(landRoute, /runMwOidcHandler/);
+  const landAdapter = readFileSync(
+    join(root, "vendor/mw-shared/auth/src/adapters/nextjs/index.ts"),
+    "utf8",
+  );
+  assert.match(landAdapter, /no-referrer/);
 });
 
 if (failed > 0) {

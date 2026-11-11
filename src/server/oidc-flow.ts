@@ -98,7 +98,7 @@ export async function buildOidcAuthorizationRedirect(input: {
     const meta = await fetchOidcDiscovery(config.issuer, {
       fetch: input.fetchDiscovery,
     });
-    const secrets = createOidcAuthRequestSecrets();
+    const secrets = await createOidcAuthRequestSecrets();
     const silent = Boolean(input.silent) || input.prompt === "none";
     const returnTo = safeOidcReturnTo(
       input.returnTo,
@@ -468,11 +468,16 @@ export async function buildOidcLogoutRedirect(input: {
   config?: OidcConfig | null;
   fetchFn?: DiscoveryFetch;
   clearSession?: typeof clearAppSessionCookie;
+  /** Skip freshness check (unit tests with fixture tokens). */
+  forceIdTokenHint?: boolean;
 }): Promise<{
   status: number;
   redirectTo: string;
   setCookies: string[];
 }> {
+  const { buildEndSessionUrl, isIdTokenFreshForHint } = await import(
+    "@mw-shared/auth"
+  );
   const config = input.config === undefined ? getOidcConfig() : input.config;
   const secure = process.env.NODE_ENV === "production";
   const clearSession = input.clearSession ?? clearAppSessionCookie;
@@ -481,7 +486,7 @@ export async function buildOidcLogoutRedirect(input: {
 
   if (!config) {
     return {
-      status: 302,
+      status: 303,
       redirectTo: "/login",
       setCookies,
     };
@@ -493,32 +498,33 @@ export async function buildOidcLogoutRedirect(input: {
     });
     if (!meta.end_session_endpoint) {
       return {
-        status: 302,
+        status: 303,
         redirectTo: config.postLogoutRedirectUri,
         setCookies,
       };
     }
-    const url = new URL(meta.end_session_endpoint);
-    url.searchParams.set("client_id", config.clientId);
-    url.searchParams.set(
-      "post_logout_redirect_uri",
-      config.postLogoutRedirectUri,
-    );
-    const hint = String(input.idTokenHint || "").trim();
-    if (hint) {
-      // id_token_hint is a form/query param to the IdP — required by OIDC RP logout.
-      // We never log it and never echo it back into our app URLs.
-      url.searchParams.set("id_token_hint", hint);
-    }
+    const rawHint = String(input.idTokenHint || "").trim();
+    const hint =
+      rawHint &&
+      (input.forceIdTokenHint ||
+        isIdTokenFreshForHint(rawHint, 60, Date.now()))
+        ? rawHint
+        : null;
+    const url = buildEndSessionUrl({
+      endSessionEndpoint: meta.end_session_endpoint,
+      clientId: config.clientId,
+      postLogoutRedirectUri: config.postLogoutRedirectUri,
+      idTokenHint: hint,
+    });
     return {
-      status: 302,
-      redirectTo: url.toString(),
+      status: 303,
+      redirectTo: url,
       setCookies,
     };
   } catch (err) {
     console.error("[oidc] logout discovery failed:", summarizeOidcError(err));
     return {
-      status: 302,
+      status: 303,
       redirectTo: config.postLogoutRedirectUri,
       setCookies,
     };

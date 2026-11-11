@@ -247,8 +247,12 @@ export default function AccountPage() {
     ) {
       return;
     }
-    // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- RP logout
-    window.location.assign(SSO_LOGOUT_PATH);
+    // Top-level document POST → 303 to Keycloak end_session.
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = SSO_LOGOUT_PATH;
+    document.body.appendChild(form);
+    form.submit();
   }
 
   if (loading) {

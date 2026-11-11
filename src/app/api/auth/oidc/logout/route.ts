@@ -1,46 +1,12 @@
-import { NextResponse } from "next/server";
-import {
-  applyOidcSetCookies,
-  buildOidcLogoutRedirect,
-  OIDC_ID_TOKEN_COOKIE,
-  readCookie,
-} from "@/server/oidc-flow";
-import { oidcSsoCooldownClearCookie } from "@/server/oidc-silent";
-import { getAppBaseUrl } from "@/lib/app-base-url";
+import { runMwOidcHandler } from "@/server/mw-auth-route";
 
 export const dynamic = "force-dynamic";
 
-function absoluteRedirect(pathOrUrl: string): string {
-  if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
-  const base = getAppBaseUrl();
-  return `${base}${pathOrUrl.startsWith("/") ? pathOrUrl : `/${pathOrUrl}`}`;
-}
-
-async function logout(request: Request) {
-  const idTokenHint = readCookie(
-    request.headers.get("cookie"),
-    OIDC_ID_TOKEN_COOKIE,
-  );
-  const result = await buildOidcLogoutRedirect({ idTokenHint });
-  const secure = process.env.NODE_ENV === "production";
-  const headers = new Headers();
-  // RP logout ends Keycloak session; clear cooldown so a later hub login
-  // can silent-check immediately (login_required then sets a fresh cooldown).
-  applyOidcSetCookies(headers, [
-    ...result.setCookies,
-    oidcSsoCooldownClearCookie(secure),
-  ]);
-  return NextResponse.redirect(absoluteRedirect(result.redirectTo), {
-    status: 302,
-    headers,
-  });
-}
-
-/** RP-initiated logout (GET or POST). */
+/** POST-only — top-level HTML form. GET → 405. */
 export async function GET(request: Request) {
-  return logout(request);
+  return runMwOidcHandler("/api/auth/oidc/logout", "GET", request);
 }
 
 export async function POST(request: Request) {
-  return logout(request);
+  return runMwOidcHandler("/api/auth/oidc/logout", "POST", request);
 }

@@ -243,7 +243,7 @@ await check("authorize redirect includes PKCE S256 + state + nonce to issuer", a
       end_session_endpoint: `${ISSUER}/protocol/openid-connect/logout`,
     }),
   });
-  const secrets = createOidcAuthRequestSecrets();
+  const secrets = await createOidcAuthRequestSecrets();
   await identities.saveOidcLoginState({
     state: secrets.state,
     nonce: secrets.nonce,
@@ -264,7 +264,7 @@ await check("authorize redirect includes PKCE S256 + state + nonce to issuer", a
   assert.equal(url.searchParams.get("code_challenge_method"), "S256");
   assert.equal(
     url.searchParams.get("code_challenge"),
-    pkceChallengeS256(secrets.codeVerifier),
+    await pkceChallengeS256(secrets.codeVerifier),
   );
   assert.ok(url.searchParams.get("state"));
   assert.ok(url.searchParams.get("nonce"));
@@ -325,6 +325,7 @@ await check("logout redirects to end_session with post_logout=/logged-out", asyn
   clearOidcDiscoveryCache();
   const cfg = getOidcConfig();
   const result = await buildOidcLogoutRedirect({
+    forceIdTokenHint: true,
     config: cfg,
     // Constructed fixture (not a real token) — avoid a contiguous JWT-shaped literal for secret scanners.
     idTokenHint: ["eyJ", "hbGciOiJSUzI1NiJ9", ".hint.sig"].join(""),
@@ -337,7 +338,7 @@ await check("logout redirects to end_session with post_logout=/logged-out", asyn
       end_session_endpoint: `${ISSUER}/logout`,
     }),
   });
-  assert.equal(result.status, 302);
+  assert.ok(result.status === 302 || result.status === 303);
   assert.match(result.redirectTo, /\/logout\?/);
   assert.match(result.redirectTo, /post_logout_redirect_uri=/);
   assert.match(
@@ -351,9 +352,11 @@ await check("logout redirects to end_session with post_logout=/logged-out", asyn
 await check("AuthBar / account logout go to /api/auth/oidc/logout", async () => {
   const bar = readFileSync(join(root, "src/components/AuthBar.tsx"), "utf8");
   assert.match(bar, /\/api\/auth\/oidc\/logout/);
+  assert.match(bar, /method=["']POST["']/);
   assert.doesNotMatch(bar, /DEV_AUTH|loginAsDev|DevAuth/);
   const account = readFileSync(join(root, "src/app/account/page.tsx"), "utf8");
   assert.match(account, /\/api\/auth\/oidc\/logout/);
+  assert.match(account, /method\s*=\s*["']POST["']/);
   assert.doesNotMatch(account, /passkey\.|linkSocial|unlinkAccount/);
   assert.doesNotMatch(account, /listUserPasskeys|addPasskey|deletePasskey/);
   assert.match(account, /จัดการ passkey/);

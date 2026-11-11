@@ -96,6 +96,10 @@ export function userKeyHintFromRow(row: UserAiKeyRow | null | undefined): string
   return `••••${key.slice(-4)}`;
 }
 
+/**
+ * First saved vault key (list order). Used for `userKeyHint` on status —
+ * not a “preferred” provider selector for fill (fill matches by model provider).
+ */
 export function pickPrimaryUserKey(
   rows: UserAiKeyRow[],
 ): UserAiKeyRow | null {
@@ -189,12 +193,31 @@ export function resolveFillCredentialPolicy(
   return effective.mode;
 }
 
+/** Unique provider ids the user actually has a vault key for (order preserved). */
+export function userProvidersFromKeys(
+  rows: Array<Pick<UserAiKeyRow, "provider">>,
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const id = String(row?.provider || "").trim();
+    if (!id || seen.has(id)) continue;
+    if (!getAiProvider(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
 /**
  * Models for the attach picker — derived from the live provider catalog.
- * Server models only when serverKeyAvailable; BYOK models only when userKeySet.
+ * Server models only when serverKeyAvailable (for configured server providers).
+ * BYOK models only for providers the user actually has a saved vault key for —
+ * never the whole catalog.
  */
 export function listAiModelsForChoice(
   status: AiKeyChoiceStatus,
+  opts?: { userProviders?: string[] | null },
 ): AiModelChoiceOption[] {
   const out: AiModelChoiceOption[] = [];
   const seen = new Set<string>();
@@ -225,17 +248,26 @@ export function listAiModelsForChoice(
   }
 
   if (status.userKeySet) {
-    for (const p of listAiProviders()) {
-      if (p.formAiSupported === false) continue;
-      for (const m of p.models || []) {
-        const id = String(m.id || "").trim();
-        if (!id) continue;
-        push({
-          id,
-          label: String(m.label || id),
-          provider: p.id,
-          source: "byok",
-        });
+    const allowed = new Set(
+      (opts?.userProviders || [])
+        .map((p) => String(p || "").trim())
+        .filter(Boolean),
+    );
+    // No providers → no BYOK models (caller forgot to pass vault providers).
+    if (allowed.size > 0) {
+      for (const providerId of allowed) {
+        const p = getAiProvider(providerId);
+        if (!p || p.formAiSupported === false) continue;
+        for (const m of p.models || []) {
+          const id = String(m.id || "").trim();
+          if (!id) continue;
+          push({
+            id,
+            label: String(m.label || id),
+            provider: p.id,
+            source: "byok",
+          });
+        }
       }
     }
   }
@@ -243,15 +275,27 @@ export function listAiModelsForChoice(
   return out;
 }
 
+/** Load vault rows → provider allow-list for BYOK model listing / gates. */
+export async function listUserAiKeyProviders(
+  userId: string,
+): Promise<string[]> {
+  const rows = await listUserAiKeys(userId).catch(() => [] as UserAiKeyRow[]);
+  return userProvidersFromKeys(rows);
+}
+
 /**
  * Validate that `model` (+ optional provider) is listed for `source`
  * given the user's current key availability.
+ * For BYOK, `userProviders` must be the vault-derived allow-list — a model
+ * whose provider has no saved key → AI_MODEL_SOURCE_MISMATCH.
  */
 export function validateModelForSource(input: {
   status: AiKeyChoiceStatus;
   source: AiKeyMode;
   model?: string | null;
   provider?: string | null;
+  /** Vault providers for BYOK; required for accurate mismatch checks. */
+  userProviders?: string[] | null;
 }):
   | { ok: true; source: AiKeyMode; model: string; provider: string }
   | { ok: false; status: 400; error: string; code: string } {
@@ -269,15 +313,16 @@ export function validateModelForSource(input: {
     return {
       ok: false,
       status: 400,
-      code: "AI_USER_KEY_MISSING",
+      code: "AI_KEY_REQUIRED",
       error: "ยังไม่มีคีย์ของฉัน — บันทึกคีย์ก่อน หรือเลือกคีย์เซิร์ฟเวอร์",
     };
   }
 
+  const listOpts = { userProviders: input.userProviders || [] };
   const model = String(input.model || "").trim();
   if (!model) {
     // Model optional at gate time — fill routes may apply provider default.
-    const models = listAiModelsForChoice(gateStatus).filter(
+    const models = listAiModelsForChoice(gateStatus, listOpts).filter(
       (m) => m.source === source,
     );
     const preferredProvider = String(input.provider || "").trim();
@@ -299,7 +344,7 @@ export function validateModelForSource(input: {
     };
   }
 
-  const models = listAiModelsForChoice(gateStatus).filter(
+  const models = listAiModelsForChoice(gateStatus, listOpts).filter(
     (m) => m.source === source,
   );
   const providerWant = String(input.provider || "").trim();
@@ -315,7 +360,7 @@ export function validateModelForSource(input: {
       error:
         source === "server"
           ? "โมเดลนี้ไม่ใช่ของคีย์เซิร์ฟเวอร์ — เลือกโมเดลในกลุ่มคีย์เซิร์ฟเวอร์"
-          : "โมเดลนี้ไม่ใช่ของคีย์ของฉัน — เลือกโมเดลในกลุ่มคีย์ของฉัน",
+          : "โมเดลนี้ไม่ใช่ของคีย์ของฉัน — เลือกโมเดลของผู้ให้บริการที่คุณมีคีย์บันทึกไว้",
     };
   }
   return { ok: true, source, model: hit.id, provider: hit.provider };

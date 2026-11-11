@@ -50,12 +50,16 @@ Update `mode` and/or save/delete own key (`apiKey`, `deleteKey`). Returns status
 ```
 
 FE groups the attach-page picker by `source`. Server lists server models only when
-`serverKeyAvailable`, BYOK models only when `userKeySet`.
+`serverKeyAvailable`. BYOK models are limited to providers the user has a saved
+vault key for (not the whole catalog). `userKeyHint` is from the first saved key;
+`deleteKey: true` on PUT status removes **all** user vault keys.
 
 ### Fill optional `source`
 
 Suggest-tags / source-map / batch-from-source accept form/query `source=server|byok`
-with the chosen model. Omit → saved `mode`. Mismatch / missing key → 4xx.
+with the chosen model. Omit → saved `mode`. Mismatch → `AI_MODEL_SOURCE_MISMATCH`;
+signed-in missing key → **400** `AI_KEY_REQUIRED` (401 only when not signed in).
+Provider rejection on BYOK never silently falls back to shared/non-AI.
 
 ## Endpoints (FE uses)
 

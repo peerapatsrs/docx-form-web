@@ -36,7 +36,6 @@ import {
   missingAiCredentialsError,
   requestHasExplicitAiProvider,
   resolveEffectiveAiProvider,
-  resolveProviderApiKey,
   resolveRequestAiCredentials,
   runWithSavedAiKeyAuthFallback,
   normalizeGeminiModel,
@@ -166,6 +165,8 @@ async function resolveRouteAiCredentials(
     resolveServerFillApiKey,
     canUseAi,
     isServerKeyAvailable,
+    listUserAiKeyProviders,
+    userProvidersFromKeys,
   } = await import("./ai-key-choice");
 
   const sourceOverride = normalizeAiKeyMode(extras?.source);
@@ -176,6 +177,11 @@ async function resolveRouteAiCredentials(
         serverKeyAvailable: false,
         userKeySet: false,
       };
+
+  let userProviders: string[] = [];
+  if (sessionUserId) {
+    userProviders = await listUserAiKeyProviders(sessionUserId);
+  }
 
   // Guests: header/form key → byok; otherwise shared server key when available.
   if (!sessionUserId) {
@@ -192,14 +198,23 @@ async function resolveRouteAiCredentials(
       serverKeyAvailable,
       userKeySet: hasKey,
     };
+    if (hasKey) {
+      const p =
+        getAiProvider(extras?.formProvider)?.id ||
+        getAiProvider(headerCreds.provider)?.id ||
+        "";
+      if (p) userProviders = [p];
+    }
   }
 
   const policy = resolveFillCredentialPolicy(choiceStatus, sourceOverride);
   if (policy === "none") {
+    // Signed-in missing key → 400 AI_KEY_REQUIRED; 401 only means not signed in.
+    const signedIn = Boolean(sessionUserId);
     return {
       ok: false,
-      status: 401,
-      code: "AI_KEY_REQUIRED",
+      status: signedIn ? 400 : 401,
+      code: signedIn ? "AI_KEY_REQUIRED" : "AI_KEY_UNAUTHORIZED",
       error: canUseAi({
         ...choiceStatus,
         mode: sourceOverride || choiceStatus.mode,
@@ -217,6 +232,7 @@ async function resolveRouteAiCredentials(
     source: policy,
     model: extras?.formModel,
     provider: extras?.formProvider,
+    userProviders,
   });
   if (!modelCheck.ok) {
     return {
@@ -257,28 +273,61 @@ async function resolveRouteAiCredentials(
     };
   }
 
-  // BYOK / own key path — no shared-env fallback.
+  // BYOK / own key path — key must match the model's provider; no shared-env coalesce.
+  const provider = modelCheck.provider;
   let creds = await resolveRequestAiCredentials(req, sessionUserId);
   const formKey = String(extras?.formKey || "").trim();
   if (!creds.apiKey && formKey) {
     creds = {
       ...creds,
+      provider,
       apiKey: formKey,
+      model: modelCheck.model,
       fromUserVault: false,
     };
   }
-  if (!creds.apiKey && sessionUserId) {
+
+  // Header/vault key for a different provider than the chosen model → mismatch.
+  if (
+    creds.apiKey &&
+    creds.fromUserVault &&
+    getAiProvider(creds.provider)?.id &&
+    getAiProvider(creds.provider)!.id !== provider
+  ) {
+    // Ignore wrong-provider vault resolution; try to find the matching key below.
+    creds = {
+      provider,
+      apiKey: "",
+      model: modelCheck.model,
+      fromUserVault: false,
+      requestedKeyId: creds.requestedKeyId,
+    };
+  }
+
+  if ((!creds.apiKey || getAiProvider(creds.provider)?.id !== provider) && sessionUserId) {
     try {
       const { listUserAiKeys } = await import("./ai-key-vault");
       const rows = await listUserAiKeys(sessionUserId);
-      const primary = rows[0];
-      if (primary?.apiKey) {
+      userProviders = userProvidersFromKeys(rows);
+      const match = rows.find(
+        (r) => getAiProvider(r.provider)?.id === provider && r.apiKey,
+      );
+      if (match?.apiKey) {
         creds = {
-          provider: primary.provider || modelCheck.provider,
-          apiKey: primary.apiKey,
-          model: primary.model || modelCheck.model,
-          keyId: primary.id,
+          provider: getAiProvider(match.provider)!.id,
+          apiKey: match.apiKey,
+          model: match.model || modelCheck.model,
+          keyId: match.id,
           fromUserVault: true,
+        };
+      } else if (!formKey) {
+        // Model passed validateModelForSource only if provider was in allow-list;
+        // if the key vanished between list and resolve, treat as missing key.
+        return {
+          ok: false,
+          status: 400,
+          code: "AI_KEY_REQUIRED",
+          error: `ยังไม่มีคีย์สำหรับผู้ให้บริการ ${provider} — บันทึกคีย์ก่อน หรือเลือกโมเดลของผู้ให้บริการที่มีคีย์`,
         };
       }
     } catch {
@@ -286,10 +335,16 @@ async function resolveRouteAiCredentials(
     }
   }
 
-  const provider =
-    getAiProvider(extras?.formProvider)?.id ||
-    getAiProvider(creds.provider)?.id ||
-    modelCheck.provider;
+  // Guest BYOK: form/header key must be used with the validated model provider only.
+  if (!sessionUserId && formKey) {
+    creds = {
+      provider,
+      apiKey: formKey,
+      model: modelCheck.model,
+      fromUserVault: false,
+    };
+  }
+
   const apiKey = String(creds.apiKey || "").trim();
   const model = resolveEffectiveModelForProvider(
     provider,
@@ -298,9 +353,22 @@ async function resolveRouteAiCredentials(
   if (!hasRequestAiKey(provider, apiKey) || !apiKey) {
     return {
       ok: false,
-      status: 401,
-      code: "AI_USER_KEY_MISSING",
+      status: sessionUserId ? 400 : 401,
+      code: sessionUserId ? "AI_KEY_REQUIRED" : "AI_KEY_UNAUTHORIZED",
       error: missingAiCredentialsError(creds),
+    };
+  }
+  // Hard guarantee: never send a key under a mismatched provider id.
+  if (
+    creds.fromUserVault &&
+    getAiProvider(creds.provider)?.id &&
+    getAiProvider(creds.provider)!.id !== provider
+  ) {
+    return {
+      ok: false,
+      status: 400,
+      code: "AI_MODEL_SOURCE_MISMATCH",
+      error: "คีย์ที่บันทึกไว้ไม่ตรงกับผู้ให้บริการของโมเดลที่เลือก",
     };
   }
   if (creds.fromUserVault && creds.keyId && sessionUserId) {
@@ -869,6 +937,7 @@ export function createApi(options: {
     ) {
       return c.json({ error: "ไม่มีสิทธิ์" }, 403);
     }
+    // Error jobs include `code` (e.g. AI_SERVER_KEY_INVALID, AI_KEY_REQUIRED).
     return c.json(job);
   });
 
@@ -929,10 +998,40 @@ export function createApi(options: {
     } catch {
       sessionUserId = null;
     }
-    const { resolveRequestAiCredentials, coalesceAiCredentialsWithSharedEnv } =
+    const { resolveRequestAiCredentials, coalesceAiCredentialsWithSharedEnv, isByokOnly } =
       await import("./ai-config");
     let creds = await resolveRequestAiCredentials(c.req.raw, sessionUserId);
-    creds = coalesceAiCredentialsWithSharedEnv(creds);
+    // BYOK-only (env) or user preference mode=byok with no personal key:
+    // never surface shared server key as connected/keySource=shared.
+    let choiceMode: "server" | "byok" | null = null;
+    let userKeySet = false;
+    if (sessionUserId) {
+      try {
+        const { buildAiKeyChoiceStatus } = await import("./ai-key-choice");
+        const choice = await buildAiKeyChoiceStatus(sessionUserId);
+        choiceMode = choice.mode;
+        userKeySet = choice.userKeySet;
+      } catch {
+        /* ignore */
+      }
+    }
+    const hasPersonalKey =
+      Boolean(creds.fromUserVault && creds.apiKey) ||
+      Boolean(String(getRequestGeminiKey(c.req.raw) || "").trim());
+    const blockSharedForByokChoice =
+      (choiceMode === "byok" && !userKeySet && !hasPersonalKey) ||
+      (isByokOnly() && !hasPersonalKey);
+    if (!blockSharedForByokChoice) {
+      creds = coalesceAiCredentialsWithSharedEnv(creds);
+    } else {
+      // Never surface shared server key as connected in byok mode with no user key.
+      creds = {
+        ...creds,
+        apiKey: hasPersonalKey ? creds.apiKey : "",
+        usedSharedEnvFallback: false,
+        fromUserVault: hasPersonalKey ? creds.fromUserVault : false,
+      };
+    }
     let lastTestAt: string | null = null;
     let lastTestOk: boolean | null = null;
     let lastTestCode: string | null = null;
@@ -967,6 +1066,7 @@ export function createApi(options: {
       lastTestOk,
       lastTestCode,
       lastTestMessage,
+      suppressSharedKey: blockSharedForByokChoice,
     });
     // Never leak filesystem paths on the public status endpoint.
     const { configPath: _drop, ...safe } = status as typeof status & {
@@ -1113,13 +1213,18 @@ export function createApi(options: {
    * Key-choice status for settings + attach gate.
    * Shape: { mode, serverKeyAvailable, userKeySet, userKeyHint? }
    * Never includes system/server key material.
+   * `userKeyHint` is the masked last-4 of the first saved vault key only.
    */
   api.get("/ai/keys/status", async (c) => {
     const gate = await requireSessionUserId(c.req.raw);
     if (!gate.ok) {
       return c.json(
-        { error: gate.error, code: gate.code || "AI_KEY_UNAUTHORIZED" },
-        gate.status,
+        {
+          error: gate.error,
+          // Match other /ai/keys* routes — 401 only means not signed in.
+          code: "AI_KEY_UNAUTHORIZED",
+        },
+        gate.status === 401 ? 401 : gate.status,
       );
     }
     try {
@@ -1136,6 +1241,7 @@ export function createApi(options: {
    * Update saved mode (server|byok). Optional apiKey/provider/label/model
    * upserts the user's own vault key via existing vault helpers.
    * Body: { mode?, apiKey?, provider?, label?, model?, deleteKey?: true }
+   * `deleteKey: true` removes **all** of the user's vault keys (not one row).
    */
   api.put("/ai/keys/status", async (c) => {
     const gate = await requireSessionUserId(c.req.raw);
@@ -1249,8 +1355,8 @@ export function createApi(options: {
 
   /**
    * Models for the attach-page picker, tagged with source server|byok.
-   * Server models only when serverKeyAvailable; BYOK only when userKeySet.
-   * Derived from the live provider catalog — not a hardcoded list.
+   * Server models only when serverKeyAvailable; BYOK models only for providers
+   * the user actually has a saved vault key for (derived from the vault).
    */
   api.get("/ai/keys/models", async (c) => {
     const gate = await requireSessionUserId(c.req.raw);
@@ -1261,11 +1367,14 @@ export function createApi(options: {
       );
     }
     try {
-      const { buildAiKeyChoiceStatus, listAiModelsForChoice } = await import(
-        "./ai-key-choice"
-      );
+      const {
+        buildAiKeyChoiceStatus,
+        listAiModelsForChoice,
+        listUserAiKeyProviders,
+      } = await import("./ai-key-choice");
       const status = await buildAiKeyChoiceStatus(gate.userId);
-      const models = listAiModelsForChoice(status);
+      const userProviders = await listUserAiKeyProviders(gate.userId);
+      const models = listAiModelsForChoice(status, { userProviders });
       return c.json({ models, ...status });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2057,6 +2166,7 @@ export function createApi(options: {
     let clientProvider = "";
     let clientKey = "";
     let clientModel = "";
+    let choiceSource: "server" | "byok" = "byok";
 
     try {
       const form = await c.req.formData();
@@ -2096,6 +2206,7 @@ export function createApi(options: {
       clientProvider = routed.provider;
       clientKey = routed.apiKey;
       clientModel = routed.model;
+      choiceSource = routed.choiceSource;
 
       const fieldsRaw = form.get("fields");
       if (typeof fieldsRaw !== "string") {
@@ -2260,14 +2371,17 @@ export function createApi(options: {
         });
         const { inspectSourceTruncation } = await import("./ai-fill");
         const truncMeta = await inspectSourceTruncation(payloads);
-        const valuesJson = await runWithSavedAiKeyAuthFallback(aiCreds, (effective) =>
-          fillDocxFormValues(skeleton, payloads, {
-            provider: effective.provider || clientProvider,
-            apiKey: effective.apiKey || clientKey,
-            model: effective.model || clientModel,
-            fields,
-            signal: c.req.raw.signal,
-          }),
+        const valuesJson = await runWithSavedAiKeyAuthFallback(
+          aiCreds,
+          (effective) =>
+            fillDocxFormValues(skeleton, payloads, {
+              provider: effective.provider || clientProvider,
+              apiKey: effective.apiKey || clientKey,
+              model: effective.model || clientModel,
+              fields,
+              signal: c.req.raw.signal,
+            }),
+          { allowSharedAuthFallback: choiceSource === "server" },
         );
         const { countFilledValues } = await import("./source-map");
         const fillStats = countFilledValues(valuesJson);
@@ -2543,7 +2657,7 @@ export function createApi(options: {
             error: routed.error,
             ...(routed.code ? { code: routed.code } : {}),
           },
-          routed.status === 401 ? 400 : routed.status,
+          routed.status,
         );
       }
       const {
@@ -2551,6 +2665,7 @@ export function createApi(options: {
         provider: clientProvider,
         apiKey: clientKey,
         model: clientModel,
+        choiceSource,
       } = routed;
       suggestCreds = resolved;
       logProvider = clientProvider;
@@ -2586,15 +2701,18 @@ export function createApi(options: {
       }
 
       const runSuggest = async (signal?: AbortSignal) => {
-        const result = await runWithSavedAiKeyAuthFallback(resolved, (effective) =>
-          suggestTemplateTags(buffer, {
-            provider: effective.provider || clientProvider,
-            apiKey: effective.apiKey || clientKey,
-            model: effective.model || clientModel,
-            filename: file.name,
-            nameLanguage,
-            signal,
-          }),
+        const result = await runWithSavedAiKeyAuthFallback(
+          resolved,
+          (effective) =>
+            suggestTemplateTags(buffer, {
+              provider: effective.provider || clientProvider,
+              apiKey: effective.apiKey || clientKey,
+              model: effective.model || clientModel,
+              filename: file.name,
+              nameLanguage,
+              signal,
+            }),
+          { allowSharedAuthFallback: choiceSource === "server" },
         );
         const warnings: string[] = [];
         if (result.plainText.length > 0 && result.suggestions.length === 0) {
@@ -2771,6 +2889,7 @@ export function createApi(options: {
         provider: clientProvider,
         apiKey: clientKey,
         model: clientModel,
+        choiceSource: batchChoiceSource,
       } = routed;
       batchCreds = headerCreds;
       logProvider = clientProvider;
@@ -3041,6 +3160,7 @@ export function createApi(options: {
                   model: effective.model || clientModel,
                   signal: abortSignal,
                 }),
+              { allowSharedAuthFallback: batchChoiceSource === "server" },
             );
             for (const item of filled) {
               results.push({

@@ -578,11 +578,16 @@ export function coalesceAiCredentialsWithSharedEnv(
 
 /**
  * Run an AI call; if the user's own vault key is rejected (auth only),
- * retry once with DOCX_FORM_CURSOR_API_KEY when configured.
+ * optionally retry once with DOCX_FORM_CURSOR_API_KEY when configured.
+ *
+ * BYOK / `source=byok` callers must pass `{ allowSharedAuthFallback: false }`
+ * so a provider rejection surfaces as an error — never a silent shared-key or
+ * non-AI fallback.
  */
 export async function runWithSavedAiKeyAuthFallback<T>(
   creds: ResolvedRequestAiCredentials,
   run: (effective: RequestAiCredentials) => Promise<T>,
+  opts?: { allowSharedAuthFallback?: boolean },
 ): Promise<T> {
   try {
     return await run({
@@ -594,6 +599,14 @@ export async function runWithSavedAiKeyAuthFallback<T>(
     if (!creds.fromUserVault) throw err;
     const { isAiCredentialAuthError } = await import("./ai-http-errors");
     if (!isAiCredentialAuthError(err)) throw err;
+    if (opts?.allowSharedAuthFallback === false) {
+      throw new Error(
+        formatSavedAiKeyAuthError({
+          keyId: creds.keyId || creds.requestedKeyId,
+          label: creds.keyLabel,
+        }),
+      );
+    }
     const shared = peekSharedCursorEnvApiKey();
     if (!shared) {
       throw new Error(
@@ -751,6 +764,11 @@ export function geminiStatus(opts?: {
   lastTestOk?: boolean | null;
   lastTestCode?: string | null;
   lastTestMessage?: string | null;
+  /**
+   * When true (BYOK-only env, or user mode=byok with no personal key), never
+   * report connected/keySource from a shared server key.
+   */
+  suppressSharedKey?: boolean;
 }) {
   const adminDefaultProvider = adminDefaultProviderFromSettings({
     defaultProvider: opts?.adminDefaultProvider,
@@ -766,8 +784,10 @@ export function geminiStatus(opts?: {
   const requestKey = opts?.requestKey && String(opts.requestKey).trim()
     ? String(opts.requestKey).trim()
     : undefined;
-  const key =
-    provider.apiFamily === "gemini"
+  const suppressShared = Boolean(opts?.suppressSharedKey);
+  const key = suppressShared
+    ? requestKey || undefined
+    : provider.apiFamily === "gemini"
       ? getGeminiApiKey(requestKey)
       : provider.apiFamily === "cursor"
         ? getCursorApiKey(requestKey)
@@ -789,13 +809,17 @@ export function geminiStatus(opts?: {
   const hasFileGemini = hasServerFileGeminiKey();
   const serverKeySources = listConfiguredServerKeySources();
   const fromVault = Boolean(opts?.fromUserVault && key);
-  const usedShared = Boolean(opts?.usedSharedEnvFallback);
+  const usedShared = Boolean(opts?.usedSharedEnvFallback) && !suppressShared;
   let keySource: AiKeySource = "none";
   if (fromVault || (requestKey && !usedShared)) {
     keySource = "user";
-  } else if (key && (usedShared || hasEnvCursor || hasEnvGemini || hasFileGemini)) {
+  } else if (
+    !suppressShared &&
+    key &&
+    (usedShared || hasEnvCursor || hasEnvGemini || hasFileGemini)
+  ) {
     keySource = "shared";
-  } else if (key) {
+  } else if (!suppressShared && key) {
     // Server resolved a key without vault/header — treat as shared.
     keySource = "shared";
   }

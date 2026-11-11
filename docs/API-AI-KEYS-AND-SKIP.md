@@ -133,9 +133,11 @@ Exact non-secret status (never includes system key material):
 | `mode` | Saved preference: `server` (system key) or `byok` (own key) |
 | `serverKeyAvailable` | Shared server key configured and BYOK-only off |
 | `userKeySet` | User has at least one vault key |
-| `userKeyHint` | Optional masked last-4 of **user** key only (`••••1234`) |
+| `userKeyHint` | Optional masked last-4 of the **first** saved user vault key only (`••••1234`) — never the system key |
 
 `canUseAi(status)` → `mode===server` ? `serverKeyAvailable` : `userKeySet`.
+
+Signed-out → **401** + `AI_KEY_UNAUTHORIZED` (same as other `/ai/keys*` routes).
 
 ### `PUT /api/ai/keys/status`
 
@@ -154,14 +156,15 @@ Update command. Body (all optional):
 
 - `mode` → persist preference (`AI_KEY_INVALID_MODE` / `AI_SERVER_KEY_UNAVAILABLE` on bad choice).
 - `apiKey` (+ optional provider/label/model) → create/replace own vault key (live-validated; existing `POST/PUT /api/ai/keys*` still work).
-- `deleteKey: true` → delete all own vault keys.
+- `deleteKey: true` → **deletes all** of the user's vault keys (not a single row).
 - **200** returns the same status shape as GET.
 
 ### `GET /api/ai/keys/models`
 
 Models for the attach picker, derived from the live provider catalog (not a
-hardcoded per-model list). Server models only when `serverKeyAvailable`; BYOK
-models only when `userKeySet`.
+hardcoded per-model list). Server models only when `serverKeyAvailable` (for
+configured server providers). BYOK models are limited to providers the user
+**actually has a saved vault key for** — never the whole catalog.
 
 ```json
 {
@@ -197,9 +200,20 @@ Also echoes the status fields above.
 | `aiProvider` | Optional provider hint |
 
 When `source` is omitted, the saved `mode` from status is used. Server validates
-the model belongs to that source and that the key exists; otherwise **4xx** with
-`AI_SERVER_KEY_UNAVAILABLE`, `AI_USER_KEY_MISSING`, or `AI_MODEL_SOURCE_MISMATCH`.
+the model belongs to that source and that a matching vault key exists for the
+model's provider; otherwise **4xx** with `AI_SERVER_KEY_UNAVAILABLE`,
+`AI_KEY_REQUIRED` (signed-in, missing key — never 401), or
+`AI_MODEL_SOURCE_MISMATCH` (e.g. `source=byok` + OpenAI model when the user only
+has a Google key). **401** is only for not signed in (`AI_KEY_UNAUTHORIZED`).
+BYOK calls never silently fall back to a shared server key or non-AI heuristics
+on provider rejection — the error is returned to the client.
 The credential gate uses the same `canUseAi` rule.
+
+### `GET /api/ai/jobs/:id`
+
+Async AI jobs (`suggest-tags?async=1`, etc.). On `status: "error"`, the payload
+includes both `error` (message) and `code` (e.g. `AI_SERVER_KEY_INVALID`,
+`AI_KEY_REQUIRED`, `AI_PROVIDER_ERROR`).
 
 ---
 
@@ -362,6 +376,10 @@ Shared mapper: `classifyProviderError` in `src/server/ai-http-errors.ts` (one pl
 | Code | HTTP | Meaning |
 |------|------|---------|
 | `AI_KEY_UNAUTHORIZED` | 401 | Not logged in |
+| `AI_KEY_REQUIRED` | 400 | Signed-in user missing a usable key for the chosen source/provider |
+| `AI_MODEL_SOURCE_MISMATCH` | 400 | Model not available for that source / vault provider |
+| `AI_SERVER_KEY_UNAVAILABLE` | 400 | Server key path selected but no shared key configured |
+| `AI_SERVER_KEY_INVALID` | 400 | Shared server key rejected by provider |
 | `AI_KEY_NOT_FOUND` | 404 | Missing or not owned |
 | `AI_KEY_INVALID_ID` | 400 | Bad id format |
 | `AI_KEY_INVALID_PROVIDER` | 400 | Unknown provider |

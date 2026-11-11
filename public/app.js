@@ -9,12 +9,34 @@ import {
   seedListRowsIfEmpty,
   isListRowEmpty,
   collectMissingListValidation,
-  countEmptyRequiredFields,
   shouldShowSkipFirstUseTip,
   buildLayoutLabelMap,
   layoutBlocksToPlainText,
   listDisplayName,
 } from "./ui-labels.js";
+import { openAiKeyDialog } from "./ai-key-dialog.js";
+import {
+  aiKeyAuthHeaders,
+  appendAiKeyRequestFields,
+  mapAiKeyError,
+  mapFillError,
+  maskAiKeyLocal,
+} from "./ai-key-client.js";
+import { canUseAi } from "./ai-key-choice.js";
+import {
+  collectSelfTagsFromLayout,
+  collectSelfTagsFromText,
+  fieldTableLocation,
+  isStackableStaticTable,
+  mergeMissingTextFields,
+  renderCellTemplateHtml,
+} from "./doc-table-fields.js";
+import {
+  bindAiModelPicker,
+  buildAiModelGroups,
+  renderAiModelPickerHtml,
+  resolveModelSource,
+} from "./ai-model-picker.js";
 
 /** @typedef {{ name: string, type: 'text', aliases?: string[] }} TextField */
 /** @typedef {{ name: string, type: 'image', aliases?: string[] }} ImageField */
@@ -69,7 +91,10 @@ function readSkipFirstUseSeen() {
 /** Dark tooltip on the first skip control (mockup item 12) — not a page banner. */
 function renderSkipFirstUseTipBubbleHtml() {
   if (!shouldShowSkipFirstUseTip(readSkipFirstUseSeen())) return "";
-  return `<span class="skip-first-use-tip" role="tooltip" data-skip-first-use-tip>${escapeHtml(UI_LABELS.skipFirstUseTip)}</span>`;
+  return `<span class="skip-first-use-tip" role="tooltip" data-skip-first-use-tip>
+    <span class="skip-first-use-tip-text">${escapeHtml(UI_LABELS.skipFirstUseTip)}</span>
+    <button type="button" class="skip-first-use-tip-dismiss" data-skip-tip-dismiss>${escapeHtml(UI_LABELS.skipFirstUseDismiss)}</button>
+  </span>`;
 }
 
 function clearSkipFirstUseTipNodes() {
@@ -86,16 +111,36 @@ function dismissSkipFirstUseTip() {
 function mountSkipFirstUseTip() {
   clearSkipFirstUseTipNodes();
   if (!shouldShowSkipFirstUseTip(readSkipFirstUseSeen())) return;
-  const firstSkip = app.querySelector(".field-obj .skip, .doc-skip, .skip-opt");
+  const firstSkip = app.querySelector(".doc-skip, .skip-opt");
   if (!firstSkip) return;
   firstSkip.classList.add("has-skip-tip");
   firstSkip.insertAdjacentHTML("beforeend", renderSkipFirstUseTipBubbleHtml());
-  firstSkip.querySelector("[data-skip-first-use-tip]")?.addEventListener(
+  const tip = firstSkip.querySelector("[data-skip-first-use-tip]");
+  tip?.querySelector("[data-skip-tip-dismiss]")?.addEventListener(
     "click",
     (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
       dismissSkipFirstUseTip();
+    },
+    { once: true },
+  );
+  const onOutside = (ev) => {
+    if (!(ev.target instanceof Node)) return;
+    if (tip && tip.contains(ev.target)) return;
+    dismissSkipFirstUseTip();
+    document.removeEventListener("pointerdown", onOutside, true);
+  };
+  document.addEventListener("pointerdown", onOutside, true);
+  tip?.addEventListener(
+    "click",
+    (ev) => {
+      // clicking the bubble body also dismisses
+      if (ev.target instanceof HTMLElement && ev.target.closest("[data-skip-tip-dismiss]")) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      dismissSkipFirstUseTip();
+      document.removeEventListener("pointerdown", onOutside, true);
     },
     { once: true },
   );
@@ -208,14 +253,17 @@ let aiStatus = {
   connected: false,
   models: [],
   defaultModel: "gemini-3.8-flash",
-  effectiveProvider: "",
-  effectiveModel: "",
-  keySource: "",
-  readinessState: "",
-  jobState: "idle",
+  keySource: "none",
+  byok: true,
+  serverKeySources: [],
+  serverAiKeyConfigured: false,
 };
-/** @type {{ generating: boolean, errorMessage: string | null }} */
-let clientStatusPill = { generating: false, errorMessage: null };
+
+/**
+ * Exact FE contract from GET /api/ai/keys/status.
+ * @type {{ mode: 'server'|'byok', serverKeyAvailable: boolean, userKeySet: boolean, userKeyHint?: string } | null}
+ */
+let aiKeyChoiceStatus = null;
 
 /**
  * Entitlement for multi-template caps (from /api/health).
@@ -935,7 +983,7 @@ function renderNamedDraftListHtml(drafts, opts = {}) {
             <span class="draft-list-meta">${escapeHtml(formatDraftDate(d.savedAt))}</span>
           </div>
           <div class="draft-list-actions">
-            <button type="button" class="btn-secondary btn-compact" data-draft-load="${escapeAttr(d.id)}">${escapeHtml(UI_LABELS.dialogLoad)}</button>
+            <button type="button" class="btn-secondary btn-compact" data-draft-load="${escapeAttr(d.id)}">${escapeHtml(UI_LABELS.draftOpenAction)}</button>
             <button type="button" class="btn-ghost btn-compact" data-draft-delete="${escapeAttr(d.id)}">${escapeHtml(UI_LABELS.dialogDelete)}</button>
           </div>
         </li>`,
@@ -1045,7 +1093,7 @@ async function openNamedDraftPicker() {
   overlay.innerHTML = `
     <div class="dialog-card dialog-card-wide">
       <h2 class="dialog-title" id="namedDraftDialogTitle">${escapeHtml(UI_LABELS.loadDraft)}</h2>
-      <p class="dialog-body" id="namedDraftDialogBody">${escapeHtml(UI_LABELS.loadDraftDialogBody)}</p>
+      <p class="dialog-body" id="namedDraftDialogBody">${escapeHtml(UI_LABELS.draftOpenDialogBody)}</p>
       <div id="namedDraftDialogList">${renderNamedDraftListHtml(drafts)}</div>
       <div class="dialog-actions dialog-actions-stack">
         <button type="button" class="btn-ghost" data-draft-close>${escapeHtml(UI_LABELS.dialogClose)}</button>
@@ -1259,12 +1307,12 @@ function wireMobileToolsMenuBanner() {
 /**
  * @param {string} message
  * @param {'error'|'success'|'progress'|'warn'} [kind]
- * @param {{ action?: { label: string, onClick: () => void }, secondaryAction?: { label: string, onClick: () => void }, note?: string, validation?: boolean, items?: string[] }} [opts]
+ * @param {{ action?: { label: string, onClick: () => void }, note?: string, validation?: boolean, items?: string[] }} [opts]
  */
 function showBanner(message, kind = "error", opts = {}) {
   if (!banner) return;
   banner.hidden = !message;
-  banner.classList.remove("success", "progress", "is-validation");
+  banner.classList.remove("success", "progress", "is-validation", "warn");
   validationBannerActive = !!(message && opts.validation);
   if (!message) {
     hideBanner();
@@ -1276,10 +1324,6 @@ function showBanner(message, kind = "error", opts = {}) {
     opts.action?.label
       ? `<button type="button" class="banner-action" data-banner-action>${escapeHtml(opts.action.label)}</button>`
       : "";
-  const secondaryActionBtn =
-    opts.secondaryAction?.label
-      ? `<button type="button" class="banner-action banner-action-secondary" data-banner-action-secondary>${escapeHtml(opts.secondaryAction.label)}</button>`
-      : "";
   const noteHtml =
     opts.note && String(opts.note).trim()
       ? `<span class="banner-note">${escapeHtml(String(opts.note).trim())}</span>`
@@ -1290,29 +1334,39 @@ function showBanner(message, kind = "error", opts = {}) {
   if (kind === "progress") {
     banner.classList.add("progress");
     banner.setAttribute("aria-busy", "true");
-    banner.innerHTML = `<span class="banner-spinner" aria-hidden="true"></span><span class="banner-copy"><span class="banner-msg">${escapeHtml(message)}</span>${noteHtml}</span><span class="banner-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="banner-bar" aria-hidden="true"></span>`;
+    banner.innerHTML = `<span class="banner-spinner" aria-hidden="true"></span><span class="banner-copy"><span class="banner-msg">${escapeHtml(message)}</span>${noteHtml}</span>${actionBtn}<span class="banner-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="banner-bar" aria-hidden="true"></span>`;
   } else if (kind === "success") {
     banner.classList.add("success");
     banner.removeAttribute("aria-busy");
-    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${actionBtn}${secondaryActionBtn}${closeBtn}`;
+    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${actionBtn}${closeBtn}`;
   } else if (kind === "warn") {
+    banner.classList.add("warn");
     banner.removeAttribute("aria-busy");
-    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${noteHtml}${actionBtn}${secondaryActionBtn}${closeBtn}`;
+    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${noteHtml}${actionBtn}${closeBtn}`;
   } else if (opts.validation && validationItems.length) {
     banner.classList.add("is-validation");
     banner.removeAttribute("aria-busy");
     const model = formatValidationBannerModel(validationItems);
     const list = model.items
-      .map((item) => `<li>${escapeHtml(item)}</li>`)
+      .map(
+        (item, idx) =>
+          `<li><button type="button" class="banner-validation-jump" data-validation-jump="${idx}">${escapeHtml(item)}</button></li>`,
+      )
       .join("");
     banner.innerHTML = `<div class="banner-validation">
       <p class="banner-validation-title">${escapeHtml(model.title)}</p>
       <ul class="banner-validation-list">${list}</ul>
       <p class="banner-validation-hint">${escapeHtml(model.hint)}</p>
-    </div>${actionBtn}${secondaryActionBtn}${closeBtn}`;
+    </div>${actionBtn}${closeBtn}`;
+    banner.querySelectorAll("[data-validation-jump]").forEach((btn) => {
+      btn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        scrollToFirstFieldError();
+      });
+    });
   } else {
     banner.removeAttribute("aria-busy");
-    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${actionBtn}${secondaryActionBtn}${closeBtn}`;
+    banner.innerHTML = `<span class="banner-msg">${escapeHtml(message)}</span>${actionBtn}${closeBtn}`;
   }
   banner.querySelector("[data-banner-close]")?.addEventListener("click", (ev) => {
     ev.preventDefault();
@@ -1322,11 +1376,6 @@ function showBanner(message, kind = "error", opts = {}) {
     ev.preventDefault();
     opts.action?.onClick?.();
   });
-  banner.querySelector("[data-banner-action-secondary]")?.addEventListener("click", (ev) => {
-    ev.preventDefault();
-    opts.secondaryAction?.onClick?.();
-  });
-  syncStatusPill();
   // Only scroll for errors — success/progress must not jump the viewport.
   if (kind === "error") {
     banner.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -1457,9 +1506,15 @@ function askDialog(opts) {
       : "";
 
     const selectOpts = opts.select?.options || [];
+    const selectGroups = Array.isArray(opts.select?.groups)
+      ? opts.select.groups
+      : null;
     const selectValue = opts.select?.value || selectOpts[0]?.id || "";
     const allowCustom = opts.select ? opts.select.allowCustom !== false : false;
-    const knownIds = new Set(selectOpts.map((o) => o.id));
+    const flatFromGroups = selectGroups
+      ? selectGroups.flatMap((g) => g.options || [])
+      : selectOpts;
+    const knownIds = new Set(flatFromGroups.map((o) => o.id));
     const isCustom = allowCustom && selectValue && !knownIds.has(selectValue);
     const optionsHtml = selectOpts
       .map(
@@ -1468,7 +1523,16 @@ function askDialog(opts) {
       )
       .join("");
     const selectHtml = opts.select
-      ? `<label class="dialog-input-label" for="dialogSelect">${escapeHtml(opts.select.label || "โมเดล")}
+      ? selectGroups
+        ? renderAiModelPickerHtml({
+            groups: selectGroups,
+            selectedId: selectValue,
+            label: opts.select.label || "โมเดล",
+            selectId: "dialogSelect",
+            customInputId: "dialogCustomModel",
+            allowCustom,
+          })
+        : `<label class="dialog-input-label" for="dialogSelect">${escapeHtml(opts.select.label || "โมเดล")}
           <select id="dialogSelect" class="dialog-input dialog-select">
             ${optionsHtml}
             ${allowCustom ? `<option value="__custom__" ${isCustom ? "selected" : ""}>อื่นๆ (พิมพ์เอง)…</option>` : ""}
@@ -1534,11 +1598,28 @@ function askDialog(opts) {
       const select = /** @type {HTMLSelectElement | null} */ (overlay.querySelector("#dialogSelect"));
       const custom = /** @type {HTMLInputElement | null} */ (overlay.querySelector("#dialogCustomModel"));
       const check = /** @type {HTMLInputElement | null} */ (overlay.querySelector("#dialogCheck"));
+      const badge = /** @type {HTMLElement | null} */ (
+        overlay.querySelector("#dialogSelectSource")
+      );
       let model = select?.value || "";
-      if (model === "__custom__") model = String(custom?.value || "").trim();
+      let source = "byok";
+      if (model === "__custom__") {
+        model = String(custom?.value || "").trim();
+        source = "byok";
+      } else if (selectGroups) {
+        const opt = select?.selectedOptions?.[0];
+        const fromOpt = opt?.getAttribute("data-source");
+        source =
+          fromOpt === "server" || fromOpt === "byok"
+            ? fromOpt
+            : badge?.dataset?.source === "server"
+              ? "server"
+              : resolveModelSource(selectGroups, model);
+      }
       return {
         value: input?.value || "",
         model,
+        source,
         checked: check ? !!check.checked : false,
       };
     };
@@ -1561,6 +1642,12 @@ function askDialog(opts) {
     const selectEl = /** @type {HTMLSelectElement | null} */ (overlay.querySelector("#dialogSelect"));
     const customWrap = overlay.querySelector("#dialogCustomModelWrap");
     const customEl = /** @type {HTMLInputElement | null} */ (overlay.querySelector("#dialogCustomModel"));
+    if (selectGroups) {
+      bindAiModelPicker(overlay, selectGroups, {
+        selectId: "dialogSelect",
+        customInputId: "dialogCustomModel",
+      });
+    }
     const linkWrap = overlay.querySelector("#dialogLinkWrap");
     const linkEl = /** @type {HTMLAnchorElement | null} */ (overlay.querySelector("#dialogLink"));
     const syncSelectLink = () => {
@@ -1596,6 +1683,7 @@ function askDialog(opts) {
               id: a.id,
               value: fields.value,
               model: fields.model,
+              source: fields.source,
               checked: fields.checked,
             });
             return;
@@ -1632,21 +1720,52 @@ function askDialog(opts) {
   });
 }
 
-/** Toast after download — does not block the file save. */
-function offerClearFieldsAfterDownload(onClear) {
-  showBanner(UI_LABELS.postCreateToast, "success", {
+/** @returns {Promise<'clear' | 'keep' | 'abort'>} */
+function askClearAfterCreate() {
+  // Kept for multi-create paths; single create downloads first then toasts.
+  return askDialog({
+    title: "ล้างช่องหลังสร้างเอกสารไหม?",
+    body: "จะสร้างและดาวน์โหลดไฟล์ก่อน จากนั้นเลือกได้ว่าจะล้างช่องที่กรอกไว้หรือเก็บค่าไว้กรอกต่อ (เทมเพลตยังอยู่)",
+    actions: [
+      { id: "clear", label: "สร้างและล้างช่อง", kind: "primary" },
+      { id: "keep", label: "สร้างแต่เก็บค่าไว้", kind: "secondary" },
+      { id: "abort", label: "ยกเลิก", kind: "ghost" },
+    ],
+  });
+}
+
+/** Post-download toast: เก็บไว้ / ล้างช่อง (no blocking modal before file). */
+function toastClearAfterDownload() {
+  showBanner(UI_LABELS.generateClearToast, "success", {
     action: {
-      label: UI_LABELS.postCreateClear,
+      label: UI_LABELS.generateClearWipe,
       onClick: () => {
-        onClear();
-        hideBanner();
+        clearFilledFields();
+        persistActiveSlot();
+        renderForm();
+        showBanner("ล้างช่องเรียบร้อย", "success");
+        setTimeout(() => showBanner(""), 2200);
       },
     },
-    secondaryAction: {
-      label: UI_LABELS.postCreateKeep,
-      onClick: () => hideBanner(),
-    },
   });
+  // Secondary keep is implied by dismissing / timeout.
+  const keepBtn = document.createElement("button");
+  keepBtn.type = "button";
+  keepBtn.className = "banner-action";
+  keepBtn.dataset.bannerKeep = "1";
+  keepBtn.textContent = UI_LABELS.generateClearKeep;
+  banner?.querySelector("[data-banner-action]")?.insertAdjacentElement("beforebegin", keepBtn);
+  keepBtn.addEventListener("click", () => {
+    persistActiveSlot();
+    scheduleSaveDraft();
+    showBanner("เก็บค่าที่กรอกไว้แล้ว", "success");
+    setTimeout(() => showBanner(""), 2200);
+  });
+  setTimeout(() => {
+    if (banner && !banner.hidden && banner.textContent?.includes("ล้างช่อง")) {
+      /* leave until user acts or closes */
+    }
+  }, 0);
 }
 
 /** @returns {Promise<'one' | 'all' | 'abort'>} */
@@ -1740,7 +1859,6 @@ function markFieldError(inputSelector, name, listRef = null) {
   input.setAttribute("aria-invalid", "true");
   const field =
     input.closest(".field") ||
-    input.closest(".field-obj") ||
     input.closest(".doc-blank-wrap") ||
     input.closest(".doc-list") ||
     input.parentElement;
@@ -1787,7 +1905,6 @@ function markFieldErrorMessage(inputSelector, name, message, listRef = null) {
   if (!input) return;
   const field =
     input.closest(".field") ||
-    input.closest(".field-obj") ||
     input.closest(".doc-blank-wrap") ||
     input.closest(".doc-list") ||
     input.parentElement;
@@ -1815,10 +1932,10 @@ function validateBeforeSubmit() {
     if (f.type === "text" || f.type === "email") {
       const raw = String(state.values[f.name] ?? "").trim();
       if (!raw) {
-        missing.push(formatMissingFieldLabel(fieldLabel));
+        missing.push(formatMissingFieldLabel(fieldLabel, undefined, f.name));
         markFieldError(`#f-${cssId(f.name)}`, f.name);
       } else if (isEmailTypedField(f.name, f) && !isValidEmailValue(raw)) {
-        missing.push(formatInvalidEmailMissing(fieldLabel));
+        missing.push(formatInvalidEmailMissing(fieldLabel, f.name));
         markFieldErrorMessage(
           `#f-${cssId(f.name)}`,
           f.name,
@@ -1829,7 +1946,7 @@ function validateBeforeSubmit() {
       // always true/false — no required check
     } else if (f.type === "image") {
       if (!state.images[f.name]) {
-        missing.push(formatMissingFieldLabel(fieldLabel));
+        missing.push(formatMissingFieldLabel(fieldLabel, undefined, f.name));
         const wrap = app.querySelector(`[data-image-field="${cssAttrSelector(f.name)}"]`);
         if (wrap) {
           wrap.classList.add("has-error");
@@ -1842,7 +1959,6 @@ function validateBeforeSubmit() {
         }
       }
     } else if (f.type === "list") {
-      if (state.skip[f.name]) continue;
       const rows = state.values[f.name] || [];
       const listResult = collectMissingListValidation({
         fieldLabel,
@@ -1850,7 +1966,6 @@ function validateBeforeSubmit() {
         rows,
         rowSkip: state.rowSkip[f.name],
         labelMap,
-        listSkipped: !!state.skip[f.name],
         isEmailField: isEmailTypedField,
         emailInvalid: (raw) => !isValidEmailValue(raw),
       });
@@ -1894,7 +2009,6 @@ function validateBeforeSubmit() {
   }
 
   if (missing.length) scrollToFirstFieldError();
-  syncStatusPill();
   return missing;
 }
 
@@ -1984,7 +2098,7 @@ function renderMultiTabs() {
   return `<div class="multi-tabs" role="tablist" aria-label="เทมเพลต">
     <span class="multi-tabs-label">${escapeHtml(label)}</span>
     ${tabs}
-    <button type="button" class="multi-tab multi-tab-add" id="addTemplateTabBtn" title="${escapeAttr(addTemplateBtnTitle())}">+ เพิ่ม</button>
+    <button type="button" class="multi-tab multi-tab-add" id="addTemplateTabBtn" title="${escapeAttr(addTemplateBtnTitle())}">${escapeHtml(UI_LABELS.addTemplateBtn)}</button>
   </div>`;
 }
 
@@ -2041,34 +2155,23 @@ function clearFilledFields() {
 function skipCheckbox(fieldName, checked) {
   const id = `skip-${cssId(fieldName)}`;
   return `
-    <label class="skip skip-opt" for="${id}" title="${escapeAttr(UI_LABELS.skipTitle)}">
-      <input type="checkbox" id="${id}" data-skip-field="${escapeAttr(fieldName)}" ${checked ? "checked" : ""} aria-label="${escapeAttr(UI_LABELS.skipFieldAria)}" />
-      <span class="full">${escapeHtml(UI_LABELS.skip)}</span>
+    <label class="skip-opt skip-opt-field" for="${id}" title="${escapeAttr(UI_LABELS.skipTitle)}">
+      <input type="checkbox" id="${id}" data-skip-field="${escapeAttr(fieldName)}" ${checked ? "checked" : ""} aria-label="${escapeAttr(UI_LABELS.skipTitle)}" />
+      <span class="skip-opt-label">${escapeHtml(UI_LABELS.skip)}</span>
     </label>`;
-}
-
-/**
- * Merged field-object skip control (design-form-v2).
- * @param {string} skipAttrs raw attributes for the checkbox (data-skip-*)
- * @param {boolean} checked
- */
-function renderDocFieldSkipHtml(skipAttrs, checked) {
-  return `<label class="skip" title="${escapeAttr(UI_LABELS.skipTitle)}">
-    <input type="checkbox" ${skipAttrs} ${checked ? "checked" : ""} aria-label="${escapeAttr(UI_LABELS.skipFieldAria)}" />
-    <span class="full">${escapeHtml(UI_LABELS.skip)}</span>
-  </label>`;
 }
 
 function rowSkipCheckbox(listName, rowIdx, itemName, checked) {
   const id = `skip-${cssId(listName)}-${rowIdx}-${cssId(itemName)}`;
   return `
-    <label class="skip-opt skip-opt-sm" for="${id}" title="${escapeAttr(UI_LABELS.skipTitle)}">
+    <label class="skip-opt skip-opt-sm skip-opt-field" for="${id}" title="${escapeAttr(UI_LABELS.skipTitle)}">
       <input type="checkbox" id="${id}"
         data-skip-list="${escapeAttr(listName)}"
         data-skip-row="${rowIdx}"
         data-skip-item="${escapeAttr(itemName)}"
-        ${checked ? "checked" : ""} />
-      ${escapeHtml(UI_LABELS.skip)}
+        ${checked ? "checked" : ""}
+        aria-label="${escapeAttr(UI_LABELS.skipTitle)}" />
+      <span class="skip-opt-label">${escapeHtml(UI_LABELS.skip)}</span>
     </label>`;
 }
 
@@ -2090,7 +2193,13 @@ function ensureRowSkip(listName, rowCount, itemFields) {
 }
 
 function setCreditsVersion(version) {
-  const label = version ? `v${String(version).replace(/^v/i, "")}` : "v…";
+  const raw = String(version || "").trim();
+  // Short git SHA from /api/entitlement — do not force a "v" prefix.
+  const label = !raw
+    ? "v…"
+    : /^[0-9a-f]{7,40}$/i.test(raw)
+      ? raw.slice(0, 7).toLowerCase()
+      : `v${raw.replace(/^v/i, "")}`;
   const appVer = document.getElementById("appVersion");
   const creditsVer = document.getElementById("creditsVersion");
   if (appVer) appVer.textContent = label;
@@ -2099,6 +2208,67 @@ function setCreditsVersion(version) {
 
 const AI_KEY_SS = "docx-form-web:geminiKey";
 const AI_MODEL_SS = "docx-form-web:geminiModel";
+/** Selected model group for AI multipart `source` (server | byok). */
+const AI_MODEL_SOURCE_SS = "docx-form-web:aiModelSource";
+
+function getAiRequestSource() {
+  try {
+    const s = String(sessionStorage.getItem(AI_MODEL_SOURCE_SS) || "").trim();
+    if (s === "server" || s === "byok") return s;
+  } catch {
+    /* private mode */
+  }
+  if (aiStatus?.mode === "server") return "server";
+  if (
+    (aiStatus?.keySource === "shared" || aiStatus?.serverAiKeyConfigured) &&
+    !getClientAiKey()
+  ) {
+    return "server";
+  }
+  return "byok";
+}
+
+function setAiRequestSource(source) {
+  const s = source === "server" ? "server" : "byok";
+  try {
+    sessionStorage.setItem(AI_MODEL_SOURCE_SS, s);
+  } catch {
+    /* private mode */
+  }
+}
+
+/**
+ * Show AI feature errors mapped by stable `code` (not raw text).
+ * @param {{ error?: string, code?: string, message?: string } | null | undefined} data
+ * @param {number} [status]
+ */
+function showAiApiError(data, status = 0) {
+  const code = String(data?.code || "").trim();
+  const msg = mapAiKeyError(data, status);
+  if (status === 401 || code === "AI_KEY_UNAUTHORIZED") {
+    showBanner(msg || "เซสชันหมดอายุ — กรุณาเข้าสู่ระบบใหม่", "error", {
+      action: {
+        label: "เข้าสู่ระบบ",
+        onClick: () => {
+          window.location.assign("/login");
+        },
+      },
+    });
+    return;
+  }
+  if (code === "AI_KEY_REQUIRED") {
+    showBanner(msg || "ต้องตั้งค่าคีย์ AI ก่อน", "error", {
+      action: {
+        label: "ตั้งค่าคีย์",
+        onClick: () => {
+          window.location.assign("/account#account-ai-keys");
+        },
+      },
+    });
+    return;
+  }
+  showBanner(msg || data?.error || "คำขอ AI ไม่สำเร็จ");
+}
 const AI_VAULT_LS = "docx-form-web:aiVault:v1";
 /** Tagger AI draft: variable-name language (`th` | `en`). Default Thai. */
 const TAGGER_NAME_LANG_SS = "docx-form-web:taggerNameLang";
@@ -2172,7 +2342,7 @@ function readAiVault() {
       if (parsed && Array.isArray(parsed.entries)) {
         return {
           entries: parsed.entries.filter(
-            (e) => e && e.id && e.provider && e.apiKey,
+            (e) => e && e.id && e.provider && (e.apiKey || e.maskedKey || e.storeOnServer),
           ),
           activeId: parsed.activeId || null,
         };
@@ -2244,6 +2414,45 @@ function hasClientAiCredentials() {
   if (!e) return false;
   if (String(e.apiKey || "").trim()) return true;
   return !!(e.storeOnServer && e.id && aiUserLoggedIn);
+}
+
+/**
+ * Shared/server key ready from /api/ai/status (and optional health flag).
+ * Driven by server config state — not a hardcoded entitlement flag.
+ */
+function hasSharedServerAiCredentials() {
+  if (aiKeyChoiceStatus?.serverKeyAvailable) return true;
+  if (aiStatus.keySource === "shared" && aiStatus.connected) return true;
+  if (
+    Array.isArray(aiStatus.serverKeySources) &&
+    aiStatus.serverKeySources.length > 0 &&
+    aiStatus.connected
+  ) {
+    return true;
+  }
+  // BYOK-only off + server reported connected (shared env/DB key).
+  if (aiStatus.byok === false && aiStatus.connected) return true;
+  if (aiStatus.serverAiKeyConfigured === true && aiStatus.connected) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Attach / AI-fill gate — same rule as server `canUseAi`.
+ * When status is loaded, mode decides server vs own key.
+ * Local/unsynced plaintext still counts as own key for byok mode.
+ * Guests / before status fetch: personal key or shared-server fallback.
+ */
+function hasUsableAiCredentials() {
+  if (aiKeyChoiceStatus) {
+    if (canUseAi(aiKeyChoiceStatus)) return true;
+    if (aiKeyChoiceStatus.mode === "byok" && hasClientAiCredentials()) {
+      return true;
+    }
+    return false;
+  }
+  return hasClientAiCredentials() || hasSharedServerAiCredentials();
 }
 
 function getClientAiModel() {
@@ -2367,17 +2576,29 @@ async function pullServerAiKeys() {
     const res = await fetch("/api/ai/keys", { credentials: "include" });
     if (res.status === 401) {
       aiUserLoggedIn = false;
+      try {
+        const errBody = await res.clone().json().catch(() => ({}));
+        if (errBody?.code === "AUTH_REQUIRED" || errBody?.code === "AI_KEY_UNAUTHORIZED") {
+          const next = encodeURIComponent(
+            `${window.location.pathname}${window.location.search}` || "/",
+          );
+          window.location.assign(`/login?next=${next}`);
+          return;
+        }
+      } catch {
+        /* ignore */
+      }
       return;
     }
     if (!res.ok) return;
     const data = await res.json().catch(() => ({}));
     const remote = Array.isArray(data.entries) ? data.entries : [];
-    if (!remote.length) return;
     const vault = readAiVault();
-    const byId = new Map(vault.entries.map((e) => [e.id, e]));
+    const localOnly = vault.entries.filter((e) => !e.storeOnServer);
+    const byId = new Map();
     for (const r of remote) {
       if (!r?.id) continue;
-      const existing = byId.get(String(r.id));
+      const existing = vault.entries.find((e) => e.id === String(r.id));
       // Server no longer returns plaintext — keep local secret if we already have it.
       const next = {
         id: String(r.id),
@@ -2386,14 +2607,16 @@ async function pullServerAiKeys() {
         apiKey: existing?.apiKey || "",
         model: String(r.model || existing?.model || ""),
         storeOnServer: true,
+        hasKey: r.hasKey !== false,
         // hasKey: server has ciphertext; never expect plaintext in GET.
         maskedKey: String(r.maskedKey || existing?.maskedKey || "") ||
           (r.hasKey ? "••••" : ""),
       };
       byId.set(next.id, next);
     }
-    vault.entries = [...byId.values()];
-    if (!vault.activeId || !byId.has(vault.activeId)) {
+    // Drop stale server-backed entries that GET no longer returns (F31).
+    vault.entries = [...localOnly, ...byId.values()];
+    if (!vault.activeId || !vault.entries.some((e) => e.id === vault.activeId)) {
       vault.activeId = vault.entries[0]?.id || null;
     }
     writeAiVault(vault);
@@ -2440,10 +2663,7 @@ async function deleteServerAiKey(id) {
 }
 
 function maskClientKey(key) {
-  const k = String(key || "").trim();
-  if (!k) return "••••";
-  if (k.length <= 4) return "••••";
-  return `••••…${k.slice(-4)}`;
+  return maskAiKeyLocal(key);
 }
 
 /** Display mask for vault rows — prefer server maskedKey when plaintext is absent. */
@@ -2453,29 +2673,9 @@ function maskAiEntry(entry) {
   return maskClientKey(entry.apiKey);
 }
 
-/** Headers so the server uses THIS user's key for the request only (not stored server-side). */
+/** Headers so the server uses THIS user's key — vault id only when synced. */
 function aiAuthHeaders(extra = {}) {
-  /** @type {Record<string, string>} */
-  const h = { ...extra };
-  const entry = getActiveAiEntry();
-  if (!entry) return h;
-  const key = String(entry.apiKey || "").trim();
-  const model = String(entry.model || "").trim();
-  const provider = String(entry.provider || "google").trim();
-  // Prefer vault id so the server can use the encrypted copy (no plaintext round-trip).
-  if (entry.storeOnServer && entry.id && aiUserLoggedIn) {
-    h["X-Ai-Key-Id"] = String(entry.id);
-  }
-  if (key) {
-    h["X-Ai-Api-Key"] = key;
-    h["X-Gemini-Api-Key"] = key; // legacy
-  }
-  if (model) {
-    h["X-Ai-Model"] = model;
-    h["X-Gemini-Model"] = model;
-  }
-  if (provider) h["X-Ai-Provider"] = provider;
-  return h;
+  return aiKeyAuthHeaders(getActiveAiEntry(), { loggedIn: aiUserLoggedIn }, extra);
 }
 
 function applyAiStatus(data) {
@@ -2489,8 +2689,14 @@ function applyAiStatus(data) {
     aiProvidersCatalog = data.providers;
   }
   aiStatus = {
-    connected: !!clientKey || hasVaultRef || !!data.connected,
-    maskedKey: entry ? maskAiEntry(entry) : data.maskedKey || null,
+    // When BYOK-only is off, trust server connected / keySource=shared.
+    // Quotas stay on /api/entitlement (not a plan gate on the shared key).
+    connected:
+      !!clientKey ||
+      hasVaultRef ||
+      hasClientAiCredentials() ||
+      !!data.connected,
+    maskedKey: entry ? maskAiEntry(entry) : null,
     model:
       clientModel ||
       data.model ||
@@ -2504,117 +2710,32 @@ function applyAiStatus(data) {
     byok: data.byok !== false,
     provider,
     effectiveProvider: data.effectiveProvider || provider,
-    effectiveModel:
-      data.effectiveModel ||
-      clientModel ||
-      data.model ||
-      data.defaultModel ||
-      "",
-    keySource: typeof data.keySource === "string" ? data.keySource : "",
-    readinessState:
-      typeof data.readinessState === "string" ? data.readinessState : "",
-    jobState: typeof data.jobState === "string" ? data.jobState : "idle",
+    effectiveModel: data.effectiveModel || data.model || clientModel || "",
     providerLabel:
       data.effectiveProviderLabel ||
       data.providerLabel ||
-      providerLabel(data.effectiveProvider || provider),
+      providerLabel(provider),
     entryLabel: entry?.label || "",
     providers: aiProvidersCatalog,
+    keySource:
+      clientKey || hasVaultRef
+        ? "user"
+        : data.keySource === "user" ||
+            data.keySource === "shared" ||
+            data.keySource === "none"
+          ? data.keySource
+          : data.connected
+            ? "shared"
+            : "none",
+    serverKeySources: Array.isArray(data.serverKeySources)
+      ? data.serverKeySources
+      : aiStatus.serverKeySources || [],
+    serverAiKeyConfigured:
+      typeof data.serverAiKeyConfigured === "boolean"
+        ? data.serverAiKeyConfigured
+        : aiStatus.serverAiKeyConfigured,
+    usedSharedEnvFallback: Boolean(data.usedSharedEnvFallback),
   };
-  syncStatusPill();
-}
-
-function normalizeStatusToken(value) {
-  return String(value || "")
-    .trim()
-    .toLowerCase();
-}
-
-function isReadinessErrorState(readinessState) {
-  const s = normalizeStatusToken(readinessState);
-  return s === "error" || s === "failed" || s === "unavailable";
-}
-
-function isReadinessReadyState(readinessState) {
-  return normalizeStatusToken(readinessState) === "ready";
-}
-
-function isJobRunningState(jobState) {
-  const s = normalizeStatusToken(jobState);
-  return s === "running" || s === "active" || s === "busy";
-}
-
-/** Provider / model suffix for the header pill (from /api/ai/status). */
-function aiStatusDetailSuffix() {
-  const prov =
-    aiStatus.providerLabel ||
-    providerLabel(aiStatus.effectiveProvider || aiStatus.provider || "");
-  const model = String(
-    aiStatus.effectiveModel || aiStatus.model || "",
-  ).trim();
-  const parts = [prov, model].filter(Boolean);
-  return parts.length ? ` · ${parts.join(" · ")}` : "";
-}
-
-function emptyFieldCountForActiveForm() {
-  if (!state.file || !state.fields?.length) return 0;
-  return countEmptyRequiredFields({
-    fields: state.fields,
-    values: state.values,
-    images: state.images,
-    skip: state.skip,
-    rowSkip: state.rowSkip,
-    labelMap: currentFieldLabelMap(),
-    isEmailField: isEmailTypedField,
-    emailInvalid: (raw) => !isValidEmailValue(raw),
-  });
-}
-
-function syncStatusPill() {
-  if (!statusText) return;
-  let base = UI_LABELS.statusReady;
-  let ok = true;
-  let bad = false;
-  let withDetail = true;
-
-  const readiness = aiStatus.readinessState;
-  const job = aiStatus.jobState;
-
-  if (clientStatusPill.errorMessage || isReadinessErrorState(readiness)) {
-    base = UI_LABELS.statusError;
-    ok = false;
-    bad = true;
-    withDetail = false;
-  } else if (isJobRunningState(job) || clientStatusPill.generating) {
-    base = UI_LABELS.statusGenerating;
-    withDetail = true;
-  } else {
-    const empty = emptyFieldCountForActiveForm();
-    if (empty > 0) {
-      base = UI_LABELS.statusEmptyFields(empty);
-      withDetail = false;
-    } else if (
-      isReadinessReadyState(readiness) &&
-      !isJobRunningState(job) &&
-      (aiStatus.connected || normalizeStatusToken(readiness) === "ready")
-    ) {
-      base = UI_LABELS.statusReady;
-      withDetail = true;
-    } else if (normalizeStatusToken(readiness) === "needs_key") {
-      base = UI_LABELS.statusNeedsKey;
-      withDetail = true;
-    } else if (!aiStatus.connected && !hasClientAiCredentials()) {
-      base = UI_LABELS.statusNeedsKey;
-      withDetail = false;
-    }
-  }
-
-  statusText.textContent =
-    withDetail && !bad ? `${base}${aiStatusDetailSuffix()}` : base;
-  if (statusDot) {
-    statusDot.classList.toggle("ok", ok);
-    statusDot.classList.toggle("bad", bad);
-  }
 }
 
 /** @type {AbortController|null} */
@@ -2643,15 +2764,27 @@ async function pollAiJobResult(jobId, { signal, onProgress } = {}) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      throw new Error(data.error || "ติดตามงาน AI ไม่สำเร็จ");
+      const err = new Error(
+        mapAiKeyError(data, res.status) || data.error || "ติดตามงาน AI ไม่สำเร็จ",
+      );
+      err.code = data.code;
+      err.status = res.status;
+      throw err;
     }
     if (onProgress && data.progress) onProgress(data.progress);
     if (data.status === "done") return data.result ?? data;
     if (data.status === "error") {
-      throw new Error(data.error || "งาน AI ล้มเหลว");
+      const err = new Error(
+        mapAiKeyError(data, 500) || data.error || "งาน AI ล้มเหลว",
+      );
+      err.code = data.code;
+      err.status = 500;
+      throw err;
     }
     if (data.status === "cancelled") {
-      throw new Error(data.error || "ยกเลิกแล้ว");
+      const err = new Error(data.error || "ยกเลิกแล้ว");
+      err.code = data.code;
+      throw err;
     }
     await sleepMs(1500);
   }
@@ -2667,7 +2800,12 @@ async function postSuggestTagsAsync(fd, { signal, onProgress } = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.error || "AI ดราฟตัวแปรไม่สำเร็จ");
+    const err = new Error(
+      mapAiKeyError(data, res.status) || data.error || "AI ดราฟตัวแปรไม่สำเร็จ",
+    );
+    err.code = data.code;
+    err.status = res.status;
+    throw err;
   }
   if (data.jobId) {
     return pollAiJobResult(data.jobId, { signal, onProgress });
@@ -2687,6 +2825,40 @@ async function ensureAiProviders() {
   return aiProvidersCatalog;
 }
 
+async function refreshAiKeyChoiceStatus() {
+  if (!aiUserLoggedIn) {
+    aiKeyChoiceStatus = null;
+    return null;
+  }
+  try {
+    const res = await fetch("/api/ai/keys/status", {
+      credentials: "include",
+      headers: aiAuthHeaders(),
+    });
+    if (!res.ok) {
+      if (res.status === 401) aiKeyChoiceStatus = null;
+      return aiKeyChoiceStatus;
+    }
+    const data = await res.json().catch(() => null);
+    if (
+      data &&
+      (data.mode === "server" || data.mode === "byok") &&
+      typeof data.serverKeyAvailable === "boolean" &&
+      typeof data.userKeySet === "boolean"
+    ) {
+      aiKeyChoiceStatus = {
+        mode: data.mode,
+        serverKeyAvailable: data.serverKeyAvailable,
+        userKeySet: data.userKeySet,
+        ...(data.userKeyHint ? { userKeyHint: String(data.userKeyHint) } : {}),
+      };
+    }
+  } catch {
+    /* keep previous */
+  }
+  return aiKeyChoiceStatus;
+}
+
 async function refreshAiStatus() {
   try {
     await ensureAiProviders();
@@ -2694,6 +2866,7 @@ async function refreshAiStatus() {
     if (!res.ok) return;
     const data = await res.json().catch(() => ({}));
     applyAiStatus(data);
+    await refreshAiKeyChoiceStatus();
   } catch {
     /* ignore */
   }
@@ -2714,19 +2887,19 @@ function canAddAiKey() {
 
 async function explainAiKeyQuota() {
   const choice = await askDialog({
-    title: "เพิ่มคีย์ได้เมื่อเป็นแผนจ่ายแล้ว",
-    body:
-      `บัญชี${planQuotaLabel()}เก็บ AI key ได้ ${FREE_MAX_AI_KEYS} อัน\n` +
-      `ถ้าต้องการเก็บหลายคีย์ (หลายเจ้า / สลับใช้) ให้อัปเกรดเป็นจ่ายแล้วที่หน้าบัญชี หรือให้ผู้ดูแลตั้งแผนให้`,
+    title: UI_LABELS.addKeyUpsellTitle,
+    body: aiUserLoggedIn
+      ? UI_LABELS.addKeyUpsellBodyLoggedIn
+      : UI_LABELS.addKeyUpsellBodyLoggedOut,
     actions: [
       { id: "ok", label: "เข้าใจแล้ว", kind: "primary" },
-      { id: "account", label: "ไปหน้าบัญชี", kind: "secondary" },
+      { id: "account", label: UI_LABELS.addKeyUpsellAccount, kind: "secondary" },
     ],
   });
   if (choice === "account") {
     // Hard nav — Next soft router is unavailable from this vanilla app.js shell.
     // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- intentional
-    window.location.assign("/account");
+    window.location.assign(aiUserLoggedIn ? "/account" : "/login?next=%2Faccount");
   }
 }
 
@@ -2895,6 +3068,24 @@ async function promptAddAiKey() {
     setTimeout(() => showBanner(""), 5200);
   }
 
+  const modelGroups = buildAiModelGroups({
+    serverKeyAvailable: aiStatus.serverAiKeyConfigured === true || aiStatus.keySource === "shared",
+    serverKeyAvailabilityKnown:
+      typeof aiStatus.serverAiKeyConfigured === "boolean" ||
+      aiStatus.keySource === "shared" ||
+      aiStatus.keySource === "none",
+    userKeySet: true, // user is actively adding a BYOK key in this flow
+    serverModels: Array.isArray(aiStatus.models)
+      ? aiStatus.models
+          .filter((m) => m?.source === "server" || (!m?.source && aiStatus.keySource === "shared"))
+          .map((m) => ({ id: m.id, label: m.label || m.id, source: "server" }))
+      : [],
+    byokModels: (live.models || []).map((m) => ({
+      id: m.id,
+      label: m.label || m.id,
+      source: "byok",
+    })),
+  });
   const modelPick = await askDialog({
     title: `เลือกโมเดล · ${def.label}`,
     body: !formOk
@@ -2908,6 +3099,7 @@ async function promptAddAiKey() {
       label: "โมเดล",
       value: live.defaultModel || live.models[0]?.id || def.defaultModel || "",
       options: live.models,
+      groups: modelGroups,
     },
     actions: [
       {
@@ -2928,6 +3120,9 @@ async function promptAddAiKey() {
     showBanner("ยังไม่ได้เลือกโมเดล");
     return false;
   }
+  setAiRequestSource(
+    modelPick.source || resolveModelSource(modelGroups, model),
+  );
 
   try {
     const res = await fetch("/api/ai/connect", {
@@ -3041,7 +3236,7 @@ async function openAiKeysManager() {
           <p class="dialog-body" id="aiKeysDialogBody">${escapeHtml(quotaHint)} · ${escapeHtml(syncHint)}</p>
           ${renderList()}
           <div class="dialog-actions dialog-actions-stack">
-            <button type="button" class="btn-primary" data-ai-act="add" title="${allowAdd ? "เพิ่มคีย์ผู้ให้บริการ" : "แผนฟรีมีได้ 1 คีย์ — จ่ายแล้วถึงจะเพิ่มได้อีก"}">${allowAdd ? "เพิ่มคีย์" : "เพิ่มคีย์ (จ่ายแล้ว)"}</button>
+            <button type="button" class="btn-primary" data-ai-act="add" title="${allowAdd ? "เพิ่มคีย์ผู้ให้บริการ" : "แผนฟรีมีได้ 1 คีย์ — จ่ายแล้วถึงจะเพิ่มได้อีก"}">${allowAdd ? "เพิ่มคีย์" : UI_LABELS.addKeyNeedsUpgrade}</button>
             <button type="button" class="btn-secondary" data-ai-act="use" ${vault.entries.length ? "" : "disabled"}>ใช้คีย์ที่เลือก</button>
             <button type="button" class="btn-secondary" data-ai-act="edit-model" ${active ? "" : "disabled"}>เปลี่ยนโมเดลคีย์ที่เลือก</button>
             <button type="button" class="btn-ghost" data-ai-act="close">ปิด</button>
@@ -3127,6 +3322,34 @@ async function openAiKeysManager() {
             );
             setTimeout(() => showBanner(""), 4200);
           }
+          const editGroups = buildAiModelGroups({
+            serverKeyAvailable:
+              aiStatus.serverAiKeyConfigured === true ||
+              aiStatus.keySource === "shared",
+            serverKeyAvailabilityKnown:
+              typeof aiStatus.serverAiKeyConfigured === "boolean" ||
+              aiStatus.keySource === "shared" ||
+              aiStatus.keySource === "none",
+            userKeySet: true,
+            serverModels: Array.isArray(aiStatus.models)
+              ? aiStatus.models
+                  .filter(
+                    (m) =>
+                      m?.source === "server" ||
+                      (!m?.source && aiStatus.keySource === "shared"),
+                  )
+                  .map((m) => ({
+                    id: m.id,
+                    label: m.label || m.id,
+                    source: "server",
+                  }))
+              : [],
+            byokModels: models.map((m) => ({
+              id: m.id,
+              label: m.label || m.id,
+              source: "byok",
+            })),
+          });
           const choice = await askDialog({
             title: `โมเดล · ${entry.label}`,
             body:
@@ -3141,6 +3364,7 @@ async function openAiKeysManager() {
                 models,
               ),
               options: models,
+              groups: editGroups,
             },
             actions: [
               { id: "save", label: "บันทึก", kind: "primary" },
@@ -3157,6 +3381,9 @@ async function openAiKeysManager() {
               entry.model = model;
               vaultNow.activeId = entry.id;
               writeAiVault(vaultNow);
+              setAiRequestSource(
+                choice.source || resolveModelSource(editGroups, model),
+              );
               if (entry.storeOnServer) void pushServerAiKey(entry);
               applyAiStatus({
                 connected: true,
@@ -3277,18 +3504,129 @@ async function openAiKeysManager() {
   });
 }
 
-/** @deprecated name kept for call sites — opens multi-provider key manager */
+/** Opens the AI-key dialog (empty / saved / delete / error). */
 async function connectGoogleAi() {
-  if (!hasClientAiCredentials()) {
-    const added = await promptAddAiKey();
-    if (state.file) renderForm();
-    if (taggerSession) renderTaggerWorkspace();
-    // Cancel / abort on the add-key dialog must not open the manager.
-    if (!added) return;
-  }
-  await openAiKeysManager();
+  await refreshAiLoginState();
+  await openAiKeyDialog({
+    loggedIn: aiUserLoggedIn,
+    preferredProvider: getClientAiProvider() || aiStatus.effectiveProvider || aiStatus.provider || "",
+    providers: aiProvidersCatalog.length
+      ? aiProvidersCatalog.map((p) => ({
+          id: p.id,
+          label: p.label,
+          docsUrl: p.docsUrl,
+          defaultModel: p.defaultModel,
+        }))
+      : undefined,
+    onBanner: (msg, kind) => {
+      if (!msg) return;
+      showBanner(msg, kind === "success" ? "success" : kind === "warn" ? "warn" : "error");
+      if (kind === "success") setTimeout(() => showBanner(""), 2800);
+    },
+    onChange: () => {
+      void refreshAiStatus();
+      syncAiStatusPill();
+      if (state.file) renderForm();
+      if (taggerSession) renderTaggerWorkspace();
+    },
+  });
+  await refreshAiStatus();
+  syncAiStatusPill();
   if (state.file) renderForm();
   if (taggerSession) renderTaggerWorkspace();
+}
+
+function countUnfilledFields() {
+  try {
+    if (!state.file || !state.fields?.length) return 0;
+    const labelMap = currentFieldLabelMap();
+    let n = 0;
+    for (const f of state.fields) {
+      if (state.skip[f.name]) continue;
+      if (f.type === "text" || f.type === "email") {
+        const raw = String(state.values[f.name] ?? "").trim();
+        if (!raw) n += 1;
+        else if (isEmailTypedField(f.name, f) && !isValidEmailValue(raw)) n += 1;
+      } else if (f.type === "image") {
+        if (!state.images[f.name]) n += 1;
+      } else if (f.type === "list") {
+        const listResult = collectMissingListValidation({
+          fieldLabel: fieldDisplayLabel(f, labelMap, f.name),
+          itemFields: f.itemFields,
+          rows: state.values[f.name] || [],
+          rowSkip: state.rowSkip[f.name],
+          labelMap,
+          isEmailField: isEmailTypedField,
+          emailInvalid: (raw) => !isValidEmailValue(raw),
+        });
+        n += listResult.missing.length;
+      }
+    }
+    return n;
+  } catch {
+    return 0;
+  }
+}
+
+/** Status pill: personal key → ready; shared server key → คีย์เซิร์ฟเวอร์; else no key. */
+function syncAiStatusPill() {
+  if (!statusText || !statusDot) return;
+  const pill = document.getElementById("status");
+  if (pill) {
+    pill.classList.add("is-clickable");
+    pill.setAttribute("role", "button");
+    pill.tabIndex = 0;
+    pill.title = "จัดการคีย์ AI";
+    if (!pill.dataset.aiClickWired) {
+      pill.dataset.aiClickWired = "1";
+      const openKeys = (ev) => {
+        ev.preventDefault();
+        void connectGoogleAi();
+      };
+      pill.addEventListener("click", openKeys);
+      pill.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") openKeys(ev);
+      });
+    }
+  }
+  const hasFile = !!(state.file || taggerSession);
+  const hasPersonalKey = hasClientAiCredentials();
+  const choiceReady = hasUsableAiCredentials();
+  const sharedReady =
+    choiceReady &&
+    ((aiKeyChoiceStatus?.mode === "server" &&
+      aiKeyChoiceStatus.serverKeyAvailable) ||
+      (!hasPersonalKey &&
+        !aiKeyChoiceStatus &&
+        hasSharedServerAiCredentials()));
+  if (!choiceReady) {
+    statusText.textContent = UI_LABELS.aiStatusNoKey;
+    statusDot.classList.remove("ok");
+    statusDot.classList.add("bad");
+    return;
+  }
+  statusDot.classList.add("ok");
+  statusDot.classList.remove("bad");
+  if (sharedReady) {
+    const provider =
+      aiStatus.providerLabel || providerLabel(getClientAiProvider());
+    const model = aiStatus.effectiveModel || aiStatus.model || "";
+    statusText.textContent = model
+      ? `คีย์เซิร์ฟเวอร์ · ${provider} · ${model}`
+      : `คีย์เซิร์ฟเวอร์ · ${provider}`;
+    return;
+  }
+  if (!hasFile) {
+    statusText.textContent = UI_LABELS.aiStatusNoFile;
+    return;
+  }
+  const missing = countUnfilledFields();
+  if (missing > 0) {
+    statusText.textContent = UI_LABELS.aiStatusNotReadyCount(missing);
+    return;
+  }
+  const provider = getClientAiLabel() || aiStatus.providerLabel || providerLabel(getClientAiProvider());
+  statusText.textContent = UI_LABELS.aiStatusReady(provider);
 }
 
 async function checkHealth() {
@@ -3347,20 +3685,42 @@ async function checkHealth() {
       refreshPlanQuotaUi();
     }
 
+    if (health && typeof health.serverAiKeyConfigured === "boolean") {
+      aiStatus.serverAiKeyConfigured = health.serverAiKeyConfigured;
+    }
+
     if (aiRes.ok) {
       const ai = await aiRes.json().catch(() => ({}));
-      if (ai && typeof ai === "object") applyAiStatus(ai);
-      else await refreshAiStatus();
+      if (ai && typeof ai === "object") {
+        applyAiStatus({
+          ...ai,
+          serverAiKeyConfigured:
+            typeof ai.serverAiKeyConfigured === "boolean"
+              ? ai.serverAiKeyConfigured
+              : health.serverAiKeyConfigured,
+        });
+      } else await refreshAiStatus();
     } else {
       await refreshAiStatus();
     }
 
-    clientStatusPill.errorMessage = null;
-    syncStatusPill();
+    syncAiStatusPill();
+    // Re-render form so attach button enables once shared/server key status lands.
+    if (state.file) renderForm();
   } catch {
-    clientStatusPill.errorMessage = UI_LABELS.statusOffline;
-    syncStatusPill();
-    showBanner("เซิร์ฟเวอร์ไม่ตอบสนอง — ลองรีเฟรชหน้า หรือรัน docx-form ใหม่");
+    if (statusDot) {
+      statusDot.classList.remove("ok");
+      statusDot.classList.add("bad");
+    }
+    if (statusText) statusText.textContent = UI_LABELS.connectFailed;
+    showBanner(UI_LABELS.connectFailed, "error", {
+      action: {
+        label: UI_LABELS.connectRetry,
+        onClick: () => {
+          void checkHealth();
+        },
+      },
+    });
   }
 }
 
@@ -3518,19 +3878,19 @@ function renderEmpty() {
   // Tagger entry card restored for no-template path (also reachable from form toolbar).
   app.innerHTML = `
     <div class="home-card">
+      <h1 class="headline">${escapeHtml(UI_LABELS.homeHeadline)}</h1>
+      <p class="subhead">${escapeHtml(UI_LABELS.homeSubhead)}</p>
+      <details class="home-about" open>
+        <summary>${escapeHtml(UI_LABELS.homeAboutSummary)}</summary>
+        <p class="home-about-body">${escapeHtml(UI_LABELS.homeAboutBody)}</p>
+      </details>
       <button type="button" class="dropzone dropzone-primary" id="dropzone" aria-label="${escapeAttr(UI_LABELS.dropzoneAriaUploadWord)}">
         <div class="dropzone-title">${escapeHtml(UI_LABELS.dropzoneDrag)}</div>
-        <div class="dropzone-sub home-upload-limit">${escapeHtml(UI_LABELS.dropzoneOrPick)}</div>
+        <div class="dropzone-sub home-upload-limit">${escapeHtml(premiumStatus.paid ? UI_LABELS.dropzoneOrPickPaid(getMaxMultiTemplates()) : UI_LABELS.dropzoneOrPickFree)}</div>
         <span class="btn-primary dropzone-pick">${escapeHtml(UI_LABELS.dropzonePick)}</span>
       </button>
       <input class="sr-only" type="file" id="fileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="${escapeAttr(UI_LABELS.dropzoneAriaUploadTemplates)}" />
       <input class="sr-only" type="checkbox" id="showFullContent" ${state.showFullContent ? "checked" : ""} tabindex="-1" aria-hidden="true" />
-      <h1 class="headline home-headline-compact">${escapeHtml(UI_LABELS.homeHeadline)}</h1>
-      <p class="subhead home-subhead-compact">${escapeHtml(UI_LABELS.homeSubhead)}</p>
-      <details class="home-about">
-        <summary>${escapeHtml(UI_LABELS.homeReadMore)} — ${escapeHtml(UI_LABELS.homeAboutSummary)}</summary>
-        <p class="home-about-body">${escapeHtml(UI_LABELS.homeAboutBody)}</p>
-      </details>
       <section class="tagger-entry-card home-secondary-card" aria-labelledby="taggerEntryTitle">
         <h2 class="tagger-entry-title" id="taggerEntryTitle">${escapeHtml(UI_LABELS.noTemplateTitle)}</h2>
         <p class="tagger-entry-sub">${escapeHtml(UI_LABELS.noTemplateDesc)}</p>
@@ -3615,6 +3975,7 @@ function renderEmpty() {
   dropzone.addEventListener("drop", (e) => {
     onFiles(e.dataTransfer?.files);
   });
+  syncAiStatusPill();
 }
 
 function renderTaggerUpload() {
@@ -3622,18 +3983,19 @@ function renderTaggerUpload() {
   taggerPendingSelection = null;
   removeTaggerDialogPortals();
   app.innerHTML = `
-    <div class="file-chip">
-      <strong>สร้างเทมเพลตจากเอกสาร</strong>
-      <span class="file-meta">อัปโหลด .docx ตัวอย่าง — คงดีไซน์เดิม แทนเฉพาะข้อความที่เลือก</span>
+    <div class="file-chip tagger-entry-chip">
+      <strong>${escapeHtml(UI_LABELS.taggerEntryTitle)}</strong>
+      <span class="file-meta">${escapeHtml(UI_LABELS.taggerEntrySub)}</span>
       <div class="file-chip-actions">
         <button type="button" class="linkish" id="taggerBackEmpty">← กลับ</button>
       </div>
     </div>
-    <button type="button" class="dropzone" id="taggerDropzone" aria-label="อัปโหลดเอกสารตัวอย่าง">
+    <button type="button" class="dropzone dropzone-primary" id="taggerDropzone" aria-label="${escapeAttr(UI_LABELS.taggerPickSample)}">
       <div class="dropzone-title">ลากไฟล์ .docx ตัวอย่างมาวาง</div>
-      <div class="dropzone-sub">หรือ <span class="linkish">เลือกไฟล์</span> แล้วไฮไลต์ข้อความเพื่อสร้างตัวแปร</div>
+      <div class="dropzone-sub">หรือเลือกไฟล์ แล้วลากคลุมข้อความที่อยากให้เป็นช่องกรอก</div>
+      <span class="btn-primary dropzone-pick">${escapeHtml(UI_LABELS.taggerPickSample)}</span>
     </button>
-    <input class="sr-only" type="file" id="taggerFileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" aria-label="อัปโหลดเอกสารตัวอย่างสำหรับสร้างเทมเพลต" />
+    <input class="sr-only" type="file" id="taggerFileInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" aria-label="${escapeAttr(UI_LABELS.taggerPickSample)}" />
     <p class="hint-error" id="taggerUploadError" hidden></p>
   `;
 
@@ -3792,7 +4154,7 @@ async function startTaggerSession(file, errorEl) {
     };
     if (existing.length) {
       showBanner(
-        `พบแท็กในไฟล์ ${existing.length} รายการ — คลิกเพื่อแก้ชื่อได้ (ยกเลิกแท็กเดิมไม่ได้)`,
+        `${UI_LABELS.taggerExistingBanner(existing.length)}`,
         "success",
       );
       setTimeout(() => showBanner(""), 4200);
@@ -3958,11 +4320,11 @@ async function runTaggerAiDraft() {
       fd.append("geminiApiKey", byokKey);
       fd.append("aiApiKey", byokKey);
     }
-    if (byokModel) {
-      fd.append("geminiModel", byokModel);
-      fd.append("aiModel", byokModel);
-    }
-    if (byokProvider) fd.append("aiProvider", byokProvider);
+    appendAiKeyRequestFields(fd, {
+      source: getAiRequestSource(),
+      aiModel: byokModel,
+      aiProvider: byokProvider,
+    });
     fd.append("nameLanguage", getTaggerAiNameLanguage());
 
     taggerSuggestAbort?.abort();
@@ -4289,10 +4651,18 @@ async function runTaggerAiDraft() {
     }
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
-      showBanner("ยกเลิก AI ดราฟตัวแปรแล้ว");
+      showBanner(UI_LABELS.aiCancelNeutral, "warn");
+      setTimeout(() => showBanner(""), 2800);
     } else {
-      const msg = err instanceof Error ? err.message : "AI ดราฟตัวแปรไม่สำเร็จ";
-      showBanner(msg);
+      const data = {
+        error: err instanceof Error ? err.message : "AI ดราฟตัวแปรไม่สำเร็จ",
+        code: err && typeof err === "object" && "code" in err ? err.code : undefined,
+      };
+      const status =
+        err && typeof err === "object" && "status" in err
+          ? Number(err.status) || 0
+          : 0;
+      showAiApiError(data, status);
     }
   } finally {
     stopAiWaitBanner?.();
@@ -4313,16 +4683,28 @@ function startTaggerAiWaitBanner() {
     "AI กำลังหาจุดที่น่าจะเป็นตัวแปร…",
     "อาจใช้เวลาสักครู่ ตามขนาดไฟล์และโมเดลที่เลือก",
   ];
-  const modelNote = "ความแม่นยำขึ้นอยู่กับโมเดลที่ใช้";
+  const started = Date.now();
   let i = 0;
   const paint = () => {
-    showBanner(lines[i % lines.length] || lines[0], "progress", { note: modelNote });
+    const sec = Math.max(0, Math.floor((Date.now() - started) / 1000));
+    const mm = String(Math.floor(sec / 60));
+    const ss = String(sec % 60).padStart(2, "0");
+    const note = `ผ่านไป ${mm}:${ss} · ความแม่นยำขึ้นอยู่กับโมเดลที่ใช้`;
+    showBanner(lines[i % lines.length] || lines[0], "progress", {
+      note,
+      action: {
+        label: "ยกเลิก",
+        onClick: () => {
+          taggerSuggestAbort?.abort();
+        },
+      },
+    });
   };
   paint();
   const timer = setInterval(() => {
     i += 1;
     paint();
-  }, 4200);
+  }, 1000);
   return () => clearInterval(timer);
 }
 
@@ -4541,18 +4923,18 @@ function renderTaggerWorkspace() {
     endTaggerChipRepResolve();
   }
 
-  const taggerAiOn = !!(aiStatus.connected || hasClientAiCredentials());
+  const taggerAiOn = !!hasClientAiCredentials();
   const taggerAiKeyTitle = taggerAiOn
     ? `คีย์「${getClientAiLabel() || aiStatus.entryLabel || "AI"}」· ${aiStatus.providerLabel || providerLabel(getClientAiProvider())} · ${aiStatus.model || getClientAiModel() || ""} — เลือก provider / โมเดล / คีย์`
     : "ใส่ AI API key ของคุณ (หลายเจ้าได้ · เก็บในเบราว์เซอร์)";
   const taggerAiKeyLabel = taggerAiOn
-    ? escapeHtml(UI_LABELS.manageAiKeys)
-    : escapeHtml(UI_LABELS.putAiKey);
+    ? `AI · ${escapeHtml(getClientAiLabel() || aiStatus.providerLabel || String(aiStatus.model || getClientAiModel() || "พร้อม").replace(/^gemini-/i, ""))}`
+    : "เลือก model";
   const taggerAiDrafting = !!s.aiDrafting;
   const taggerAiKeyDisabled = s.busy || taggerAiDrafting ? "disabled" : "";
   const taggerAiDraftLabel = taggerAiDrafting
     ? `<span class="btn-spinner" aria-hidden="true"></span><span>AI กำลังอ่านเอกสาร…</span>`
-    : escapeHtml(UI_LABELS.aiSuggestTags);
+    : "AI ช่วยดราฟ";
   const taggerAiDraftTitle = taggerAiDrafting
     ? "กำลังรอโมเดลอ่านทั้งไฟล์และเสนอจุดแท็ก — อาจใช้เวลาสักครู่"
     : "ส่งเอกสารเต็มให้ AI อ่านแล้วตัดสินใจจุดที่เป็นตัวแปรเอง — ระบบจับคู่ label/ค่ากับข้อความจริง · ใช้คีย์/โมเดลที่เลือกไว้";
@@ -4591,7 +4973,12 @@ function renderTaggerWorkspace() {
           : ""
       }
     </div>
-    <p class="tagger-help">ลากเลือกข้อความในพรีวิว แล้วใช้ปุ่มลอยข้างช่วงที่เลือก: <strong>สร้างตัวแปร</strong> · <strong>ลบแถว</strong> · <strong>คัดลอกข้อความ</strong> — ข้อความ <code>{{ชื่อ}}</code> · รันเลข <code>{{+ชื่อ}}</code> (ในลูป) · <strong>ลิสต์ย่อหน้า</strong> / <strong>ตาราง</strong> ด้วย <code>{{#รายการ}}…{{/}}</code></p>
+    <p class="tagger-help">ลากเลือกข้อความในพรีวิว แล้วใช้ปุ่มลอย: <strong>${escapeHtml(UI_LABELS.taggerMakeField)}</strong> · <strong>ลบแถว</strong> · <strong>คัดลอก</strong>
+      <details class="tagger-code-details"><summary>${escapeHtml(UI_LABELS.taggerShowTagCode)}</summary>
+        <span>ข้อความ <code>{{ชื่อ}}</code> · รันเลข <code>{{+ชื่อ}}</code> · ลิสต์/ตาราง <code>{{#รายการ}}…{{/}}</code></span>
+      </details>
+    </p>
+    <p class="tagger-help-note">${escapeHtml(UI_LABELS.taggerExistingBannerNote)}</p>
     <div class="doc-sheet tagger-sheet" id="taggerPreview">
       <div class="doc-sheet-label">
         <span class="doc-sheet-label-text">พรีวิวเอกสาร (เลือกข้อความได้)</span>
@@ -4609,7 +4996,7 @@ function renderTaggerWorkspace() {
     <div class="sticky-bar tagger-actions">
       <button type="button" class="btn-secondary" id="taggerDownload" ${(s.taggedFile || s.replacements.length) && !s.busy && !taggerAiDrafting ? "" : "disabled"}>ดาวน์โหลดเทมเพลต</button>
     </div>
-    <button type="button" class="tagger-float-btn" id="taggerCreateBtn" hidden aria-hidden="true">สร้างตัวแปร</button>
+    <button type="button" class="tagger-float-btn" id="taggerCreateBtn" hidden aria-hidden="true">${escapeHtml(UI_LABELS.taggerMakeField)}</button>
     <button type="button" class="tagger-float-btn tagger-float-delete" id="taggerDeleteBtn" hidden aria-hidden="true">ลบแถว</button>
     <button type="button" class="tagger-float-btn tagger-float-copy" id="taggerCopyBtn" hidden aria-hidden="true">คัดลอกข้อความ</button>
     <div class="tagger-dialog-backdrop" id="taggerDialog" hidden>
@@ -4625,19 +5012,19 @@ function renderTaggerWorkspace() {
         <fieldset class="tagger-kind">
           <legend>ประเภท</legend>
           <label class="kind-text" data-kind="text"><input type="radio" name="taggerKind" value="text" checked /> ข้อความ <code>{{ชื่อ}}</code></label>
-          <label class="kind-bool" data-kind="bool"><input type="radio" name="taggerKind" value="bool" /> ติ๊ก <code>{{ชื่อ?จริง,เท็จ}}</code></label>
+          <label class="kind-bool" data-kind="bool"><input type="radio" name="taggerKind" value="bool" /> ${escapeHtml(UI_LABELS.taggerKindBoolLabel)} <code>${escapeHtml(UI_LABELS.taggerKindBoolCode)}</code></label>
           <label class="kind-auto" id="taggerKindAuto" data-kind="auto"><input type="radio" name="taggerKind" value="auto" /> รันเลข (auto) <code>{{+ชื่อ}}</code></label>
           <label class="kind-list" id="taggerKindList" data-kind="list" hidden><input type="radio" name="taggerKind" value="list" /> ลิสต์ (ย่อหน้า) <code>{{#ชื่อ}}…{{/}}</code></label>
           <label class="kind-list-table" id="taggerKindTable" data-kind="list-table" hidden><input type="radio" name="taggerKind" value="list-table" /> ตาราง/ลิสต์ (แถว) <code>{{#ชื่อ}}…{{/}}</code></label>
         </fieldset>
         <p class="tagger-kind-hint" id="taggerKindHint" hidden></p>
         <div class="tagger-bool-fields" id="taggerBoolFields" hidden>
-          <label class="field-label" for="taggerTrueText">ข้อความเมื่อติ๊ก (จริง)</label>
+          <label class="field-label" for="taggerTrueText">${escapeHtml(UI_LABELS.taggerKindBoolTrue)}</label>
           <div class="tagger-field-row">
             <input type="text" id="taggerTrueText" class="field-input" />
             <button type="button" class="btn-secondary btn-compact tagger-paste-btn" data-paste-into="taggerTrueText" title="วางข้อความที่คัดลอกไว้">วาง</button>
           </div>
-          <label class="field-label" for="taggerFalseText">ข้อความเมื่อไม่ติ๊ก (เท็จ)</label>
+          <label class="field-label" for="taggerFalseText">${escapeHtml(UI_LABELS.taggerKindBoolFalse)}</label>
           <div class="tagger-field-row">
             <input type="text" id="taggerFalseText" class="field-input" placeholder="ว่างได้" />
             <button type="button" class="btn-secondary btn-compact tagger-paste-btn" data-paste-into="taggerFalseText" title="วางข้อความที่คัดลอกไว้">วาง</button>
@@ -7551,11 +7938,53 @@ function renderTaggerListItemFields() {
   }
 }
 
+/**
+ * Expand a live DOM selection to whole Thai/Latin words via Intl.Segmenter (F33).
+ * @param {HTMLElement} root
+ */
+function snapTaggerSelectionToWords(root) {
+  const sel = window.getSelection();
+  if (!sel || !sel.rangeCount || sel.isCollapsed) return;
+  if (typeof Intl === "undefined" || typeof Intl.Segmenter !== "function") return;
+  try {
+    const range = sel.getRangeAt(0);
+    if (!isInsideTaggerRoot(root, range.commonAncestorContainer)) return;
+    // Only snap when selection lives inside a single text node.
+    if (range.startContainer !== range.endContainer) return;
+    if (range.startContainer.nodeType !== Node.TEXT_NODE) return;
+    const node = /** @type {Text} */ (range.startContainer);
+    const full = node.data || "";
+    if (!full.trim()) return;
+    let start = range.startOffset;
+    let end = range.endOffset;
+    if (end <= start) return;
+    const segmenter = new Intl.Segmenter("th", { granularity: "word" });
+    let snapStart = start;
+    let snapEnd = end;
+    for (const { segment, index, isWordLike } of segmenter.segment(full)) {
+      const segEnd = index + segment.length;
+      if (!isWordLike && !/[฀-๿A-Za-z0-9]/.test(segment)) continue;
+      if (segEnd <= start || index >= end) continue;
+      snapStart = Math.min(snapStart, index);
+      snapEnd = Math.max(snapEnd, segEnd);
+    }
+    if (snapStart === start && snapEnd === end) return;
+    const next = document.createRange();
+    next.setStart(node, Math.max(0, snapStart));
+    next.setEnd(node, Math.min(full.length, snapEnd));
+    sel.removeAllRanges();
+    sel.addRange(next);
+  } catch {
+    /* Segmenter / range edge cases — keep original selection */
+  }
+}
+
 function openTaggerCreateDialog() {
   if (!taggerSession) return;
   // Prefer a fresh live read; if the range already collapsed (float click), keep pending snapshot.
   const liveRoot = /** @type {HTMLElement | null} */ (document.getElementById("taggerSelectRoot"));
   if (liveRoot) {
+    snapTaggerSelectionToWords(liveRoot);
     const fresh = readTaggerSelection(liveRoot);
     if (fresh) taggerPendingSelection = fresh;
   }
@@ -8317,7 +8746,16 @@ async function confirmTaggerVariable() {
   taggerPendingSelection = null;
   closeTaggerDialog();
   window.getSelection()?.removeAllRanges();
-  await commitTaggerOps(toAdd);
+  if (!taggerSession) return;
+  const snapshotReplacements = taggerSession.replacements.map((x) => ({ ...x }));
+  const snapshotTagged = taggerSession.taggedFile;
+  const ok = await commitTaggerOps(toAdd);
+  if (ok && taggerSession) {
+    armTaggerCancelUndo(snapshotReplacements, snapshotTagged, {
+      mode: "toolbar",
+      tip: "เลิกทำ — ลบแท็กที่เพิ่งสร้าง",
+    });
+  }
 }
 
 /**
@@ -8412,7 +8850,7 @@ function openTaggerEditDialog(id) {
         <p class="field-label">ประเภท</p>
         <div class="tagger-kind tagger-edit-kind" role="radiogroup" aria-label="ประเภทตัวแปร">
           <label class="kind-text" data-kind="text"><input type="radio" name="taggerEditKind" value="text" ${kind === "text" ? "checked" : ""} /> ข้อความ <code>{{ชื่อ}}</code></label>
-          <label class="kind-bool" data-kind="bool"><input type="radio" name="taggerEditKind" value="bool" ${kind === "bool" ? "checked" : ""} /> ติ๊ก <code>{{ชื่อ?จริง,เท็จ}}</code></label>
+          <label class="kind-bool" data-kind="bool"><input type="radio" name="taggerEditKind" value="bool" ${kind === "bool" ? "checked" : ""} /> ${escapeHtml(UI_LABELS.taggerKindBoolLabel)} <code>${escapeHtml(UI_LABELS.taggerKindBoolCode)}</code></label>
           <label class="kind-auto" data-kind="auto"><input type="radio" name="taggerEditKind" value="auto" ${kind === "auto" ? "checked" : ""} /> รันเลข <code>{{+ชื่อ}}</code></label>
         </div>`
         : isList
@@ -8423,9 +8861,9 @@ function openTaggerEditDialog(id) {
         <label class="field-label" for="taggerEditName" id="taggerEditNameLabel">${kind === "auto" ? "ชื่อรันเลข" : isList ? "ชื่อลิสต์" : "ชื่อตัวแปร"}</label>
         <input type="text" id="taggerEditName" class="field-input" value="${escapeAttr(r.label || "")}" autocomplete="off" />
         <div id="taggerEditBoolFields" class="tagger-bool-fields" ${kind === "bool" ? "" : "hidden"}>
-          <label class="field-label" for="taggerEditTrue">ข้อความเมื่อติ๊ก (จริง)</label>
+          <label class="field-label" for="taggerEditTrue">${escapeHtml(UI_LABELS.taggerKindBoolTrue)}</label>
           <input type="text" id="taggerEditTrue" class="field-input" value="${escapeAttr(r.kind === "bool" ? r.trueText || trueDefault : trueDefault)}" />
-          <label class="field-label" for="taggerEditFalse">ข้อความเมื่อไม่ติ๊ก (เท็จ)</label>
+          <label class="field-label" for="taggerEditFalse">${escapeHtml(UI_LABELS.taggerKindBoolFalse)}</label>
           <input type="text" id="taggerEditFalse" class="field-input" value="${escapeAttr(r.falseText || "")}" placeholder="ว่างได้" />
         </div>
       `;
@@ -9406,12 +9844,16 @@ function downloadTaggedTemplate() {
   a.download = taggerSession.taggedFile.name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
-  showBanner("ดาวน์โหลดเทมเพลตแล้ว", "success");
-  setTimeout(() => showBanner(""), 2400);
+  showBanner(UI_LABELS.taggerDownloadNext, "success", {
+    action: {
+      label: UI_LABELS.taggerContinueFill,
+      onClick: () => {
+        void openTaggedInFillForm();
+      },
+    },
+  });
 }
 
-/** Kept for potential re-wire; sticky「ใช้กรอกต่อ」was removed. */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars -- intentional dead UI entry
 async function openTaggedInFillForm() {
   if (!taggerSession?.taggedFile) {
     showBanner("ยังไม่มีเทมเพลตที่แท็กแล้ว");
@@ -9516,8 +9958,14 @@ async function hydrateTemplateContent(slot, opts = {}) {
     if (multiActiveId === slot.id) {
       state.fileContent = full.fileContent;
       state.fileLayout = full.fileLayout;
+      // Re-merge fields when layout arrives — Backend may omit cell tags until fixed.
+      ensureFieldsFromLayoutTags();
+      live.fields = state.fields;
+      live.values = state.values;
+      live.skip = state.skip;
       renderForm();
     } else {
+      ensureFieldsFromLayoutTagsForSlot(live);
       persistActiveSlot();
     }
     // Never wipe a warning/error from multi-upload — only clear our own progress line.
@@ -9553,21 +10001,39 @@ async function parseFile(file, errorEl) {
 
   const lower = file.name.toLowerCase();
   if (lower.endsWith(".doc") && !lower.endsWith(".docx")) {
-    const msg = "รองรับเฉพาะ .docx — ให้ Save As เป็น .docx ใน Word ก่อน";
+    const msg = UI_LABELS.uploadInvalidFile;
     if (errorEl) {
-      errorEl.hidden = false;
-      errorEl.textContent = msg;
+      errorEl.hidden = true;
+      errorEl.textContent = "";
     }
-    showBanner(msg);
+    showBanner(msg, "error", {
+      action: {
+        label: "ปิด",
+        onClick: () => {
+          hideBanner();
+          document.getElementById("dropzone")?.focus?.();
+        },
+      },
+    });
+    document.getElementById("dropzone")?.focus?.();
     return;
   }
   if (!lower.endsWith(".docx")) {
-    const msg = "ไฟล์ต้องเป็น .docx เท่านั้น";
+    const msg = UI_LABELS.uploadInvalidFile;
     if (errorEl) {
-      errorEl.hidden = false;
-      errorEl.textContent = msg;
+      errorEl.hidden = true;
+      errorEl.textContent = "";
     }
-    showBanner(msg);
+    showBanner(msg, "error", {
+      action: {
+        label: "ปิด",
+        onClick: () => {
+          hideBanner();
+          document.getElementById("dropzone")?.focus?.();
+        },
+      },
+    });
+    document.getElementById("dropzone")?.focus?.();
     return;
   }
 
@@ -10159,7 +10625,7 @@ async function runBatchFromSource(sourceFiles) {
     status: "loading",
     statusText: `อัปโหลดต้นทาง ${sourceFiles.length} ไฟล์ · เทมเพลต ${n}`,
     logs: [],
-    showLogs: true,
+    showLogs: false,
     mode: "batch",
     aiLabel: `${getClientAiLabel() || providerLabel(getClientAiProvider())} · ${getClientAiModel()}`,
     progress: {
@@ -10201,11 +10667,11 @@ async function runBatchFromSource(sourceFiles) {
     fd.append("geminiApiKey", byokKey);
     fd.append("aiApiKey", byokKey);
   }
-  if (byokModel) {
-    fd.append("geminiModel", byokModel);
-    fd.append("aiModel", byokModel);
-  }
-  if (byokProvider) fd.append("aiProvider", byokProvider);
+  appendAiKeyRequestFields(fd, {
+    source: getAiRequestSource(),
+    aiModel: byokModel,
+    aiProvider: byokProvider,
+  });
 
   try {
     appendSourceMapLog("ส่งคำขอ batch-from-source (สตรีมล็อกละเอียด)…");
@@ -10220,7 +10686,7 @@ async function runBatchFromSource(sourceFiles) {
       const data = await res.json().catch(() => ({}));
       sourceMapSession = null;
       renderForm();
-      showBanner(data.error || "แมป JSON ไม่สำเร็จ");
+      showAiApiError(data, res.status);
       return;
     }
 
@@ -10229,7 +10695,7 @@ async function runBatchFromSource(sourceFiles) {
       if (!res.ok) {
         sourceMapSession = null;
         renderForm();
-        showBanner(data.error || "แมป JSON ไม่สำเร็จ");
+        showAiApiError(data, res.status);
         return;
       }
       applyBatchFromSourceResults(data);
@@ -10362,8 +10828,57 @@ function fieldsOutsidePreview() {
   });
 }
 
+/**
+ * Client fallback: if Backend left {{name}} in layout cells but omitted them from
+ * `fields`, seed text fields so inline inputs + skip still bind to /api/fill.
+ * When Backend already returns cell tags as normal FormField entries (current
+ * shape: { name, type, aliases? } — optional location.tableIndex / rowIndexInTable /
+ * cellIndex when present), this is a no-op.
+ */
+function ensureFieldsFromLayoutTags() {
+  const tags = [
+    ...collectSelfTagsFromLayout(state.fileLayout || []),
+    ...collectSelfTagsFromText(state.fileContent || ""),
+  ];
+  const { fields, added } = mergeMissingTextFields(state.fields || [], tags);
+  if (!added.length) {
+    state.fields = fields;
+    return;
+  }
+  state.fields = fields;
+  for (const name of added) {
+    if (!(name in state.values)) state.values[name] = "";
+    if (!(name in state.skip)) state.skip[name] = false;
+  }
+  console.info(
+    "[docx-form] client fallback: seeded missing table-cell fields from layout tags:",
+    added.join(", "),
+  );
+}
+
+/** Same seeding for a multi-slot that is not the active one. */
+function ensureFieldsFromLayoutTagsForSlot(slot) {
+  if (!slot) return;
+  const tags = [
+    ...collectSelfTagsFromLayout(slot.fileLayout || []),
+    ...collectSelfTagsFromText(slot.fileContent || ""),
+  ];
+  const { fields, added } = mergeMissingTextFields(slot.fields || [], tags);
+  slot.fields = fields;
+  if (!added.length) return;
+  for (const name of added) {
+    if (!(name in slot.values)) slot.values[name] = "";
+    if (!(name in slot.skip)) slot.skip[name] = false;
+  }
+  console.info(
+    "[docx-form] client fallback: seeded missing table-cell fields from layout tags:",
+    added.join(", "),
+  );
+}
+
 function renderForm() {
   removeTaggerDialogPortals();
+  ensureFieldsFromLayoutTags();
   const useDocLayout =
     state.showFullContent && (state.fileLayout.length > 0 || !!state.fileContent);
   const bodyHtml = state.fileLayout.length
@@ -10394,13 +10909,20 @@ function renderForm() {
       ${fieldsHtmlOutside}
     </div>`;
 
-  const aiBtnLabel = aiStatus.connected
-    ? escapeHtml(UI_LABELS.manageAiKeys)
+  const aiReady = hasUsableAiCredentials();
+  const sharedOnlyReady =
+    !hasClientAiCredentials() && hasSharedServerAiCredentials();
+  const aiBtnLabel = aiReady
+    ? sharedOnlyReady
+      ? escapeHtml(
+          `คีย์เซิร์ฟเวอร์ · ${aiStatus.providerLabel || providerLabel(getClientAiProvider())}`,
+        )
+      : `${escapeHtml(UI_LABELS.aiConnectedPrefix)}${escapeHtml(getClientAiLabel() || aiStatus.providerLabel || String(getClientAiModel() || UI_LABELS.aiReadyFallback).replace(/^gemini-/i, ""))}`
     : escapeHtml(UI_LABELS.putAiKey);
   const attachLabel = isMultiMode()
     ? UI_LABELS.attachSourceMulti
     : UI_LABELS.attachSource;
-  const attachTitle = aiStatus.connected
+  const attachTitle = aiReady
     ? isMultiMode()
       ? UI_LABELS.attachSourceTitleMulti
       : UI_LABELS.attachSourceTitleSingle
@@ -10412,23 +10934,23 @@ function renderForm() {
     <div class="file-chip">
       <span class="file-meta">${escapeHtml(summaryText(state.fields))}${isMultiMode() ? escapeHtml(UI_LABELS.multiMetaHint) : ""}</span>
       <div class="file-chip-actions file-chip-actions-desktop">
-        <button type="button" class="btn-secondary btn-compact ${aiStatus.connected ? "is-ai-on" : ""}" id="googleAiBtn" title="${aiStatus.connected ? `คีย์「${getClientAiLabel() || aiStatus.entryLabel || "AI"}」· ${aiStatus.providerLabel || providerLabel(getClientAiProvider())} · ${aiStatus.model || ""} — ${escapeAttr(UI_LABELS.manageAiKeys)}` : escapeAttr(UI_LABELS.putAiKey)}">
+        <button type="button" class="btn-secondary btn-compact ${aiReady ? "is-ai-on" : ""}" id="googleAiBtn" title="${aiReady ? `คีย์「${getClientAiLabel() || aiStatus.entryLabel || "AI"}」· ${aiStatus.providerLabel || providerLabel(getClientAiProvider())} · ${getClientAiModel() || aiStatus.model || ""} — จัดการคีย์` : "ใส่ AI API key ของคุณ (หลายเจ้าได้ · เก็บในเบราว์เซอร์)"}">
           ${aiBtnLabel}
         </button>
-        <button type="button" class="btn-secondary btn-compact" id="attachSource" ${aiStatus.connected ? "" : "disabled"} title="${escapeAttr(attachTitle)}">${escapeHtml(attachLabel)}</button>
+        <button type="button" class="btn-secondary btn-compact" id="attachSource" ${aiReady ? "" : "disabled"} title="${escapeAttr(attachTitle)}">${escapeHtml(attachLabel)}</button>
         <input class="sr-only" type="file" id="attachSourceInput" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple aria-label="${escapeAttr(UI_LABELS.attachSourceInputAria)}" />
+        <button type="button" class="btn-secondary btn-compact" id="exportJson" title="${escapeAttr(UI_LABELS.exportJsonTitle)}">${escapeHtml(UI_LABELS.exportJson)}</button>
         <button type="button" class="btn-secondary btn-compact" id="importJson" title="${escapeAttr(UI_LABELS.importJsonTitle)}">${escapeHtml(UI_LABELS.importJson)}</button>
-        <button type="button" class="btn-secondary btn-compact btn-export-json" id="exportJson" title="${escapeAttr(UI_LABELS.exportJsonTitle)}">${escapeHtml(UI_LABELS.exportJson)}</button>
         <input class="sr-only" type="file" id="importJsonInput" accept="application/json,.json" aria-label="${escapeAttr(UI_LABELS.importJsonTitle)}" />
         <input class="sr-only" type="file" id="addTemplateInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple aria-label="${escapeAttr(UI_LABELS.addTemplateInputAria)}" />
         <button type="button" class="btn-secondary btn-compact" id="openTaggerFromForm" title="${escapeAttr(UI_LABELS.createTemplateTitle)}">${escapeHtml(UI_LABELS.createTemplate)}</button>
         <button type="button" class="linkish" id="goHomeBtn" title="${escapeAttr(UI_LABELS.homeLinkTitle)}">${escapeHtml(UI_LABELS.homeLink)}</button>
       </div>
       <details class="file-chip-tools-mobile">
-        <summary class="btn-secondary btn-compact tools-menu-summary">${escapeHtml(UI_LABELS.toolsMenu)} ▾</summary>
+        <summary class="btn-secondary btn-compact tools-menu-summary" title="${escapeAttr(UI_LABELS.toolsMenuHint)}">${escapeHtml(UI_LABELS.toolsMenuHint)} ▾</summary>
         <div class="tools-menu-panel" role="menu">
-          <button type="button" class="btn-secondary btn-compact ${aiStatus.connected ? "is-ai-on" : ""}" id="googleAiBtnMobile" role="menuitem">${aiBtnLabel}</button>
-          <button type="button" class="btn-secondary btn-compact" id="attachSourceMobile" ${aiStatus.connected ? "" : "disabled"} role="menuitem">${escapeHtml(attachLabel)}</button>
+          <button type="button" class="btn-secondary btn-compact ${aiReady ? "is-ai-on" : ""}" id="googleAiBtnMobile" role="menuitem">${aiBtnLabel}</button>
+          <button type="button" class="btn-secondary btn-compact" id="attachSourceMobile" ${aiReady ? "" : "disabled"} role="menuitem">${escapeHtml(attachLabel)}</button>
           <button type="button" class="btn-secondary btn-compact" id="exportJsonMobile" role="menuitem">${escapeHtml(UI_LABELS.exportJson)}</button>
           <button type="button" class="btn-secondary btn-compact" id="importJsonMobile" role="menuitem">${escapeHtml(UI_LABELS.importJson)}</button>
           <button type="button" class="btn-secondary btn-compact" id="openTaggerFromFormMobile" role="menuitem">${escapeHtml(UI_LABELS.createTemplate)}</button>
@@ -10520,7 +11042,7 @@ function renderForm() {
   document.getElementById("googleAiBtnMobile")?.addEventListener("click", openAiKey);
   const attachInput = /** @type {HTMLInputElement | null} */ (document.getElementById("attachSourceInput"));
   const openAttach = () => {
-    if (!aiStatus.connected && !hasClientAiCredentials()) {
+    if (!hasUsableAiCredentials()) {
       showBanner(UI_LABELS.attachSourceNeedKeyBanner);
       void connectGoogleAi();
       return;
@@ -10533,8 +11055,19 @@ function renderForm() {
     const list = attachInput.files ? [...attachInput.files] : [];
     attachInput.value = "";
     if (!list.length) return;
-    if (isMultiMode()) void runBatchFromSource(list);
-    else void runSourceMap(list);
+    void (async () => {
+      const choice = await askDialog({
+        title: UI_LABELS.attachSourceConfirmTitle,
+        body: UI_LABELS.attachSourceConfirmBody,
+        actions: [
+          { id: "ok", label: UI_LABELS.attachSourceConfirmOk, kind: "primary" },
+          { id: "abort", label: UI_LABELS.dialogCancel, kind: "ghost" },
+        ],
+      });
+      if (choice !== "ok") return;
+      if (isMultiMode()) void runBatchFromSource(list);
+      else void runSourceMap(list);
+    })();
   });
   document.getElementById("openTaggerFromFormMobile")?.addEventListener("click", () => {
     document.getElementById("openTaggerFromForm")?.click();
@@ -10543,9 +11076,8 @@ function renderForm() {
     document.getElementById("goHomeBtn")?.click();
   });
   mountSkipFirstUseTip();
-  syncStatusPill();
   // First interaction with any skip checkbox dismisses the tip for later visits.
-  app.querySelector(".field-obj .skip input, .doc-skip input, .skip-opt input")?.addEventListener(
+  app.querySelector(".doc-skip input, .skip-opt input")?.addEventListener(
     "change",
     () => dismissSkipFirstUseTip(),
     { once: true },
@@ -11208,7 +11740,7 @@ function patchSourceMapLoadingUi() {
   const toggle = document.getElementById("toggleSourceMapLog");
   if (toggle) {
     toggle.setAttribute("aria-expanded", sourceMapSession.showLogs ? "true" : "false");
-    toggle.textContent = sourceMapSession.showLogs ? "ซ่อนล็อก" : "ดูล็อกละเอียด";
+    toggle.textContent = sourceMapSession.showLogs ? "ซ่อนรายละเอียด" : "ดูรายละเอียด";
   }
   const logWrap = document.getElementById("sourceMapLogWrap");
   if (logWrap) logWrap.hidden = !sourceMapSession.showLogs;
@@ -11229,7 +11761,7 @@ function renderSourceMapPanel() {
       .join("");
     const batchHint =
       sourceMapSession.mode === "batch"
-        ? "หลายเทมเพลต · ส่งไฟล์ต้นทางจริง + Export JSON แยก → AI กรอก → Import ลงจอ"
+        ? "หลายเทมเพลต · ส่งไฟล์ให้ AI อ่านแล้วกรอกค่าลงจอ"
         : "รันบนเครื่องนี้ · ส่งไฟล์ต้นทางให้ AI อ่านแล้วกรอก JSON";
     return `<div class="source-map-panel is-loading" id="sourceMapPanel">
       <div class="source-map-head">
@@ -11244,7 +11776,7 @@ function renderSourceMapPanel() {
       </div>
       <p class="dropzone-hint" style="margin:0">${batchHint}</p>
       <div class="source-map-log-actions">
-        <button type="button" class="btn-secondary btn-compact" id="toggleSourceMapLog" aria-expanded="${sourceMapSession.showLogs ? "true" : "false"}">${sourceMapSession.showLogs ? "ซ่อนล็อก" : "ดูล็อกละเอียด"}</button>
+        <button type="button" class="btn-secondary btn-compact" id="toggleSourceMapLog" aria-expanded="${sourceMapSession.showLogs ? "true" : "false"}">${sourceMapSession.showLogs ? "ซ่อนรายละเอียด" : "ดูรายละเอียด"}</button>
         <button type="button" class="btn-ghost btn-compact source-map-cancel" id="cancelSourceMapBtn">ยกเลิก</button>
       </div>
       <div class="source-map-log-wrap" id="sourceMapLogWrap" ${sourceMapSession.showLogs ? "" : "hidden"}>
@@ -11476,7 +12008,7 @@ async function runSourceMap(files) {
     status: "loading",
     statusText: `กำลังอัปโหลด ${files.length} ไฟล์…`,
     logs: [],
-    showLogs: true,
+    showLogs: false,
     mode: "single",
     aiLabel: `${getClientAiLabel() || providerLabel(getClientAiProvider())} · ${getClientAiModel()}`,
     progress: { step: 0, total: files.length + 2, label: "อัปโหลดไฟล์ต้นทาง" },
@@ -11497,6 +12029,18 @@ async function runSourceMap(files) {
       JSON.stringify(buildExportJsonNow(state, { blank: true })),
     );
     for (const f of files) form.append("files", f, f.name);
+    {
+      const byokKey = getClientAiKey();
+      if (byokKey) {
+        form.append("geminiApiKey", byokKey);
+        form.append("aiApiKey", byokKey);
+      }
+      appendAiKeyRequestFields(form, {
+        source: getAiRequestSource(),
+        aiModel: getClientAiModel(),
+        aiProvider: getClientAiProvider(),
+      });
+    }
 
     appendSourceMapLog("ส่งคำขอไปเซิร์ฟเวอร์ (สตรีมล็อกละเอียด)…");
     const res = await fetch("/api/source-map?stream=1", {
@@ -11511,7 +12055,7 @@ async function runSourceMap(files) {
       const data = await res.json().catch(() => ({}));
       sourceMapSession = null;
       renderForm();
-      showBanner(data.error || "แมปเอกสารต้นทางไม่สำเร็จ — ไม่ทราบสาเหตุ");
+      showAiApiError(data, res.status);
       return;
     }
 
@@ -11521,7 +12065,7 @@ async function runSourceMap(files) {
       if (!res.ok) {
         sourceMapSession = null;
         renderForm();
-        showBanner(data.error || "แมปเอกสารต้นทางไม่สำเร็จ — ไม่ทราบสาเหตุ");
+        showAiApiError(data, res.status);
         return;
       }
       finishSourceMapResult(data);
@@ -11731,14 +12275,42 @@ function layoutCellAttrs(cell, opts = {}) {
   return { text: cell.text || "", attrs: parts.length ? ` ${parts.join(" ")}` : "" };
 }
 
+/**
+ * Inner HTML for a layout table cell — never leave raw {{tags}} visible.
+ * Prefers optional Backend cell.fieldName / cell.tags; otherwise tokenizes text.
+ */
+function renderLayoutCellInner(cell) {
+  if (cell && typeof cell === "object") {
+    const fieldName = String(cell.fieldName || "").trim();
+    if (fieldName) return renderInlineBlank(fieldName);
+    if (Array.isArray(cell.tags) && cell.tags.length) {
+      return cell.tags
+        .map((t) => {
+          const name = String(t || "").trim();
+          return name ? renderInlineBlank(name) : "";
+        })
+        .join("");
+    }
+  }
+  const text = cellTextOf(cell);
+  if (/\{\{/.test(text)) {
+    return renderCellTemplateHtml(
+      text,
+      (name) => renderInlineBlank(name),
+      formatPlainText,
+    );
+  }
+  return formatPlainText(text);
+}
+
 function renderLayoutCellTag(tag, cell, extraClass) {
   // Word headers without explicit w:jc often read centered in narrow columns
   const normalized =
     tag === "th" && typeof cell === "object" && cell && !cell.align
       ? { ...cell, align: "center" }
       : cell;
-  const { text, attrs } = layoutCellAttrs(normalized, { extraClass });
-  return `<${tag}${attrs}>${formatPlainText(text)}</${tag}>`;
+  const { attrs } = layoutCellAttrs(normalized, { extraClass });
+  return `<${tag}${attrs}>${renderLayoutCellInner(normalized)}</${tag}>`;
 }
 
 function renderColgroup(block, withRowNum) {
@@ -11768,10 +12340,12 @@ function renderColgroup(block, withRowNum) {
 
 function renderWordTableBlock(block) {
   if (block.staticRows?.length) {
+    const stackable = isStackableStaticTable(block);
     const rows = block.staticRows
       .map((r) => `<tr>${r.map((c) => renderLayoutCellTag("td", c)).join("")}</tr>`)
       .join("");
-    return `<div class="doc-table-scroll doc-table-real"><table class="doc-table doc-table-stretch">${renderColgroup(block, false)}${rows}</table></div>`;
+    const tableClass = `doc-table doc-table-stretch${stackable ? " doc-table-stackable" : ""}`;
+    return `<div class="doc-table-scroll doc-table-real${stackable ? " is-stackable" : ""}"><table class="${tableClass}">${renderColgroup(block, false)}${rows}</table></div>`;
   }
 
   const listName = block.listName || "";
@@ -11791,10 +12365,12 @@ function renderWordTableBlock(block) {
       .join("");
 
   if (!field || field.type !== "list") {
+    // Unbound / non-loop template row: still turn {{tags}} into inputs (never raw text).
     const tmpl = (block.templateCells || [])
       .map((c) => {
-        const { attrs } = layoutCellAttrs(typeof c === "string" ? { text: c } : c);
-        return `<td${attrs}>${formatPlainText(cellTextOf(c))}</td>`;
+        const cellObj = typeof c === "string" ? { text: c } : c;
+        const { attrs } = layoutCellAttrs(cellObj);
+        return `<td${attrs}>${renderLayoutCellInner(cellObj)}</td>`;
       })
       .join("");
     return `<div class="doc-list doc-list-table" data-list-field="${escapeAttr(listName)}">
@@ -11842,7 +12418,7 @@ function renderWordTableBlock(block) {
       return `<tr>
         <td class="doc-table-rownum">
           <span>${idx + 1}</span>
-          <button type="button" class="linkish danger remove-row" data-list="${escapeAttr(listName)}" data-row="${idx}" title="${escapeAttr(UI_LABELS.removeRowTitle)}">${escapeHtml(UI_LABELS.removeRow)}</button>
+          <button type="button" class="btn-remove-row remove-row" data-list="${escapeAttr(listName)}" data-row="${idx}" title="${escapeAttr(UI_LABELS.removeRowTitle(idx + 1))}" aria-label="${escapeAttr(UI_LABELS.removeRowAria(idx + 1))}">${escapeHtml(UI_LABELS.removeRow)}</button>
         </td>
         ${cells}
       </tr>`;
@@ -12013,9 +12589,14 @@ function renderDocBoolControl({
     chipsHtml = `<span class="bool-chip bool-chip-single ${active ? "is-active" : ""} ${only === "·" ? "is-empty" : ""}" aria-hidden="true">${escapeHtml(only)}</span>`;
   }
 
-  const skipHtml = skipAttrs ? renderDocFieldSkipHtml(skipAttrs, skipped) : "";
+  const skipHtml = skipAttrs
+    ? `<label class="doc-skip doc-skip-compact" title="ข้าม — ติ๊กออกเพื่อแก้ค่า">
+        <input type="checkbox" ${skipAttrs} ${skipped ? "checked" : ""} />
+        <span>ข้าม</span>
+      </label>`
+    : "";
 
-  return `<span class="field-obj doc-field-obj doc-bool-wrap ${skipped ? "skipped is-skipped" : ""} ${checked ? "is-on" : "is-off"}">
+  return `<span class="doc-blank-wrap doc-bool-wrap ${skipped ? "is-skipped" : ""} ${checked ? "is-on" : "is-off"}">
     <label class="bool-opt doc-bool-opt" title="${escapeAttr(tip)}">
       <input type="checkbox" ${inputAttrs}
         ${checked ? "checked" : ""} ${skipped ? "disabled" : ""}
@@ -12190,14 +12771,17 @@ function renderInlineImageControl(name, opts = {}) {
       <span class="doc-image-drop-sub">${escapeHtml(UI_LABELS.imagePickButton)}</span>`;
   }
   const showLabel = opts.showLabel !== false;
-  return `<span class="field-obj doc-field-obj doc-blank-image-wrap ${skipped ? "skipped is-skipped" : ""}" data-image-field="${escapeAttr(name)}">
+  return `<span class="doc-blank-wrap doc-blank-image-wrap ${skipped ? "is-skipped" : ""}" data-image-field="${escapeAttr(name)}">
     ${showLabel ? `<span class="doc-image-inline-label">${escapeHtml(label)}:</span>` : ""}
     <div class="image-box doc-image-inline image-drop" tabindex="0" role="button" aria-label="${escapeAttr(UI_LABELS.imagePickButton + " — " + label)}" ${skipped ? 'aria-disabled="true"' : ""}>
       ${body}
       <button type="button" class="sr-only pick-image" tabindex="-1" ${skipped ? "disabled" : ""}>${escapeHtml(UI_LABELS.imagePickButton)}</button>
       <input class="sr-only image-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp,.png,.jpg,.jpeg,.gif,.webp" ${skipped ? "disabled" : ""} />
     </div>
-    ${renderDocFieldSkipHtml(`data-skip-field="${escapeAttr(name)}"`, skipped)}
+    <label class="doc-skip" title="${escapeAttr(UI_LABELS.skipTitle)}">
+      <input type="checkbox" data-skip-field="${escapeAttr(name)}" ${skipped ? "checked" : ""} />
+      ${escapeHtml(UI_LABELS.skip)}
+    </label>
   </span>`;
 }
 
@@ -12206,6 +12790,18 @@ function renderInlineBlank(name) {
   const skipped = !!state.skip[name];
   const labelMap = currentFieldLabelMap();
   const label = fieldDisplayLabel(field || { name }, labelMap, name);
+  const loc = fieldTableLocation(field);
+  const locAttrs = loc
+    ? [
+        loc.tableIndex != null ? `data-table-index="${loc.tableIndex}"` : "",
+        loc.rowIndexInTable != null
+          ? `data-row-in-table="${loc.rowIndexInTable}"`
+          : "",
+        loc.cellIndex != null ? `data-cell-index="${loc.cellIndex}"` : "",
+      ]
+        .filter(Boolean)
+        .join(" ")
+    : "";
 
   if (field?.type === "image") {
     return renderInlineImageControl(name, { label, showLabel: false });
@@ -12229,16 +12825,19 @@ function renderInlineBlank(name) {
   }
 
   const val = state.values[name] ?? "";
-  return `<span class="field-obj doc-field-obj ${skipped ? "skipped is-skipped" : ""} ${shouldUseTextarea(val) ? "is-multiline" : ""}">
+  return `<span class="doc-blank-wrap ${skipped ? "is-skipped" : ""} ${shouldUseTextarea(val) ? "is-multiline" : ""}"${locAttrs ? ` ${locAttrs}` : ""}>
     ${renderTextValueControl({
       value: val,
-      className: "fi doc-blank",
+      className: "doc-blank",
       attrs: `data-doc-field="${escapeAttr(name)}" name="${escapeAttr(name)}"`,
-      placeholder: formatExamplePlaceholder(label),
+      placeholder: formatExamplePlaceholder(label, name),
       disabled: skipped,
       ariaLabel: label,
     })}
-    ${renderDocFieldSkipHtml(`data-skip-field="${escapeAttr(name)}"`, skipped)}
+    <label class="doc-skip" title="${escapeAttr(UI_LABELS.skipTitle)}">
+      <input type="checkbox" data-skip-field="${escapeAttr(name)}" ${skipped ? "checked" : ""} />
+      ${escapeHtml(UI_LABELS.skip)}
+    </label>
   </span>`;
 }
 
@@ -12287,17 +12886,19 @@ function renderListCellControl(listName, row, idx, item, itemField, displayOverr
   }
   const cellVal = row[item] ?? "";
   const cellLabel = String(displayOverride || "").trim() || itemFieldLabel(itemField) || item;
-  const skipAttrs = `data-skip-list="${escapeAttr(listName)}" data-skip-row="${idx}" data-skip-item="${escapeAttr(item)}"`;
-  return `<span class="field-obj doc-field-obj doc-table-cell-wrap ${itemSkipped ? "skipped is-skipped" : ""} ${shouldUseTextarea(cellVal) ? "is-multiline" : ""}">
+  return `<span class="doc-blank-wrap doc-table-cell-wrap ${itemSkipped ? "is-skipped" : ""} ${shouldUseTextarea(cellVal) ? "is-multiline" : ""}">
     ${renderTextValueControl({
       value: cellVal,
-      className: "fi doc-blank doc-table-input",
+      className: "doc-blank doc-table-input",
       attrs: `data-list="${escapeAttr(listName)}" data-row="${idx}" data-item="${escapeAttr(item)}"`,
-      placeholder: formatExamplePlaceholder(cellLabel),
+      placeholder: formatExamplePlaceholder(cellLabel, item),
       disabled: itemSkipped,
       ariaLabel: cellLabel,
     })}
-    ${renderDocFieldSkipHtml(skipAttrs, itemSkipped)}
+    <label class="doc-skip doc-skip-compact" title="${escapeAttr(UI_LABELS.skipTitle)}">
+      <input type="checkbox" data-skip-list="${escapeAttr(listName)}" data-skip-row="${idx}" data-skip-item="${escapeAttr(item)}" ${itemSkipped ? "checked" : ""} />
+      <span>${escapeHtml(UI_LABELS.skip)}</span>
+    </label>
   </span>`;
 }
 
@@ -12348,7 +12949,7 @@ function renderListAsTable(listName, field, rows) {
       return `<tr>
         <th scope="row" class="doc-table-rownum">
           <span>${idx + 1}</span>
-          <button type="button" class="linkish danger remove-row" data-list="${escapeAttr(listName)}" data-row="${idx}" title="ลบแถว">ลบ</button>
+          <button type="button" class="btn-remove-row remove-row" data-list="${escapeAttr(listName)}" data-row="${idx}" title="${escapeAttr(UI_LABELS.removeRowTitle(idx + 1))}" aria-label="${escapeAttr(UI_LABELS.removeRowAria(idx + 1))}">${escapeHtml(UI_LABELS.removeRow)}</button>
         </th>
         ${cells}
       </tr>`;
@@ -12387,7 +12988,7 @@ function renderListAsCards(listName, field, innerTokens, rows) {
       return `<div class="doc-list-row">
         <div class="doc-list-row-head">
           <span>แถว ${idx + 1}</span>
-          <button type="button" class="linkish danger remove-row" data-list="${escapeAttr(listName)}" data-row="${idx}">ลบแถว</button>
+          <button type="button" class="btn-remove-row remove-row" data-list="${escapeAttr(listName)}" data-row="${idx}" title="${escapeAttr(UI_LABELS.removeRowTitle(idx + 1))}" aria-label="${escapeAttr(UI_LABELS.removeRowAria(idx + 1))}">${escapeHtml(UI_LABELS.removeRow)}</button>
         </div>
         <div class="doc-list-row-body">${line}</div>
       </div>`;
@@ -12645,7 +13246,7 @@ function renderField(field) {
           id: `f-${cssId(field.name)}`,
           className: "field-text-control",
           attrs: `name="${escapeAttr(field.name)}"`,
-          placeholder: formatExamplePlaceholder(label),
+          placeholder: formatExamplePlaceholder(label, field.name),
           disabled: skipped,
           ariaLabel: label,
         })}
@@ -12778,7 +13379,7 @@ function renderField(field) {
               <div class="row-card" aria-label="แถว ${idx + 1} ของ ${escapeAttr(field.name)}">
                 <div class="row-card-head">
                   <span>แถว ${idx + 1}</span>
-                  <button type="button" class="linkish danger remove-row" data-list="${escapeAttr(field.name)}" data-row="${idx}">ลบแถว</button>
+                  <button type="button" class="btn-remove-row remove-row" data-list="${escapeAttr(field.name)}" data-row="${idx}" title="${escapeAttr(UI_LABELS.removeRowTitle(idx + 1))}" aria-label="${escapeAttr(UI_LABELS.removeRowAria(idx + 1))}">${escapeHtml(UI_LABELS.removeRow)}</button>
                 </div>
                 <div class="row-grid">${inputs}</div>
               </div>`;
@@ -12826,7 +13427,6 @@ function wireFieldEvents() {
         }
       }
       scheduleSaveDraft();
-      syncStatusPill();
     });
   });
 
@@ -12854,7 +13454,6 @@ function wireFieldEvents() {
         if (!still.length) hideBanner();
       }
       scheduleSaveDraft();
-      syncStatusPill();
     });
   });
 
@@ -13092,7 +13691,6 @@ function missingFieldsForSlot(slot) {
     } else if (f.type === "image") {
       if (!slot.images[f.name]) missing.push(`${slot.filename}: ${fieldLabel}`);
     } else if (f.type === "list") {
-      if (slot.skip[f.name]) continue;
       const rows = slot.values[f.name] || [];
       const listResult = collectMissingListValidation({
         fieldLabel,
@@ -13100,7 +13698,6 @@ function missingFieldsForSlot(slot) {
         rows,
         rowSkip: slot.rowSkip[f.name],
         labelMap,
-        listSkipped: !!slot.skip[f.name],
       });
       for (const label of listResult.missing) {
         missing.push(`${slot.filename}: ${label}`);
@@ -13137,13 +13734,14 @@ async function createAllTemplatesZip() {
     return;
   }
 
+  const choice = await askClearAfterCreate();
+  if (choice === "abort") return;
+
   const btn = /** @type {HTMLButtonElement | null} */ (document.getElementById("submitBtn"));
   if (btn) {
     btn.disabled = true;
     btn.textContent = "กำลังสร้างทั้งหมด…";
   }
-  clientStatusPill.generating = true;
-  syncStatusPill();
   showBanner(`กำลังสร้าง ${multiSlots.length} เอกสารจากค่าบนหน้าจอ…`, "progress");
   app.setAttribute("aria-busy", "true");
 
@@ -13163,6 +13761,9 @@ async function createAllTemplatesZip() {
     items.push({
       filename: slot.filename,
       values: buildValuesPayloadFrom(slot),
+      // Preferred contract: skip / rowSkip maps alongside values (API-AI-KEYS-AND-SKIP).
+      skip: slot.skip || {},
+      rowSkip: slot.rowSkip || {},
     });
   }
   fd.append("items", JSON.stringify(items));
@@ -13171,7 +13772,7 @@ async function createAllTemplatesZip() {
     const res = await fetch("/api/batch-fill", { method: "POST", body: fd });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      showBanner(data.error || "สร้างเอกสารทั้งหมดไม่สำเร็จ");
+      showBanner(mapFillError(data, res.status, undefined, "สร้างเอกสารทั้งหมดไม่สำเร็จ"));
       return;
     }
     if (data.zipBase64) {
@@ -13187,39 +13788,24 @@ async function createAllTemplatesZip() {
       URL.revokeObjectURL(url);
     }
     const okN = (data.results || []).filter((r) => r.ok).length;
-    scheduleSaveDraft();
-    showBanner(
-      `${UI_LABELS.postCreateToast} · สำเร็จ ${okN}/${multiSlots.length}`,
-      "success",
-      {
-        secondaryAction: {
-          label: UI_LABELS.postCreateKeep,
-          onClick: () => hideBanner(),
-        },
-        action: {
-          label: UI_LABELS.postCreateClear,
-          onClick: () => {
-            for (const slot of multiSlots) {
-              applySlotToState(slot);
-              clearFilledFields();
-              persistActiveSlot();
-            }
-            const active =
-              multiSlots.find((s) => s.id === multiActiveId) || multiSlots[0];
-            if (active) applySlotToState(active);
-            renderForm();
-            hideBanner();
-          },
-        },
-      },
-    );
+    if (choice === "clear") {
+      for (const slot of multiSlots) {
+        applySlotToState(slot);
+        clearFilledFields();
+        persistActiveSlot();
+      }
+      const active = multiSlots.find((s) => s.id === multiActiveId) || multiSlots[0];
+      if (active) applySlotToState(active);
+      renderForm();
+      showBanner(`ดาวน์โหลด ZIP แล้ว · สำเร็จ ${okN}/${multiSlots.length} และล้างช่องแล้ว`, "success");
+    } else {
+      scheduleSaveDraft();
+      showBanner(`ดาวน์โหลด ZIP แล้ว · สำเร็จ ${okN}/${multiSlots.length}`, "success");
+    }
+    setTimeout(() => showBanner(""), 3200);
   } catch {
-    clientStatusPill.errorMessage = UI_LABELS.statusError;
     showBanner("เชื่อมต่อเซิร์ฟเวอร์ไม่ได้");
   } finally {
-    clientStatusPill.generating = false;
-    clientStatusPill.errorMessage = null;
-    syncStatusPill();
     app.removeAttribute("aria-busy");
     if (btn) {
       btn.disabled = false;
@@ -13251,17 +13837,18 @@ async function onSubmit(e) {
   const btn = /** @type {HTMLButtonElement | null} */ (document.getElementById("submitBtn"));
   if (btn) {
     btn.disabled = true;
-    btn.textContent = "กำลังสร้าง…";
+    btn.textContent = UI_LABELS.aiStatusCreating;
   }
-  clientStatusPill.errorMessage = null;
-  clientStatusPill.generating = true;
-  syncStatusPill();
+  syncAiStatusPill();
   showBanner("");
 
   const values = buildValuesPayload();
   const fd = new FormData();
   fd.append("file", state.file);
   fd.append("values", JSON.stringify(values));
+  // Preferred contract: send skip / rowSkip maps (Backend runs toFillValues when present).
+  fd.append("skip", JSON.stringify(state.skip || {}));
+  fd.append("rowSkip", JSON.stringify(state.rowSkip || {}));
   for (const [name, file] of Object.entries(state.images)) {
     if (file && !state.skip[name]) {
       fd.append(`image:${name}`, file, file.name);
@@ -13274,12 +13861,10 @@ async function onSubmit(e) {
       let msg = "สร้างเอกสารไม่สำเร็จ";
       try {
         const data = await res.json();
-        if (data.error) msg = data.error;
+        msg = mapFillError(data, res.status, undefined, msg);
       } catch {
         /* ignore */
       }
-      clientStatusPill.errorMessage = UI_LABELS.statusError;
-      syncStatusPill();
       showBanner(msg);
       return;
     }
@@ -13287,9 +13872,25 @@ async function onSubmit(e) {
     const cd = res.headers.get("Content-Disposition") || "";
     const star = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(cd);
     const plain = /filename="([^"]+)"/.exec(cd);
-    const filename = star
+    const suggested = star
       ? decodeURIComponent(star[1].trim())
       : plain?.[1] || "filled.docx";
+    const named = await askDialog({
+      title: UI_LABELS.outputNameTitle,
+      body: "ตั้งชื่อไฟล์ก่อนดาวน์โหลด — เปลี่ยนได้ตามต้องการ",
+      input: {
+        label: UI_LABELS.outputNameLabel,
+        type: "text",
+        value: suggested.replace(/\.docx$/i, ""),
+      },
+      actions: [
+        { id: "ok", label: UI_LABELS.outputNameConfirm, kind: "primary" },
+        { id: "abort", label: UI_LABELS.dialogCancel, kind: "ghost" },
+      ],
+    });
+    if (!named || named === "abort" || named.id !== "ok") return;
+    let filename = String(named.value || suggested).trim() || suggested;
+    if (!/\.docx$/i.test(filename)) filename = `${filename}.docx`;
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -13301,21 +13902,16 @@ async function onSubmit(e) {
 
     persistActiveSlot();
     scheduleSaveDraft();
-    offerClearFieldsAfterDownload(() => {
-      clearFilledFields();
-      persistActiveSlot();
-      renderForm();
-    });
+    toastClearAfterDownload();
+    syncAiStatusPill();
   } catch {
-    clientStatusPill.errorMessage = UI_LABELS.statusError;
     showBanner("เชื่อมต่อเซิร์ฟเวอร์ไม่ได้");
   } finally {
-    clientStatusPill.generating = false;
-    syncStatusPill();
     if (btn) {
       btn.disabled = false;
-      btn.textContent = isMultiMode() ? "สร้างเอกสาร…" : "สร้างเอกสาร";
+      btn.textContent = isMultiMode() ? UI_LABELS.createDocMulti : UI_LABELS.createDoc;
     }
+    syncAiStatusPill();
   }
 }
 
@@ -13370,7 +13966,26 @@ async function boot() {
     const restored = await restoreDraft();
     if (restored) {
       try {
+        const choice = await askDialog({
+          title: UI_LABELS.draftResumeTitle,
+          body: UI_LABELS.draftResumeBody,
+          actions: [
+            { id: "ok", label: UI_LABELS.draftResumeContinue, kind: "primary" },
+            { id: "abort", label: UI_LABELS.draftResumeFresh, kind: "secondary" },
+          ],
+        });
+        if (choice !== "ok") {
+          try {
+            await draftClear();
+          } catch {
+            /* ignore */
+          }
+          resetFormState();
+          renderEmpty();
+          return;
+        }
         renderForm();
+        syncAiStatusPill();
         const n = multiSlots.length;
         showBanner(
           n > 1

@@ -13,6 +13,7 @@ import {
   getAppLimits,
   listAuditLogs,
   listUsersForAdmin,
+  resolveUpgradeUrl,
   setAiAdminSettings,
   setAppLimits,
   setUserBanned,
@@ -23,25 +24,30 @@ import {
 import {
   clearGeminiKey,
   adminDefaultProviderFromSettings,
+  coalesceAiCredentialsWithSharedEnv,
+  ensureAiServerConfigLoaded,
   geminiStatus,
   getGeminiApiKey,
-  getRequestAiCredentials,
   getRequestAiProvider,
   getRequestGeminiKey,
   hasRequestAiKey,
   isByokOnly,
   maskGeminiKey,
+  missingAiCredentialsError,
   requestHasExplicitAiProvider,
   resolveEffectiveAiProvider,
-  resolveProviderApiKey,
+  resolveRequestAiCredentials,
+  runWithSavedAiKeyAuthFallback,
   normalizeGeminiModel,
   writeAiConfig,
+  type ResolvedRequestAiCredentials,
 } from "./ai-config";
 import {
   defaultModelForProvider,
   getAiProvider,
   listAiProvidersPublic,
   normalizeProviderModel,
+  resolveEffectiveModelForProvider,
 } from "./ai-providers";
 import type { DocxFormValuesJson } from "./source-map";
 import {
@@ -112,6 +118,298 @@ function assertNotAborted(signal: AbortSignal | null | undefined) {
     err.name = "AbortError";
     throw err;
   }
+}
+
+/**
+ * Shared AI credential gate for routes that accept X-Ai-Key-Id and/or
+ * per-request keys. Honours per-user mode (server|byok) and optional
+ * request `source` override from the attach-page model picker.
+ */
+async function resolveRouteAiCredentials(
+  req: Request,
+  extras?: {
+    formKey?: string;
+    formModel?: string;
+    formProvider?: string;
+    /** Optional override from attach picker — falls back to saved mode. */
+    source?: string | null;
+  },
+): Promise<
+  | {
+      ok: true;
+      creds: ResolvedRequestAiCredentials;
+      provider: string;
+      apiKey: string;
+      model: string;
+      choiceSource: "server" | "byok";
+    }
+  | { ok: false; status: 401 | 400; error: string; code?: string }
+> {
+  const sessionGate = await (async () => {
+    try {
+      const { auth } = await import("./auth");
+      const session = await auth.api.getSession({ headers: req.headers });
+      const userId = session?.user?.id ? String(session.user.id) : "";
+      return userId ? ({ ok: true as const, userId }) : ({ ok: false as const });
+    } catch {
+      return { ok: false as const };
+    }
+  })();
+  const sessionUserId = sessionGate.ok ? sessionGate.userId : null;
+
+  const {
+    buildAiKeyChoiceStatus,
+    normalizeAiKeyMode,
+    resolveFillCredentialPolicy,
+    validateModelForSource,
+    resolveServerFillApiKey,
+    canUseAi,
+    isServerKeyAvailable,
+    listUserAiKeyProviders,
+    userProvidersFromKeys,
+  } = await import("./ai-key-choice");
+
+  const sourceOverride = normalizeAiKeyMode(extras?.source);
+  let choiceStatus = sessionUserId
+    ? await buildAiKeyChoiceStatus(sessionUserId)
+    : {
+        mode: "byok" as const,
+        serverKeyAvailable: false,
+        userKeySet: false,
+      };
+
+  let userProviders: string[] = [];
+  if (sessionUserId) {
+    userProviders = await listUserAiKeyProviders(sessionUserId);
+  }
+
+  // Guests: header/form key → byok; otherwise shared server key when available.
+  if (!sessionUserId) {
+    const headerCreds = await resolveRequestAiCredentials(req, null);
+    const formKey = String(extras?.formKey || "").trim();
+    const hasKey = Boolean(headerCreds.apiKey || formKey);
+    const serverKeyAvailable = isServerKeyAvailable();
+    choiceStatus = {
+      mode: hasKey
+        ? "byok"
+        : serverKeyAvailable
+          ? "server"
+          : "byok",
+      serverKeyAvailable,
+      userKeySet: hasKey,
+    };
+    if (hasKey) {
+      const p =
+        getAiProvider(extras?.formProvider)?.id ||
+        getAiProvider(headerCreds.provider)?.id ||
+        "";
+      if (p) userProviders = [p];
+    }
+  }
+
+  const policy = resolveFillCredentialPolicy(choiceStatus, sourceOverride);
+  if (policy === "none") {
+    // Signed-in missing key → 400 AI_KEY_REQUIRED; 401 only means not signed in.
+    const signedIn = Boolean(sessionUserId);
+    return {
+      ok: false,
+      status: signedIn ? 400 : 401,
+      code: signedIn ? "AI_KEY_REQUIRED" : "AI_KEY_UNAUTHORIZED",
+      error: canUseAi({
+        ...choiceStatus,
+        mode: sourceOverride || choiceStatus.mode,
+      })
+        ? missingAiCredentialsError()
+        : sourceOverride === "server" ||
+            (!sourceOverride && choiceStatus.mode === "server")
+          ? "ยังไม่มีคีย์เซิร์ฟเวอร์ — เลือกคีย์ของฉันหรือให้ผู้ดูแลตั้งคีย์เซิร์ฟเวอร์"
+          : "ต้องตั้งค่าคีย์ AI ก่อน (คีย์ของฉันหรือคีย์เซิร์ฟเวอร์)",
+    };
+  }
+
+  const modelCheck = validateModelForSource({
+    status: choiceStatus,
+    source: policy,
+    model: extras?.formModel,
+    provider: extras?.formProvider,
+    userProviders,
+  });
+  if (!modelCheck.ok) {
+    return {
+      ok: false,
+      status: modelCheck.status,
+      error: modelCheck.error,
+      code: modelCheck.code,
+    };
+  }
+
+  if (policy === "server") {
+    const serverKey = resolveServerFillApiKey(modelCheck.provider);
+    if (!serverKey) {
+      return {
+        ok: false,
+        status: 400,
+        code: "AI_SERVER_KEY_UNAVAILABLE",
+        error: "คีย์เซิร์ฟเวอร์ไม่พร้อมใช้งาน",
+      };
+    }
+    const model = resolveEffectiveModelForProvider(
+      modelCheck.provider,
+      modelCheck.model,
+    );
+    return {
+      ok: true,
+      choiceSource: "server",
+      provider: modelCheck.provider,
+      apiKey: serverKey,
+      model,
+      creds: {
+        provider: modelCheck.provider,
+        apiKey: serverKey,
+        model,
+        fromUserVault: false,
+        usedSharedEnvFallback: true,
+      },
+    };
+  }
+
+  // BYOK / own key path — key must match the model's provider; no shared-env coalesce.
+  const provider = modelCheck.provider;
+  let creds = await resolveRequestAiCredentials(req, sessionUserId);
+  const formKey = String(extras?.formKey || "").trim();
+  if (!creds.apiKey && formKey) {
+    creds = {
+      ...creds,
+      provider,
+      apiKey: formKey,
+      model: modelCheck.model,
+      fromUserVault: false,
+    };
+  }
+
+  // Header/vault key for a different provider than the chosen model → mismatch.
+  if (
+    creds.apiKey &&
+    creds.fromUserVault &&
+    getAiProvider(creds.provider)?.id &&
+    getAiProvider(creds.provider)!.id !== provider
+  ) {
+    // Ignore wrong-provider vault resolution; try to find the matching key below.
+    creds = {
+      provider,
+      apiKey: "",
+      model: modelCheck.model,
+      fromUserVault: false,
+      requestedKeyId: creds.requestedKeyId,
+    };
+  }
+
+  if ((!creds.apiKey || getAiProvider(creds.provider)?.id !== provider) && sessionUserId) {
+    try {
+      const { listUserAiKeys } = await import("./ai-key-vault");
+      const rows = await listUserAiKeys(sessionUserId);
+      userProviders = userProvidersFromKeys(rows);
+      const match = rows.find(
+        (r) => getAiProvider(r.provider)?.id === provider && r.apiKey,
+      );
+      if (match?.apiKey) {
+        creds = {
+          provider: getAiProvider(match.provider)!.id,
+          apiKey: match.apiKey,
+          model: match.model || modelCheck.model,
+          keyId: match.id,
+          fromUserVault: true,
+        };
+      } else if (!formKey) {
+        // Model passed validateModelForSource only if provider was in allow-list;
+        // if the key vanished between list and resolve, treat as missing key.
+        return {
+          ok: false,
+          status: 400,
+          code: "AI_KEY_REQUIRED",
+          error: `ยังไม่มีคีย์สำหรับผู้ให้บริการ ${provider} — บันทึกคีย์ก่อน หรือเลือกโมเดลของผู้ให้บริการที่มีคีย์`,
+        };
+      }
+    } catch {
+      /* keep empty */
+    }
+  }
+
+  // Guest BYOK: form/header key must be used with the validated model provider only.
+  if (!sessionUserId && formKey) {
+    creds = {
+      provider,
+      apiKey: formKey,
+      model: modelCheck.model,
+      fromUserVault: false,
+    };
+  }
+
+  const apiKey = String(creds.apiKey || "").trim();
+  const model = resolveEffectiveModelForProvider(
+    provider,
+    extras?.formModel || creds.model || modelCheck.model,
+  );
+  if (!hasRequestAiKey(provider, apiKey) || !apiKey) {
+    return {
+      ok: false,
+      status: sessionUserId ? 400 : 401,
+      code: sessionUserId ? "AI_KEY_REQUIRED" : "AI_KEY_UNAUTHORIZED",
+      error: missingAiCredentialsError(creds),
+    };
+  }
+  // Hard guarantee: never send a key under a mismatched provider id.
+  if (
+    creds.fromUserVault &&
+    getAiProvider(creds.provider)?.id &&
+    getAiProvider(creds.provider)!.id !== provider
+  ) {
+    return {
+      ok: false,
+      status: 400,
+      code: "AI_MODEL_SOURCE_MISMATCH",
+      error: "คีย์ที่บันทึกไว้ไม่ตรงกับผู้ให้บริการของโมเดลที่เลือก",
+    };
+  }
+  if (creds.fromUserVault && creds.keyId && sessionUserId) {
+    void import("./ai-key-vault")
+      .then(({ touchUserAiKeyUsed }) =>
+        touchUserAiKeyUsed(sessionUserId, String(creds.keyId)),
+      )
+      .catch(() => undefined);
+  }
+  return {
+    ok: true,
+    choiceSource: "byok",
+    provider,
+    apiKey,
+    model,
+    creds: {
+      ...creds,
+      provider,
+      apiKey,
+      model,
+    },
+  };
+}
+
+/** Options for auth-error JSON when the shared server key was in use. */
+function sharedServerKeyErrorOpts(
+  creds: ResolvedRequestAiCredentials,
+  providerId?: string | null,
+): {
+  usedSharedEnvFallback?: boolean;
+  keySource?: "shared";
+  providerLabel?: string;
+} {
+  if (!creds.usedSharedEnvFallback) return {};
+  const id = String(providerId || creds.provider || "").trim();
+  const label = getAiProvider(id)?.label || id || undefined;
+  return {
+    usedSharedEnvFallback: true,
+    keySource: "shared",
+    providerLabel: label,
+  };
 }
 
 export function createApi(options: {
@@ -239,6 +537,7 @@ export function createApi(options: {
           maxMultiTemplates: ent.maxMultiTemplates,
           freeMaxMulti: limits.freeMaxMulti,
           paidMaxMulti: limits.paidMaxMulti,
+          upgradeUrl: resolveUpgradeUrl(limits) || "",
         },
         session: {
           id: session.session.id,
@@ -252,27 +551,67 @@ export function createApi(options: {
     }
   });
 
-  /** Public liveness — status only (no version / author / AI inventory). */
-  api.get("/health", (c) => c.json({ ok: true, status: "ok" }));
+  /**
+   * Public liveness / readiness — status only (no version / author / AI inventory).
+   * Production missing BETTER_AUTH_SECRET → not-ready (503).
+   */
+  api.get("/health", async (c) => {
+    const { getBetterAuthSecretHealth } = await import("./auth-secret");
+    const { hasServerAiKeyConfigured } = await import("./ai-config");
+    const secret = getBetterAuthSecretHealth();
+    const serverAiKeyConfigured = hasServerAiKeyConfigured();
+    if (!secret.ready) {
+      return c.json(
+        {
+          ok: false,
+          status: "not-ready",
+          reason: "BETTER_AUTH_SECRET",
+          serverAiKeyConfigured,
+        },
+        503,
+      );
+    }
+    return c.json({
+      ok: true,
+      status: "ok",
+      /** Non-secret: env/DB shared AI key present (never echoes key material). */
+      serverAiKeyConfigured,
+    });
+  });
+
+  /** Removed DEV test-login routes — always 404 (OIDC-only). */
+  api.get("/dev/test-accounts", (c) => c.json({ error: "ไม่พบ" }, 404));
+  api.post("/dev/test-login", (c) => c.json({ error: "ไม่พบ" }, 404));
 
   /**
    * Public plan/quota snapshot for the guest shell (no internal diagnostics).
    * Admin limit changes are reflected here for the fill UI.
-   * `version` is package.json only — not author / AI inventory.
+   * `version` is short build commit when known (RENDER_GIT_COMMIT / SOURCE_COMMIT /
+   * GIT_SHA / …), else package.json — not author / AI inventory.
    */
   api.get("/entitlement", async (c) => {
     await ensureAdminSchema().catch(() => undefined);
     const ent = await canUseFeature(PremiumFeature.AiSourceMap, c.req.raw);
     const limits = await getAppLimits().catch(() => null);
+    const maxMulti = ent.entitlement.maxMultiTemplates;
+    const plan = ent.entitlement.plan || "unknown";
+    const paid = ent.entitlement.paid;
+    const upgradeUrl = resolveUpgradeUrl(limits);
     return c.json({
       version: options.version || "0.0.0",
       premium: {
         enforce: String(process.env.PREMIUM_ENFORCE || "") === "1",
-        paid: ent.entitlement.paid,
-        plan: ent.entitlement.plan || "unknown",
-        maxMultiTemplates: ent.entitlement.maxMultiTemplates,
+        paid,
+        plan,
+        maxMultiTemplates: maxMulti,
         freeMaxMulti: limits?.freeMaxMulti,
         paidMaxMulti: limits?.paidMaxMulti,
+        /** Plan-aware upload quota copy for the guest/home dropzone (F02). */
+        uploadLimitText: paid
+          ? `สูงสุด ${maxMulti} ไฟล์ต่อครั้ง (${String(plan) === "pro" || String(plan) === "paid" || String(plan) === "premium" ? "จ่ายแล้ว" : plan})`
+          : `สูงสุด ${maxMulti} ไฟล์ต่อครั้ง (ฟรี)`,
+        /** F37: empty string → Frontend hides upgrade link (no hardcoded URL). */
+        upgradeUrl: upgradeUrl || "",
       },
     });
   });
@@ -282,10 +621,15 @@ export function createApi(options: {
     const gate = await requireSuperAdmin(c.req.raw);
     if (!gate.ok) return c.json({ error: gate.error }, gate.status);
     await ensureAdminSchema().catch(() => undefined);
-    const aiCreds = getRequestAiCredentials(c.req.raw);
+    let aiCreds = await resolveRequestAiCredentials(
+      c.req.raw,
+      gate.userId,
+    );
+    aiCreds = coalesceAiCredentialsWithSharedEnv(aiCreds);
     const aiAdmin = await getAiAdminSettings().catch(() => ({
       defaultModel: "gemini-3.8-flash",
     }));
+    const adminDefaultProvider = adminDefaultProviderFromSettings(aiAdmin);
     return c.json({
       ok: true,
       name: "docx-form-web",
@@ -298,6 +642,10 @@ export function createApi(options: {
         requestModel: aiCreds.model,
         requestProvider: aiCreds.provider,
         adminDefaultModel: aiAdmin.defaultModel,
+        adminDefaultProvider,
+        fromUserVault: Boolean(aiCreds.fromUserVault),
+        keyId: aiCreds.keyId || null,
+        usedSharedEnvFallback: Boolean(aiCreds.usedSharedEnvFallback),
       }),
     });
   });
@@ -412,7 +760,10 @@ export function createApi(options: {
     const gate = await requireSuperAdmin(c.req.raw);
     if (!gate.ok) return c.json({ error: gate.error }, gate.status);
     const limits = await getAppLimits();
-    return c.json({ limits });
+    return c.json({
+      limits,
+      upgradeUrl: resolveUpgradeUrl(limits) || "",
+    });
   });
 
   api.post("/admin/limits", async (c) => {
@@ -421,31 +772,63 @@ export function createApi(options: {
     const body = (await c.req.json().catch(() => ({}))) as {
       freeMaxMulti?: number;
       paidMaxMulti?: number;
+      upgradeUrl?: string;
     };
     const limits = await setAppLimits({
       freeMaxMulti: body.freeMaxMulti,
       paidMaxMulti: body.paidMaxMulti,
+      ...(body.upgradeUrl !== undefined ? { upgradeUrl: body.upgradeUrl } : {}),
     });
     await writeAuditLog({
       actorId: gate.userId,
       actorEmail: gate.email,
       action: "limits.update",
-      detail: limits,
+      detail: { ...limits, upgradeUrl: limits.upgradeUrl || "" },
     });
-    return c.json({ ok: true, limits });
+    return c.json({
+      ok: true,
+      limits,
+      upgradeUrl: resolveUpgradeUrl(limits) || "",
+    });
   });
 
   api.get("/admin/ai", async (c) => {
     const gate = await requireSuperAdmin(c.req.raw);
     if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    await ensureAiServerConfigLoaded().catch(() => undefined);
     const aiAdmin = await getAiAdminSettings();
     const adminDefaultProvider = adminDefaultProviderFromSettings(aiAdmin);
+    const status = geminiStatus({
+      adminDefaultModel: aiAdmin.defaultModel,
+      adminDefaultProvider,
+    });
+    // Strip internals — never leak env var names, filesystem paths, or raw
+    // configPath. Human labels only; effective* matches /ai/status pill resolver.
+    // Server keys: status.serverKeySources from the provider catalog (generic).
+    const {
+      configPath: _dropPath,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      ...safeStatus
+    } = status as typeof status & { configPath?: string };
+    void _dropPath;
     return c.json({
       settings: aiAdmin,
-      status: geminiStatus({
-        adminDefaultModel: aiAdmin.defaultModel,
-        adminDefaultProvider,
-      }),
+      status: {
+        ...safeStatus,
+        effectiveProvider: status.effectiveProvider,
+        effectiveProviderLabel: status.effectiveProviderLabel,
+        effectiveModel: status.effectiveModel || status.model,
+        model: status.model,
+        adminDefaultModel: status.adminDefaultModel,
+        adminDefaultProvider: status.adminDefaultProvider,
+        defaultModel: status.defaultModel,
+        configStoreLabel: status.configStoreLabel,
+        serverKeySources: status.serverKeySources || [],
+        hasClearableServerKey: Boolean(status.hasClearableServerKey),
+        premiumEnforceLabel: status.premiumEnforce
+          ? "บังคับแผนพรีเมียม"
+          : "ไม่บังคับ",
+      },
     });
   });
 
@@ -459,7 +842,7 @@ export function createApi(options: {
     if (!model) return c.json({ error: "โมเดลไม่ถูกต้อง" }, 400);
     const settings = await setAiAdminSettings({ defaultModel: model });
     if (!isByokOnly()) {
-      writeAiConfig({ geminiModel: model });
+      await writeAiConfig({ geminiModel: model });
     }
     await writeAuditLog({
       actorId: gate.userId,
@@ -468,12 +851,51 @@ export function createApi(options: {
       detail: settings,
     });
     const adminDefaultProvider = adminDefaultProviderFromSettings(settings);
+    const status = geminiStatus({
+      adminDefaultModel: settings.defaultModel,
+      adminDefaultProvider,
+    });
+    const { configPath: _dropPath, ...safeStatus } = status as typeof status & {
+      configPath?: string;
+    };
+    void _dropPath;
     return c.json({
       ok: true,
       settings,
+      status: {
+        ...safeStatus,
+        premiumEnforceLabel: status.premiumEnforce
+          ? "บังคับแผนพรีเมียม"
+          : "ไม่บังคับ",
+        effectiveModel: status.effectiveModel || status.model,
+      },
+    });
+  });
+
+  /** Superadmin-only: clear file-stored server Gemini key (not env keys). */
+  api.delete("/admin/ai/server-key", async (c) => {
+    const gate = await requireSuperAdmin(c.req.raw);
+    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    if (isByokOnly()) {
+      return c.json(
+        { error: "โหมด BYOK ไม่มีการเก็บคีย์บนเซิร์ฟเวอร์ให้ลบ" },
+        400,
+      );
+    }
+    await clearGeminiKey();
+    await writeAuditLog({
+      actorId: gate.userId,
+      actorEmail: gate.email,
+      action: "ai.clear_server_key",
+      detail: { kind: "db-gemini" },
+    });
+    const aiAdmin = await getAiAdminSettings();
+    return c.json({
+      ok: true,
+      cleared: true,
       status: geminiStatus({
-        adminDefaultModel: settings.defaultModel,
-        adminDefaultProvider,
+        adminDefaultModel: aiAdmin.defaultModel,
+        adminDefaultProvider: adminDefaultProviderFromSettings(aiAdmin),
       }),
     });
   });
@@ -515,6 +937,7 @@ export function createApi(options: {
     ) {
       return c.json({ error: "ไม่มีสิทธิ์" }, 403);
     }
+    // Error jobs include `code` (e.g. AI_SERVER_KEY_INVALID, AI_KEY_REQUIRED).
     return c.json(job);
   });
 
@@ -575,26 +998,90 @@ export function createApi(options: {
     } catch {
       sessionUserId = null;
     }
-    const { resolveRequestAiCredentials } = await import("./ai-config");
-    const creds = await resolveRequestAiCredentials(
-      c.req.raw,
-      sessionUserId,
-    );
+    const { resolveRequestAiCredentials, coalesceAiCredentialsWithSharedEnv, isByokOnly } =
+      await import("./ai-config");
+    let creds = await resolveRequestAiCredentials(c.req.raw, sessionUserId);
+    // BYOK-only (env) or user preference mode=byok with no personal key:
+    // never surface shared server key as connected/keySource=shared.
+    let choiceMode: "server" | "byok" | null = null;
+    let userKeySet = false;
+    if (sessionUserId) {
+      try {
+        const { buildAiKeyChoiceStatus } = await import("./ai-key-choice");
+        const choice = await buildAiKeyChoiceStatus(sessionUserId);
+        choiceMode = choice.mode;
+        userKeySet = choice.userKeySet;
+      } catch {
+        /* ignore */
+      }
+    }
+    const hasPersonalKey =
+      Boolean(creds.fromUserVault && creds.apiKey) ||
+      Boolean(String(getRequestGeminiKey(c.req.raw) || "").trim());
+    const blockSharedForByokChoice =
+      (choiceMode === "byok" && !userKeySet && !hasPersonalKey) ||
+      (isByokOnly() && !hasPersonalKey);
+    if (!blockSharedForByokChoice) {
+      creds = coalesceAiCredentialsWithSharedEnv(creds);
+    } else {
+      // Never surface shared server key as connected in byok mode with no user key.
+      creds = {
+        ...creds,
+        apiKey: hasPersonalKey ? creds.apiKey : "",
+        usedSharedEnvFallback: false,
+        fromUserVault: hasPersonalKey ? creds.fromUserVault : false,
+      };
+    }
+    let lastTestAt: string | null = null;
+    let lastTestOk: boolean | null = null;
+    let lastTestCode: string | null = null;
+    let lastTestMessage: string | null = null;
+    if (creds.fromUserVault && creds.keyId && sessionUserId) {
+      try {
+        const { getUserAiKey } = await import("./ai-key-vault");
+        const row = await getUserAiKey(sessionUserId, creds.keyId);
+        if (row) {
+          lastTestAt = row.lastTestAt || null;
+          lastTestOk =
+            typeof row.lastTestOk === "boolean" ? row.lastTestOk : null;
+          lastTestCode = row.lastTestCode || null;
+          lastTestMessage = row.lastTestMessage || null;
+        }
+      } catch {
+        /* ignore vault meta errors for status */
+      }
+    }
     const adminDefaultProvider = adminDefaultProviderFromSettings(aiAdmin);
     const { summarizeAiJobsForUser } = await import("./ai-jobs");
     const jobSummary = summarizeAiJobsForUser(sessionUserId);
-    return c.json(
-      geminiStatus({
-        requestKey: creds.apiKey,
-        requestModel: creds.model,
-        requestProvider: creds.provider,
-        explicitProvider: requestHasExplicitAiProvider(c.req.raw),
-        keyId: creds.keyId,
-        jobState: jobSummary.jobState,
-        adminDefaultModel: aiAdmin.defaultModel,
-        adminDefaultProvider,
-      }),
-    );
+    const status = geminiStatus({
+      requestKey: creds.apiKey,
+      requestModel: creds.model,
+      requestProvider: creds.provider,
+      explicitProvider: requestHasExplicitAiProvider(c.req.raw),
+      adminDefaultModel: aiAdmin.defaultModel,
+      adminDefaultProvider,
+      fromUserVault: Boolean(creds.fromUserVault),
+      keyId: creds.keyId || null,
+      usedSharedEnvFallback: Boolean(creds.usedSharedEnvFallback),
+      lastTestAt,
+      lastTestOk,
+      lastTestCode,
+      lastTestMessage,
+      suppressSharedKey: blockSharedForByokChoice,
+      jobState: jobSummary.jobState,
+    });
+    // Never leak filesystem paths on the public status endpoint.
+    const { configPath: _drop, ...safe } = status as typeof status & {
+      configPath?: string;
+    };
+    void _drop;
+    const limits = await getAppLimits().catch(() => null);
+    return c.json({
+      ...safe,
+      /** F37: empty → hide upgrade CTA (no hardcoded URL). */
+      upgradeUrl: resolveUpgradeUrl(limits) || "",
+    });
   });
 
   const postAiConnect = async (c: Parameters<typeof requirePremium>[0] & {
@@ -667,7 +1154,7 @@ export function createApi(options: {
       if (patch.geminiModel && !patch.geminiApiKey && !getGeminiApiKey()) {
         return c.json({ error: "ต้องเชื่อมต่อ API key ก่อนเปลี่ยนโมเดล" }, 401);
       }
-      writeAiConfig(patch);
+      await writeAiConfig(patch);
       return c.json({ ok: true, ...geminiStatus({ requestProvider: "google" }) });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -678,8 +1165,20 @@ export function createApi(options: {
   api.post("/ai/connect", (c) => postAiConnect(c));
   api.post("/ai/google", (c) => postAiConnect(c));
 
-  const deleteAiConnect = (c: Parameters<typeof requirePremium>[0]) => {
-    if (!isByokOnly()) clearGeminiKey();
+  const deleteAiConnect = async (c: Parameters<typeof requirePremium>[0]) => {
+    // Clearing the shared DB-stored server key is superadmin-only.
+    // BYOK mode is a no-op clear (client-side disconnect status only).
+    if (!isByokOnly()) {
+      const gate = await requireSuperAdmin(c.req.raw);
+      if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+      await clearGeminiKey();
+      await writeAuditLog({
+        actorId: gate.userId,
+        actorEmail: gate.email,
+        action: "ai.clear_server_key",
+        detail: { kind: "db-gemini", via: "ai/connect" },
+      });
+    }
     return c.json({
       ok: true,
       ...geminiStatus(),
@@ -692,13 +1191,20 @@ export function createApi(options: {
 
   async function requireSessionUserId(req: Request): Promise<
     | { ok: true; userId: string }
-    | { ok: false; status: 401 | 500; error: string }
+    | { ok: false; status: 401 | 500; error: string; code?: string }
   > {
     try {
       const { auth } = await import("./auth");
       const session = await auth.api.getSession({ headers: req.headers });
       const userId = session?.user?.id ? String(session.user.id) : "";
-      if (!userId) return { ok: false, status: 401, error: "ต้องเข้าสู่ระบบก่อน" };
+      if (!userId) {
+        return {
+          ok: false,
+          status: 401,
+          error: "ต้องเข้าสู่ระบบก่อน",
+          code: "AUTH_REQUIRED",
+        };
+      }
       return { ok: true, userId };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -707,36 +1213,341 @@ export function createApi(options: {
   }
 
   /**
-   * Logged-in user: list AI keys stored on server.
+   * Key-choice status for settings + attach gate.
+   * Shape: { mode, serverKeyAvailable, userKeySet, userKeyHint? }
+   * Never includes system/server key material.
+   * `userKeyHint` is the masked last-4 of the first saved vault key only.
+   */
+  api.get("/ai/keys/status", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        {
+          error: gate.error,
+          // Match other /ai/keys* routes — 401 only means not signed in.
+          code: "AI_KEY_UNAUTHORIZED",
+        },
+        gate.status === 401 ? 401 : gate.status,
+      );
+    }
+    try {
+      const { buildAiKeyChoiceStatus } = await import("./ai-key-choice");
+      const status = await buildAiKeyChoiceStatus(gate.userId);
+      return c.json(status);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message, code: "AI_KEY_SERVER_ERROR" }, 500);
+    }
+  });
+
+  /**
+   * Update saved mode (server|byok). Optional apiKey/provider/label/model
+   * upserts the user's own vault key via existing vault helpers.
+   * Body: { mode?, apiKey?, provider?, label?, model?, deleteKey?: true }
+   * `deleteKey: true` removes **all** of the user's vault keys (not one row).
+   */
+  api.put("/ai/keys/status", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    try {
+      const body = (await c.req.json().catch(() => ({}))) as {
+        mode?: string;
+        apiKey?: string;
+        provider?: string;
+        label?: string;
+        model?: string;
+        deleteKey?: boolean;
+      };
+      const {
+        normalizeAiKeyMode,
+        setUserAiKeyMode,
+        buildAiKeyChoiceStatus,
+      } = await import("./ai-key-choice");
+
+      if (body.deleteKey === true) {
+        const { listUserAiKeys, deleteUserAiKey } = await import(
+          "./ai-key-vault"
+        );
+        const rows = await listUserAiKeys(gate.userId);
+        for (const row of rows) {
+          await deleteUserAiKey(gate.userId, row.id);
+        }
+      }
+
+      const apiKey = String(body.apiKey || "").trim();
+      if (apiKey) {
+        const provider = String(body.provider || "google").trim() || "google";
+        const { validateAiKeyForSave } = await import("./ai-key-test");
+        const probe = await validateAiKeyForSave({
+          provider,
+          apiKey,
+          signal: c.req.raw.signal,
+        });
+        if (!probe.ok) {
+          return c.json(
+            {
+              error: probe.message,
+              code: probe.code || "AI_KEY_INVALID",
+              ok: false as const,
+              provider: probe.provider,
+              durationMs: probe.durationMs,
+            },
+            400,
+          );
+        }
+        const { createUserAiKey, upsertUserAiKey, listUserAiKeys } =
+          await import("./ai-key-vault");
+        const existing = await listUserAiKeys(gate.userId);
+        const label = String(body.label || existing[0]?.label || "").trim();
+        const model = String(body.model || existing[0]?.model || "").trim();
+        if (existing[0]?.id) {
+          await upsertUserAiKey(gate.userId, {
+            id: existing[0].id,
+            provider,
+            label,
+            model,
+            apiKey,
+          });
+        } else {
+          await createUserAiKey(gate.userId, {
+            provider,
+            label,
+            model,
+            apiKey,
+          });
+        }
+      }
+
+      const mode = normalizeAiKeyMode(body.mode);
+      if (body.mode != null && body.mode !== "" && !mode) {
+        return c.json(
+          {
+            error: "mode ต้องเป็น server หรือ byok",
+            code: "AI_KEY_INVALID_MODE",
+          },
+          400,
+        );
+      }
+      if (mode) {
+        try {
+          await setUserAiKeyMode(gate.userId, mode);
+        } catch (err) {
+          const e = err as Error & { code?: string };
+          return c.json(
+            {
+              error: e.message || String(err),
+              code: e.code || "AI_KEY_INVALID_MODE",
+            },
+            400,
+          );
+        }
+      }
+
+      const status = await buildAiKeyChoiceStatus(gate.userId);
+      return c.json(status);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message, code: "AI_KEY_SERVER_ERROR" }, 500);
+    }
+  });
+
+  /**
+   * Models for the attach-page picker, tagged with source server|byok.
+   * Server models only when serverKeyAvailable; BYOK models only for providers
+   * the user actually has a saved vault key for (derived from the vault).
+   */
+  api.get("/ai/keys/models", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    try {
+      const {
+        buildAiKeyChoiceStatus,
+        listAiModelsForChoice,
+        listUserAiKeyProviders,
+      } = await import("./ai-key-choice");
+      const status = await buildAiKeyChoiceStatus(gate.userId);
+      const userProviders = await listUserAiKeyProviders(gate.userId);
+      const models = listAiModelsForChoice(status, { userProviders });
+      return c.json({ models, ...status });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message, code: "AI_KEY_SERVER_ERROR" }, 500);
+    }
+  });
+
+  /**
+   * Logged-in user: list AI keys stored on server (masked meta only).
    * Never returns plaintext secrets — use X-Ai-Key-Id on AI calls to proxy.
    */
   api.get("/ai/keys", async (c) => {
     const gate = await requireSessionUserId(c.req.raw);
-    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    if (!gate.ok) {
+      return c.json(
+        {
+          error: gate.error,
+          code: gate.code || "AUTH_REQUIRED",
+        },
+        gate.status,
+      );
+    }
     try {
-      const { listUserAiKeys } = await import("./ai-key-vault");
-      const entries = await listUserAiKeys(gate.userId);
-      return c.json({
-        entries: entries.map((e) => ({
-          id: e.id,
-          provider: e.provider,
-          label: e.label,
-          model: e.model,
-          maskedKey: maskGeminiKey(e.apiKey),
-          hasKey: Boolean(e.apiKey),
-          storeOnServer: true,
-        })),
-      });
+      const { listUserAiKeysPublic } = await import("./ai-key-vault");
+      const entries = await listUserAiKeysPublic(gate.userId);
+      return c.json({ entries });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: message }, 500);
+      return c.json({ error: message, code: "AI_KEY_SERVER_ERROR" }, 500);
     }
   });
 
-  /** Upsert one or many keys the user opted to sync. */
+  /** Own audit trail (create/test/replace/delete/use) — never includes key values. */
+  api.get("/ai/keys/audit", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    try {
+      const { listUserAiKeyAudit, isValidUserAiKeyId } = await import(
+        "./ai-key-vault"
+      );
+      const keyId = String(c.req.query("keyId") || "").trim();
+      if (keyId && !isValidUserAiKeyId(keyId)) {
+        return c.json(
+          { error: "id ไม่ถูกต้อง", code: "AI_KEY_INVALID_ID" },
+          400,
+        );
+      }
+      const limit = Number(c.req.query("limit") || 50);
+      const events = await listUserAiKeyAudit(gate.userId, {
+        keyId: keyId || undefined,
+        limit,
+      });
+      return c.json({ events });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message, code: "AI_KEY_SERVER_ERROR" }, 500);
+    }
+  });
+
+  /** Live-validate before persist (F30). Rejected keys are never stored. */
+  const rejectInvalidAiKey = async (opts: {
+    provider: string;
+    apiKey: string;
+    signal?: AbortSignal;
+  }) => {
+    const { validateAiKeyForSave } = await import("./ai-key-test");
+    const probe = await validateAiKeyForSave({
+      provider: opts.provider,
+      apiKey: opts.apiKey,
+      signal: opts.signal,
+    });
+    if (probe.ok) return null;
+    return {
+      error: probe.message,
+      code: probe.code || "AI_KEY_INVALID",
+      ok: false as const,
+      provider: probe.provider,
+      durationMs: probe.durationMs,
+    };
+  };
+
+  /** Create one key (auto-id if omitted). Validates with a live provider probe first. */
+  api.post("/ai/keys", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    try {
+      const body = (await c.req.json().catch(() => ({}))) as {
+        id?: string;
+        provider?: string;
+        label?: string;
+        model?: string;
+        apiKey?: string;
+      };
+      const apiKey = String(body.apiKey || "").trim();
+      const providerRaw = String(body.provider || "google").trim();
+      const provider = getAiProvider(providerRaw)?.id;
+      if (!provider) {
+        return c.json(
+          {
+            error: "ผู้ให้บริการไม่รองรับ",
+            code: "AI_KEY_INVALID_PROVIDER",
+          },
+          400,
+        );
+      }
+      const minLen = provider === "google" ? 20 : 8;
+      if (!apiKey || apiKey.length < minLen) {
+        return c.json(
+          {
+            error: "กรุณาใส่ API key ที่ถูกต้อง",
+            code: "AI_KEY_INVALID_VALUE",
+          },
+          400,
+        );
+      }
+      const rejected = await rejectInvalidAiKey({
+        provider,
+        apiKey,
+        signal: c.req.raw.signal,
+      });
+      if (rejected) {
+        return c.json(rejected, rejected.code === "AI_PROVIDER_TIMEOUT" ? 504 : 400);
+      }
+      const { createUserAiKey, toPublicAiKey } = await import("./ai-key-vault");
+      const saved = await createUserAiKey(gate.userId, {
+        id: body.id,
+        provider,
+        label: String(body.label || "").trim(),
+        model: String(body.model || "").trim(),
+        apiKey,
+      });
+      return c.json({ ok: true, entry: toPublicAiKey(saved) }, 201);
+    } catch (err) {
+      const code =
+        err && typeof err === "object" && "code" in err
+          ? String((err as { code?: unknown }).code || "")
+          : "";
+      if (code === "AI_KEY_EXISTS") {
+        return c.json(
+          { error: "มีคีย์ id นี้แล้ว", code: "AI_KEY_EXISTS" },
+          400,
+        );
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      if (/id ไม่ถูกต้อง/.test(message)) {
+        return c.json({ error: message, code: "AI_KEY_INVALID_ID" }, 400);
+      }
+      return c.json({ error: message, code: "AI_KEY_MISSING_FIELDS" }, 400);
+    }
+  });
+
+  /** Upsert one or many keys the user opted to sync (compat with existing clients). */
   api.put("/ai/keys", async (c) => {
     const gate = await requireSessionUserId(c.req.raw);
-    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
     try {
       const body = (await c.req.json().catch(() => ({}))) as {
         entries?: Array<{
@@ -760,49 +1571,511 @@ export function createApi(options: {
           ? [body.entry]
           : [];
       if (!rawList.length) {
-        return c.json({ error: "ต้องส่ง entry หรือ entries" }, 400);
+        return c.json(
+          {
+            error: "ต้องส่ง entry หรือ entries",
+            code: "AI_KEY_MISSING_FIELDS",
+          },
+          400,
+        );
       }
-      const { upsertUserAiKeys } = await import("./ai-key-vault");
-      const saved = await upsertUserAiKeys(
-        gate.userId,
-        rawList.map((e) => ({
-          id: String(e.id || "").trim(),
-          provider: String(e.provider || "google").trim(),
-          label: String(e.label || "").trim(),
-          model: String(e.model || "").trim(),
-          apiKey: String(e.apiKey || "").trim(),
-        })),
-      );
+      const normalized = rawList.map((e) => ({
+        id: String(e.id || "").trim(),
+        provider: String(e.provider || "google").trim(),
+        label: String(e.label || "").trim(),
+        model: String(e.model || "").trim(),
+        apiKey: String(e.apiKey || "").trim(),
+      }));
+      // Validate every key before writing any — reject does not store.
+      for (const e of normalized) {
+        const provider = getAiProvider(e.provider)?.id;
+        if (!provider) {
+          return c.json(
+            {
+              error: "ผู้ให้บริการไม่รองรับ",
+              code: "AI_KEY_INVALID_PROVIDER",
+            },
+            400,
+          );
+        }
+        e.provider = provider;
+        if (!e.apiKey || e.apiKey.length < 8) {
+          return c.json(
+            {
+              error: "กรุณาใส่ API key ที่ถูกต้อง",
+              code: "AI_KEY_INVALID_VALUE",
+            },
+            400,
+          );
+        }
+        const rejected = await rejectInvalidAiKey({
+          provider,
+          apiKey: e.apiKey,
+          signal: c.req.raw.signal,
+        });
+        if (rejected) {
+          return c.json(
+            rejected,
+            rejected.code === "AI_PROVIDER_TIMEOUT" ? 504 : 400,
+          );
+        }
+      }
+      const { upsertUserAiKeys, toPublicAiKey } = await import("./ai-key-vault");
+      const saved = await upsertUserAiKeys(gate.userId, normalized);
       return c.json({
         ok: true,
-        entries: saved.map((e) => ({
-          id: e.id,
-          provider: e.provider,
-          label: e.label,
-          model: e.model,
-          storeOnServer: true,
-          maskedKey: maskGeminiKey(e.apiKey),
-        })),
+        entries: saved.map((e) => toPublicAiKey(e)),
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: message }, 400);
+      return c.json({ error: message, code: "AI_KEY_MISSING_FIELDS" }, 400);
     }
+  });
+
+  /** Test a plaintext key before save (does not persist). */
+  api.post("/ai/keys/test", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    try {
+      const body = (await c.req.json().catch(() => ({}))) as {
+        provider?: string;
+        apiKey?: string;
+        timeoutMs?: number;
+      };
+      const { testAiProviderKey } = await import("./ai-key-test");
+      const result = await testAiProviderKey({
+        provider: String(body.provider || "google"),
+        apiKey: String(body.apiKey || ""),
+        timeoutMs: body.timeoutMs,
+        signal: c.req.raw.signal,
+      });
+      return c.json(
+        result,
+        result.ok
+          ? 200
+          : result.code === "AI_KEY_TEST_TIMEOUT" ||
+              result.code === "AI_PROVIDER_TIMEOUT"
+            ? 504
+            : 400,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message, code: "AI_PROVIDER_ERROR", ok: false }, 400);
+    }
+  });
+
+  api.get("/ai/keys/:id", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    const id = String(c.req.param("id") || "").trim();
+    const { getUserAiKey, isValidUserAiKeyId, toPublicAiKey } = await import(
+      "./ai-key-vault"
+    );
+    if (!isValidUserAiKeyId(id)) {
+      return c.json({ error: "id ไม่ถูกต้อง", code: "AI_KEY_INVALID_ID" }, 400);
+    }
+    const row = await getUserAiKey(gate.userId, id);
+    if (!row) {
+      return c.json({ error: "ไม่พบคีย์", code: "AI_KEY_NOT_FOUND" }, 404);
+    }
+    return c.json({ entry: toPublicAiKey(row) });
+  });
+
+  /** Replace / rotate the secret (and optional label/model/provider) of a saved key. */
+  api.put("/ai/keys/:id", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    const id = String(c.req.param("id") || "").trim();
+    const { isValidUserAiKeyId, replaceUserAiKey, toPublicAiKey } = await import(
+      "./ai-key-vault"
+    );
+    if (!isValidUserAiKeyId(id)) {
+      return c.json({ error: "id ไม่ถูกต้อง", code: "AI_KEY_INVALID_ID" }, 400);
+    }
+    try {
+      const body = (await c.req.json().catch(() => ({}))) as {
+        apiKey?: string;
+        provider?: string;
+        label?: string;
+        model?: string;
+      };
+      const apiKey = String(body.apiKey || "").trim();
+      if (!apiKey || apiKey.length < 8) {
+        return c.json(
+          {
+            error: "กรุณาใส่ API key ที่ถูกต้อง",
+            code: "AI_KEY_INVALID_VALUE",
+          },
+          400,
+        );
+      }
+      if (body.provider && !getAiProvider(body.provider)) {
+        return c.json(
+          {
+            error: "ผู้ให้บริการไม่รองรับ",
+            code: "AI_KEY_INVALID_PROVIDER",
+          },
+          400,
+        );
+      }
+      // Resolve provider for the probe (body override or existing row).
+      const existing = await (async () => {
+        const { getUserAiKey } = await import("./ai-key-vault");
+        return getUserAiKey(gate.userId, id);
+      })();
+      if (!existing) {
+        return c.json({ error: "ไม่พบคีย์", code: "AI_KEY_NOT_FOUND" }, 404);
+      }
+      const providerForProbe =
+        (body.provider && getAiProvider(body.provider)?.id) ||
+        existing.provider ||
+        "google";
+      const rejected = await rejectInvalidAiKey({
+        provider: providerForProbe,
+        apiKey,
+        signal: c.req.raw.signal,
+      });
+      if (rejected) {
+        return c.json(
+          rejected,
+          rejected.code === "AI_PROVIDER_TIMEOUT" ? 504 : 400,
+        );
+      }
+      const saved = await replaceUserAiKey(gate.userId, id, {
+        apiKey,
+        provider: body.provider,
+        label: body.label,
+        model: body.model,
+      });
+      if (!saved) {
+        return c.json({ error: "ไม่พบคีย์", code: "AI_KEY_NOT_FOUND" }, 404);
+      }
+      return c.json({ ok: true, entry: toPublicAiKey(saved) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message, code: "AI_KEY_MISSING_FIELDS" }, 400);
+    }
+  });
+
+  /** Test a saved vault key; updates last-test status + audit. */
+  api.post("/ai/keys/:id/test", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    const id = String(c.req.param("id") || "").trim();
+    const {
+      getUserAiKey,
+      isValidUserAiKeyId,
+      updateUserAiKeyTestResult,
+      toPublicAiKey,
+    } = await import("./ai-key-vault");
+    if (!isValidUserAiKeyId(id)) {
+      return c.json({ error: "id ไม่ถูกต้อง", code: "AI_KEY_INVALID_ID" }, 400);
+    }
+    const row = await getUserAiKey(gate.userId, id);
+    if (!row) {
+      return c.json({ error: "ไม่พบคีย์", code: "AI_KEY_NOT_FOUND" }, 404);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as {
+      timeoutMs?: number;
+    };
+    const { testAiProviderKey } = await import("./ai-key-test");
+    const result = await testAiProviderKey({
+      provider: row.provider,
+      apiKey: row.apiKey,
+      timeoutMs: body.timeoutMs,
+      signal: c.req.raw.signal,
+    });
+    const updated = await updateUserAiKeyTestResult(gate.userId, id, {
+      ok: result.ok,
+      code: result.code,
+      message: result.message,
+    });
+    return c.json(
+      {
+        ...result,
+        entry: updated ? toPublicAiKey(updated) : null,
+      },
+      result.ok
+        ? 200
+        : result.code === "AI_KEY_TEST_TIMEOUT" ||
+            result.code === "AI_PROVIDER_TIMEOUT"
+          ? 504
+          : 400,
+    );
   });
 
   api.delete("/ai/keys/:id", async (c) => {
     const gate = await requireSessionUserId(c.req.raw);
-    if (!gate.ok) return c.json({ error: gate.error }, gate.status);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
     const id = String(c.req.param("id") || "").trim();
-    if (!id) return c.json({ error: "ต้องระบุ id" }, 400);
+    const { deleteUserAiKey, isValidUserAiKeyId } = await import(
+      "./ai-key-vault"
+    );
+    if (!isValidUserAiKeyId(id)) {
+      return c.json({ error: "id ไม่ถูกต้อง", code: "AI_KEY_INVALID_ID" }, 400);
+    }
     try {
-      const { deleteUserAiKey } = await import("./ai-key-vault");
+      // Ownership enforced in SQL (userId = session). Other users' ids → 404
+      // with no existence leak.
       const removed = await deleteUserAiKey(gate.userId, id);
-      return c.json({ ok: true, removed });
+      if (!removed) {
+        return c.json({ error: "ไม่พบคีย์", code: "AI_KEY_NOT_FOUND" }, 404);
+      }
+      return c.json({ ok: true, removed: true, code: "AI_KEY_DELETED" });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: message }, 500);
+      return c.json({ error: message, code: "AI_KEY_SERVER_ERROR" }, 500);
     }
+  });
+
+  // Singular aliases from FIXES.md §9 — operate on one key via ?id= or body.id.
+  api.get("/ai/key", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    const { listUserAiKeysPublic, getUserAiKey, toPublicAiKey, isValidUserAiKeyId } =
+      await import("./ai-key-vault");
+    const id = String(c.req.query("id") || "").trim();
+    if (id) {
+      if (!isValidUserAiKeyId(id)) {
+        return c.json({ error: "id ไม่ถูกต้อง", code: "AI_KEY_INVALID_ID" }, 400);
+      }
+      const row = await getUserAiKey(gate.userId, id);
+      if (!row) {
+        return c.json({ error: "ไม่พบคีย์", code: "AI_KEY_NOT_FOUND" }, 404);
+      }
+      return c.json({ entry: toPublicAiKey(row), connected: true });
+    }
+    const entries = await listUserAiKeysPublic(gate.userId);
+    const entry = entries[0] || null;
+    return c.json({
+      entry,
+      connected: Boolean(entry?.hasKey),
+      entries,
+    });
+  });
+
+  api.put("/ai/key", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    try {
+      const body = (await c.req.json().catch(() => ({}))) as {
+        id?: string;
+        provider?: string;
+        label?: string;
+        model?: string;
+        apiKey?: string;
+      };
+      const apiKey = String(body.apiKey || "").trim();
+      const provider = getAiProvider(body.provider || "google")?.id;
+      if (!provider) {
+        return c.json(
+          {
+            error: "ผู้ให้บริการไม่รองรับ",
+            code: "AI_KEY_INVALID_PROVIDER",
+          },
+          400,
+        );
+      }
+      if (!apiKey || apiKey.length < 8) {
+        return c.json(
+          {
+            error: "กรุณาใส่ API key ที่ถูกต้อง",
+            code: "AI_KEY_INVALID_VALUE",
+          },
+          400,
+        );
+      }
+      const rejected = await rejectInvalidAiKey({
+        provider,
+        apiKey,
+        signal: c.req.raw.signal,
+      });
+      if (rejected) {
+        return c.json(
+          rejected,
+          rejected.code === "AI_PROVIDER_TIMEOUT" ? 504 : 400,
+        );
+      }
+      const {
+        createUserAiKey,
+        replaceUserAiKey,
+        listUserAiKeys,
+        toPublicAiKey,
+      } = await import("./ai-key-vault");
+      const id = String(body.id || "").trim();
+      let saved;
+      if (id) {
+        saved = await replaceUserAiKey(gate.userId, id, {
+          apiKey,
+          provider,
+          label: body.label,
+          model: body.model,
+        });
+        if (!saved) {
+          saved = await createUserAiKey(gate.userId, {
+            id,
+            provider,
+            label: String(body.label || "").trim(),
+            model: String(body.model || "").trim(),
+            apiKey,
+          });
+        }
+      } else {
+        const existing = await listUserAiKeys(gate.userId);
+        if (existing[0]) {
+          saved = await replaceUserAiKey(gate.userId, existing[0].id, {
+            apiKey,
+            provider,
+            label: body.label,
+            model: body.model,
+          });
+        } else {
+          saved = await createUserAiKey(gate.userId, {
+            provider,
+            label: String(body.label || "").trim(),
+            model: String(body.model || "").trim(),
+            apiKey,
+          });
+        }
+      }
+      if (!saved) {
+        return c.json({ error: "บันทึกคีย์ไม่สำเร็จ", code: "AI_KEY_SERVER_ERROR" }, 500);
+      }
+      return c.json({ ok: true, entry: toPublicAiKey(saved) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message, code: "AI_KEY_MISSING_FIELDS" }, 400);
+    }
+  });
+
+  api.post("/ai/key/test", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    const body = (await c.req.json().catch(() => ({}))) as {
+      id?: string;
+      provider?: string;
+      apiKey?: string;
+      timeoutMs?: number;
+    };
+    const id = String(body.id || c.req.query("id") || "").trim();
+    if (id) {
+      // Reuse saved-key test path.
+      const {
+        getUserAiKey,
+        isValidUserAiKeyId,
+        updateUserAiKeyTestResult,
+        toPublicAiKey,
+      } = await import("./ai-key-vault");
+      if (!isValidUserAiKeyId(id)) {
+        return c.json({ error: "id ไม่ถูกต้อง", code: "AI_KEY_INVALID_ID" }, 400);
+      }
+      const row = await getUserAiKey(gate.userId, id);
+      if (!row) {
+        return c.json({ error: "ไม่พบคีย์", code: "AI_KEY_NOT_FOUND" }, 404);
+      }
+      const { testAiProviderKey } = await import("./ai-key-test");
+      const result = await testAiProviderKey({
+        provider: row.provider,
+        apiKey: row.apiKey,
+        timeoutMs: body.timeoutMs,
+        signal: c.req.raw.signal,
+      });
+      const updated = await updateUserAiKeyTestResult(gate.userId, id, {
+        ok: result.ok,
+        code: result.code,
+        message: result.message,
+      });
+      return c.json(
+        { ...result, entry: updated ? toPublicAiKey(updated) : null },
+        result.ok ? 200 : result.code === "AI_KEY_TEST_TIMEOUT" ? 504 : 400,
+      );
+    }
+    const { testAiProviderKey } = await import("./ai-key-test");
+    const result = await testAiProviderKey({
+      provider: String(body.provider || "google"),
+      apiKey: String(body.apiKey || ""),
+      timeoutMs: body.timeoutMs,
+      signal: c.req.raw.signal,
+    });
+    return c.json(
+      result,
+      result.ok ? 200 : result.code === "AI_KEY_TEST_TIMEOUT" ? 504 : 400,
+    );
+  });
+
+  api.delete("/ai/key", async (c) => {
+    const gate = await requireSessionUserId(c.req.raw);
+    if (!gate.ok) {
+      return c.json(
+        { error: gate.error, code: "AI_KEY_UNAUTHORIZED" },
+        gate.status,
+      );
+    }
+    const {
+      deleteUserAiKey,
+      isValidUserAiKeyId,
+      listUserAiKeys,
+    } = await import("./ai-key-vault");
+    let id = String(c.req.query("id") || "").trim();
+    if (!id) {
+      const body = (await c.req.json().catch(() => ({}))) as { id?: string };
+      id = String(body.id || "").trim();
+    }
+    if (!id) {
+      const entries = await listUserAiKeys(gate.userId);
+      id = entries[0]?.id || "";
+    }
+    if (!id || !isValidUserAiKeyId(id)) {
+      return c.json(
+        { error: id ? "id ไม่ถูกต้อง" : "ไม่พบคีย์", code: id ? "AI_KEY_INVALID_ID" : "AI_KEY_NOT_FOUND" },
+        id ? 400 : 404,
+      );
+    }
+    const removed = await deleteUserAiKey(gate.userId, id);
+    if (!removed) {
+      return c.json({ error: "ไม่พบคีย์", code: "AI_KEY_NOT_FOUND" }, 404);
+    }
+    return c.json({ ok: true, removed: true, code: "AI_KEY_DELETED" });
   });
 
   api.post("/parse", async (c) => {
@@ -883,43 +2156,61 @@ export function createApi(options: {
     const denied = await requirePremium(c, PremiumFeature.AiSourceMap);
     if (denied) return denied;
 
-    const sessionGate = await requireSessionUserId(c.req.raw);
-    const sessionUserId = sessionGate.ok ? sessionGate.userId : null;
-    const { resolveRequestAiCredentials } = await import("./ai-config");
-    const aiCreds = await resolveRequestAiCredentials(
-      c.req.raw,
-      sessionUserId,
-    );
-    const aiAdmin = await getAiAdminSettings().catch(() => ({
-      defaultModel: "gemini-3.8-flash",
-    }));
-    const adminDefaultProvider = adminDefaultProviderFromSettings(aiAdmin);
-    const clientProvider = resolveEffectiveAiProvider({
-      requestProvider: aiCreds.provider,
-      explicitProvider: requestHasExplicitAiProvider(c.req.raw),
-      requestKey: aiCreds.apiKey,
-      adminDefaultProvider,
-    });
-    const clientKey = resolveProviderApiKey(clientProvider, aiCreds.apiKey);
-    const clientModel =
-      normalizeProviderModel(clientProvider, aiCreds.model) ||
-      defaultModelForProvider(clientProvider);
-    if (!hasRequestAiKey(clientProvider, clientKey)) {
-      return c.json(
-        {
-          error:
-            "ยังไม่มี AI API key — กด «ใส่ AI key» แล้วเลือกผู้ให้บริการและใส่ key ของคุณ หรือซิงก์คีย์ขึ้นเซิร์ฟเวอร์แล้วส่ง X-Ai-Key-Id",
-        },
-        401,
-      );
-    }
-
     const wantStream =
       c.req.query("stream") === "1" ||
       (c.req.header("accept") || "").includes("application/x-ndjson");
 
+    // Populated after credential resolve; declared outside try for catch/stream.
+    let aiCreds = {
+      provider: "",
+      apiKey: "",
+      model: "",
+    } as ResolvedRequestAiCredentials;
+    let clientProvider = "";
+    let clientKey = "";
+    let clientModel = "";
+    let choiceSource: "server" | "byok" = "byok";
+
     try {
       const form = await c.req.formData();
+      const formKey =
+        typeof form.get("geminiApiKey") === "string"
+          ? String(form.get("geminiApiKey") || "").trim()
+          : typeof form.get("aiApiKey") === "string"
+            ? String(form.get("aiApiKey") || "").trim()
+            : "";
+      const formModel =
+        typeof form.get("geminiModel") === "string"
+          ? String(form.get("geminiModel") || "").trim()
+          : typeof form.get("aiModel") === "string"
+            ? String(form.get("aiModel") || "").trim()
+            : "";
+      const formProvider =
+        typeof form.get("aiProvider") === "string"
+          ? String(form.get("aiProvider") || "").trim()
+          : "";
+      const formSource =
+        typeof form.get("source") === "string"
+          ? String(form.get("source") || "").trim()
+          : String(c.req.query("source") || "").trim();
+      const routed = await resolveRouteAiCredentials(c.req.raw, {
+        formKey,
+        formModel,
+        formProvider,
+        source: formSource || null,
+      });
+      if (!routed.ok) {
+        return c.json(
+          { error: routed.error, ...(routed.code ? { code: routed.code } : {}) },
+          routed.status,
+        );
+      }
+      aiCreds = routed.creds;
+      clientProvider = routed.provider;
+      clientKey = routed.apiKey;
+      clientModel = routed.model;
+      choiceSource = routed.choiceSource;
+
       const fieldsRaw = form.get("fields");
       if (typeof fieldsRaw !== "string") {
         return c.json({ error: "ต้องส่ง fields เป็น JSON ของฟิลด์เทมเพลต" }, 400);
@@ -1011,6 +2302,7 @@ export function createApi(options: {
         total?: number;
         label?: string;
         error?: string;
+        code?: string;
         valuesJson?: DocxFormValuesJson;
         values?: unknown;
         skip?: unknown;
@@ -1082,13 +2374,18 @@ export function createApi(options: {
         });
         const { inspectSourceTruncation } = await import("./ai-fill");
         const truncMeta = await inspectSourceTruncation(payloads);
-        const valuesJson = await fillDocxFormValues(skeleton, payloads, {
-          provider: clientProvider,
-          apiKey: clientKey,
-          model: clientModel,
-          fields,
-          signal: c.req.raw.signal,
-        });
+        const valuesJson = await runWithSavedAiKeyAuthFallback(
+          aiCreds,
+          (effective) =>
+            fillDocxFormValues(skeleton, payloads, {
+              provider: effective.provider || clientProvider,
+              apiKey: effective.apiKey || clientKey,
+              model: effective.model || clientModel,
+              fields,
+              signal: c.req.raw.signal,
+            }),
+          { allowSharedAuthFallback: choiceSource === "server" },
+        );
         const { countFilledValues } = await import("./source-map");
         const fillStats = countFilledValues(valuesJson);
         await emit({
@@ -1174,7 +2471,14 @@ export function createApi(options: {
           try {
             await runMap(emit);
           } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
+            const { aiProviderErrorJsonBody: mapErr } = await import(
+              "./ai-request"
+            );
+            const body = mapErr(
+              err,
+              sharedServerKeyErrorOpts(aiCreds, clientProvider),
+            );
+            const message = body.error;
             const banner = message.startsWith("แมปเอกสารต้นทางไม่สำเร็จ")
               ? message
               : `แมปเอกสารต้นทางไม่สำเร็จ — ${message}`;
@@ -1182,6 +2486,7 @@ export function createApi(options: {
               type: "error",
               error: banner,
               message,
+              code: body.code,
             });
           } finally {
             controller.close();
@@ -1197,11 +2502,16 @@ export function createApi(options: {
         },
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const { aiProviderErrorJsonBody: mapErr } = await import("./ai-request");
+      const body = mapErr(
+        err,
+        sharedServerKeyErrorOpts(aiCreds, clientProvider),
+      );
+      const message = body.error;
       const banner = message.startsWith("แมปเอกสารต้นทางไม่สำเร็จ")
         ? message
         : `แมปเอกสารต้นทางไม่สำเร็จ — ${message}`;
-      return c.json({ error: banner }, 400);
+      return c.json({ error: banner, code: body.code }, 400);
     }
   });
 
@@ -1278,6 +2588,17 @@ export function createApi(options: {
   api.post("/template/suggest-tags", async (c) => {
     const denied = await requirePremium(c, PremiumFeature.AiTagDraft);
     if (denied) return denied;
+    const {
+      getOrCreateRequestId,
+      logAiCall,
+      aiProviderErrorJsonBody,
+      isAiTimeoutError,
+    } = await import("./ai-request");
+    const requestId = getOrCreateRequestId(c.req.raw);
+    const startedAt = Date.now();
+    let logProvider = "";
+    let logModel = "";
+    let suggestCreds: ResolvedRequestAiCredentials | null = null;
     try {
       const form = await c.req.formData();
       const file = form.get("file");
@@ -1315,6 +2636,10 @@ export function createApi(options: {
         typeof form.get("aiProvider") === "string"
           ? String(form.get("aiProvider") || "").trim()
           : "";
+      const formSource =
+        typeof form.get("source") === "string"
+          ? String(form.get("source") || "").trim()
+          : String(c.req.query("source") || "").trim();
       const formNameLanguage =
         typeof form.get("nameLanguage") === "string"
           ? String(form.get("nameLanguage") || "").trim()
@@ -1323,42 +2648,39 @@ export function createApi(options: {
             : "";
       const sessionGate = await requireSessionUserId(c.req.raw);
       const sessionUserId = sessionGate.ok ? sessionGate.userId : null;
-      const { resolveRequestAiCredentials } = await import("./ai-config");
-      const resolved = await resolveRequestAiCredentials(
-        c.req.raw,
-        sessionUserId,
-      );
-      const aiAdmin = await getAiAdminSettings().catch(() => ({
-        defaultModel: "gemini-3.8-flash",
-      }));
-      const adminDefaultProvider = adminDefaultProviderFromSettings(aiAdmin);
-      const explicitProvider =
-        requestHasExplicitAiProvider(c.req.raw) || Boolean(formProvider);
-      const requestedProvider =
-        getAiProvider(formProvider)?.id || resolved.provider;
-      const clientProvider = resolveEffectiveAiProvider({
-        requestProvider: requestedProvider,
-        explicitProvider,
-        requestKey: resolved.apiKey || formKey || undefined,
-        adminDefaultProvider,
+      const routed = await resolveRouteAiCredentials(c.req.raw, {
+        formKey,
+        formModel,
+        formProvider,
+        source: formSource || null,
       });
-      const clientKey = resolveProviderApiKey(
-        clientProvider,
-        resolved.apiKey || formKey || undefined,
-      );
-      const clientModel =
-        normalizeProviderModel(clientProvider, formModel || resolved.model) ||
-        defaultModelForProvider(clientProvider);
-
-      if (!clientKey) {
+      if (!routed.ok) {
         return c.json(
           {
-            error:
-              "ต้องใส่ AI API key ของคุณก่อน (BYOK) หรือส่ง X-Ai-Key-Id ของคีย์ที่ซิงก์ไว้",
+            error: routed.error,
+            ...(routed.code ? { code: routed.code } : {}),
           },
-          400,
+          routed.status,
         );
       }
+      const {
+        creds: resolved,
+        provider: clientProvider,
+        apiKey: clientKey,
+        model: clientModel,
+        choiceSource,
+      } = routed;
+      suggestCreds = resolved;
+      logProvider = clientProvider;
+      logModel = clientModel;
+      logAiCall({
+        route: "/api/template/suggest-tags",
+        provider: clientProvider,
+        model: clientModel,
+        requestId,
+        outcome: "start",
+        phase: "begin",
+      });
 
       const buffer = Buffer.from(await file.arrayBuffer());
       const { assertDocxReadable } = await import("./docx-errors");
@@ -1382,14 +2704,19 @@ export function createApi(options: {
       }
 
       const runSuggest = async (signal?: AbortSignal) => {
-        const result = await suggestTemplateTags(buffer, {
-          provider: clientProvider,
-          apiKey: clientKey,
-          model: clientModel,
-          filename: file.name,
-          nameLanguage,
-          signal,
-        });
+        const result = await runWithSavedAiKeyAuthFallback(
+          resolved,
+          (effective) =>
+            suggestTemplateTags(buffer, {
+              provider: effective.provider || clientProvider,
+              apiKey: effective.apiKey || clientKey,
+              model: effective.model || clientModel,
+              filename: file.name,
+              nameLanguage,
+              signal,
+            }),
+          { allowSharedAuthFallback: choiceSource === "server" },
+        );
         const warnings: string[] = [];
         if (result.plainText.length > 0 && result.suggestions.length === 0) {
           warnings.push(
@@ -1425,9 +2752,38 @@ export function createApi(options: {
               total: 2,
               message: "กำลังส่งเอกสารให้ AI อ่าน…",
             });
-            const payload = await runSuggest(signal);
-            emit({ step: 2, total: 2, message: "เสร็จแล้ว" });
-            return payload;
+            try {
+              const payload = await runSuggest(signal);
+              emit({ step: 2, total: 2, message: "เสร็จแล้ว" });
+              logAiCall({
+                route: "/api/template/suggest-tags",
+                provider: clientProvider,
+                model: clientModel,
+                requestId,
+                durationMs: Date.now() - startedAt,
+                outcome: "ok",
+                phase: "finish",
+              });
+              return payload;
+            } catch (err) {
+              const body = aiProviderErrorJsonBody(
+                err,
+                sharedServerKeyErrorOpts(resolved, clientProvider),
+              );
+              logAiCall({
+                route: "/api/template/suggest-tags",
+                provider: clientProvider,
+                model: clientModel,
+                requestId,
+                durationMs: Date.now() - startedAt,
+                errorClass: body.code,
+                outcome: isAiTimeoutError(err) ? "timeout" : "error",
+                phase: "finish",
+              });
+              const e = new Error(body.error) as Error & { code?: string };
+              e.code = body.code;
+              throw e;
+            }
           },
         });
         return c.json(
@@ -1436,10 +2792,44 @@ export function createApi(options: {
         );
       }
 
-      return c.json(await runSuggest(c.req.raw.signal));
+      const payload = await runSuggest(c.req.raw.signal);
+      logAiCall({
+        route: "/api/template/suggest-tags",
+        provider: clientProvider,
+        model: clientModel,
+        requestId,
+        durationMs: Date.now() - startedAt,
+        outcome: "ok",
+        phase: "finish",
+      });
+      return c.json(payload);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: `AI ดราฟตัวแปรไม่สำเร็จ: ${message}` }, 400);
+      const body = aiProviderErrorJsonBody(
+        err,
+        suggestCreds
+          ? sharedServerKeyErrorOpts(suggestCreds, logProvider)
+          : undefined,
+      );
+      logAiCall({
+        route: "/api/template/suggest-tags",
+        provider: logProvider || null,
+        model: logModel || null,
+        requestId,
+        durationMs: Date.now() - startedAt,
+        errorClass: body.code,
+        outcome: isAiTimeoutError(err) ? "timeout" : "error",
+        phase: "finish",
+      });
+      return c.json(
+        {
+          ...body,
+          error:
+            body.code === "AI_TIMEOUT"
+              ? body.error
+              : `AI ดราฟตัวแปรไม่สำเร็จ: ${body.error}`,
+        },
+        isAiTimeoutError(err) ? 504 : 400,
+      );
     }
   });
 
@@ -1450,6 +2840,18 @@ export function createApi(options: {
   api.post("/batch-from-source", async (c) => {
     const denied = await requirePremium(c, PremiumFeature.BatchFill);
     if (denied) return denied;
+
+    const {
+      getOrCreateRequestId,
+      logAiCall,
+      aiProviderErrorJsonBody,
+      isAiTimeoutError,
+    } = await import("./ai-request");
+    const requestId = getOrCreateRequestId(c.req.raw);
+    const startedAt = Date.now();
+    let logProvider = "";
+    let logModel = "";
+    let batchCreds: ResolvedRequestAiCredentials | null = null;
 
     try {
       const form = await c.req.formData();
@@ -1469,37 +2871,40 @@ export function createApi(options: {
         typeof form.get("aiProvider") === "string"
           ? String(form.get("aiProvider") || "").trim()
           : "";
-      const headerCreds = getRequestAiCredentials(c.req.raw);
-      const aiAdmin = await getAiAdminSettings().catch(() => ({
-        defaultModel: "gemini-3.8-flash",
-      }));
-      const adminDefaultProvider = adminDefaultProviderFromSettings(aiAdmin);
-      const requestedProvider =
-        getAiProvider(formProvider)?.id || headerCreds.provider;
-      const clientProvider = resolveEffectiveAiProvider({
-        requestProvider: requestedProvider,
-        explicitProvider:
-          requestHasExplicitAiProvider(c.req.raw) || Boolean(formProvider),
-        requestKey: headerCreds.apiKey || formKey || undefined,
-        adminDefaultProvider,
+      const formSource =
+        typeof form.get("source") === "string"
+          ? String(form.get("source") || "").trim()
+          : String(c.req.query("source") || "").trim();
+      const routed = await resolveRouteAiCredentials(c.req.raw, {
+        formKey,
+        formModel,
+        formProvider,
+        source: formSource || null,
       });
-      const clientKey = resolveProviderApiKey(
-        clientProvider,
-        headerCreds.apiKey || formKey || undefined,
-      );
-      const clientModel =
-        normalizeProviderModel(clientProvider, formModel) ||
-        headerCreds.model ||
-        defaultModelForProvider(clientProvider);
-      if (!hasRequestAiKey(clientProvider, clientKey)) {
+      if (!routed.ok) {
         return c.json(
-          {
-            error:
-              "ยังไม่มี AI API key — กด «ใส่ AI key» แล้วเลือกผู้ให้บริการและใส่ key ของคุณ (เก็บในเบราว์เซอร์)",
-          },
-          401,
+          { error: routed.error, ...(routed.code ? { code: routed.code } : {}) },
+          routed.status,
         );
       }
+      const {
+        creds: headerCreds,
+        provider: clientProvider,
+        apiKey: clientKey,
+        model: clientModel,
+        choiceSource: batchChoiceSource,
+      } = routed;
+      batchCreds = headerCreds;
+      logProvider = clientProvider;
+      logModel = clientModel;
+      logAiCall({
+        route: "/api/batch-from-source",
+        provider: clientProvider,
+        model: clientModel,
+        requestId,
+        outcome: "start",
+        phase: "begin",
+      });
 
       const schemasRaw = form.get("schemas");
       if (typeof schemasRaw !== "string") {
@@ -1609,7 +3014,7 @@ export function createApi(options: {
             extracted: unknown;
             message?: string;
           }
-        | { type: "error"; error: string; message?: string };
+        | { type: "error"; error: string; message?: string; code?: string };
 
       const runBatch = async (emit: (evt: BatchEvt) => void | Promise<void>) => {
         const [{ detectKind }, { fillDocxFormValuesBatch }, { sourceFilesMeta }] =
@@ -1749,15 +3154,16 @@ export function createApi(options: {
           });
 
           try {
-            const filled = await fillDocxFormValuesBatch(
-              fillItems,
-              payloads,
-              {
-                provider: clientProvider,
-                apiKey: clientKey,
-                model: clientModel,
-                signal: abortSignal,
-              },
+            const filled = await runWithSavedAiKeyAuthFallback(
+              headerCreds,
+              (effective) =>
+                fillDocxFormValuesBatch(fillItems, payloads, {
+                  provider: effective.provider || clientProvider,
+                  apiKey: effective.apiKey || clientKey,
+                  model: effective.model || clientModel,
+                  signal: abortSignal,
+                }),
+              { allowSharedAuthFallback: batchChoiceSource === "server" },
             );
             for (const item of filled) {
               results.push({
@@ -1774,6 +3180,14 @@ export function createApi(options: {
               });
             }
           } catch (err) {
+            // Timeouts / auth failures must surface as route-level errors
+            // (not silent per-template failures) so the UI can stop spinning.
+            if (isAiTimeoutError(err)) throw err;
+            const hay =
+              err instanceof Error ? err.message : String(err || "");
+            if (/API key|หมดอายุ|สิทธิ์ไม่ถูกต้อง|Authentication|unauthorized/i.test(hay)) {
+              throw err;
+            }
             const error = formatTemplateError(err);
             for (const item of fillItems) {
               if (results.some((r) => r.id === item.id && r.ok)) continue;
@@ -1825,17 +3239,49 @@ export function createApi(options: {
         const box: {
           payload: Extract<BatchEvt, { type: "batch-result" }> | null;
           error: string | null;
-        } = { payload: null, error: null };
-        await runBatch((evt) => {
-          if (evt.type === "batch-result") box.payload = evt;
-          if (evt.type === "error") box.error = evt.error;
-        });
+          errorCode: string | null;
+        } = { payload: null, error: null, errorCode: null };
+        try {
+          await runBatch((evt) => {
+            if (evt.type === "batch-result") box.payload = evt;
+            if (evt.type === "error") box.error = evt.error;
+          });
+        } catch (err) {
+          const body = aiProviderErrorJsonBody(
+            err,
+            sharedServerKeyErrorOpts(headerCreds, clientProvider),
+          );
+          box.error = body.error;
+          box.errorCode = body.code;
+        }
         if (box.error || !box.payload) {
+          logAiCall({
+            route: "/api/batch-from-source",
+            provider: clientProvider,
+            model: clientModel,
+            requestId,
+            durationMs: Date.now() - startedAt,
+            errorClass: box.errorCode || "AI_PROVIDER_ERROR",
+            outcome: box.errorCode === "AI_TIMEOUT" ? "timeout" : "error",
+            phase: "finish",
+          });
           return c.json(
-            { error: box.error || "แมปหลายเทมเพลตไม่สำเร็จ" },
-            400,
+            {
+              error: box.error || "แมปหลายเทมเพลตไม่สำเร็จ",
+              code: box.errorCode || "AI_PROVIDER_ERROR",
+            },
+            box.errorCode === "AI_TIMEOUT" ? 504 : 400,
           );
         }
+        logAiCall({
+          route: "/api/batch-from-source",
+          provider: clientProvider,
+          model: clientModel,
+          requestId,
+          durationMs: Date.now() - startedAt,
+          outcome: "ok",
+          phase: "finish",
+        });
         return c.json({
           ok: true,
           mapped: box.payload.mapped,
@@ -1853,17 +3299,43 @@ export function createApi(options: {
           };
           try {
             await runBatch(emit);
+            logAiCall({
+              route: "/api/batch-from-source",
+              provider: clientProvider,
+              model: clientModel,
+              requestId,
+              durationMs: Date.now() - startedAt,
+              outcome: "ok",
+              phase: "finish",
+            });
           } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
+            const body = aiProviderErrorJsonBody(
+              err,
+              sharedServerKeyErrorOpts(headerCreds, clientProvider),
+            );
+            const message = body.error;
             const cancelled =
               (err instanceof Error && err.name === "AbortError") ||
               /ยกเลิกโดยผู้ใช้/i.test(message);
+            logAiCall({
+              route: "/api/batch-from-source",
+              provider: clientProvider,
+              model: clientModel,
+              requestId,
+              durationMs: Date.now() - startedAt,
+              errorClass: cancelled ? "ABORTED" : body.code,
+              outcome: isAiTimeoutError(err) ? "timeout" : "error",
+              phase: "finish",
+            });
             await emit({
               type: "error",
               error: cancelled
                 ? "ยกเลิกโดยผู้ใช้"
-                : `แมปหลายเทมเพลตไม่สำเร็จ: ${message}`,
+                : body.code === "AI_TIMEOUT"
+                  ? body.error
+                  : `แมปหลายเทมเพลตไม่สำเร็จ: ${message}`,
               message,
+              code: cancelled ? undefined : body.code,
             });
           } finally {
             controller.close();
@@ -1882,8 +3354,32 @@ export function createApi(options: {
         },
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: `แมปหลายเทมเพลตไม่สำเร็จ: ${message}` }, 400);
+      const body = aiProviderErrorJsonBody(
+        err,
+        batchCreds
+          ? sharedServerKeyErrorOpts(batchCreds, logProvider)
+          : undefined,
+      );
+      logAiCall({
+        route: "/api/batch-from-source",
+        provider: logProvider || null,
+        model: logModel || null,
+        requestId,
+        durationMs: Date.now() - startedAt,
+        errorClass: body.code,
+        outcome: isAiTimeoutError(err) ? "timeout" : "error",
+        phase: "finish",
+      });
+      return c.json(
+        {
+          error:
+            body.code === "AI_TIMEOUT"
+              ? body.error
+              : `แมปหลายเทมเพลตไม่สำเร็จ: ${body.error}`,
+          code: body.code,
+        },
+        isAiTimeoutError(err) ? 504 : 400,
+      );
     }
   });
 
@@ -1932,7 +3428,12 @@ export function createApi(options: {
           400,
         );
       }
-      type FillItem = { filename?: string; values?: Record<string, unknown> };
+      type FillItem = {
+        filename?: string;
+        values?: Record<string, unknown>;
+        skip?: Record<string, boolean>;
+        rowSkip?: Record<string, Record<string, boolean>[]>;
+      };
       let items: FillItem[];
       try {
         const parsed = JSON.parse(itemsRaw) as unknown;
@@ -1979,9 +3480,33 @@ export function createApi(options: {
             continue;
           }
           const buffer = Buffer.from(await tmpl.arrayBuffer());
+          const skip = items[i]?.skip;
+          const rowSkip = items[i]?.rowSkip;
+          let fillValues = values;
+          if (
+            (skip && typeof skip === "object") ||
+            (rowSkip && typeof rowSkip === "object")
+          ) {
+            const { toFillValues } = await import("./source-map");
+            const parsed = await parseTemplate(buffer);
+            fillValues = toFillValues(
+              parsed.fields,
+              values,
+              skip && typeof skip === "object" ? skip : {},
+              rowSkip && typeof rowSkip === "object" ? rowSkip : {},
+            );
+          } else {
+            // Empty loop tables are allowed — missing list keys become [].
+            const parsed = await parseTemplate(buffer);
+            for (const f of parsed.fields) {
+              if (f.type === "list" && fillValues[f.name] == null) {
+                fillValues[f.name] = [];
+              }
+            }
+          }
           const out = await fillTemplate({
             template: buffer,
-            values,
+            values: fillValues,
             images: [],
           });
           const filledName = `${name.replace(/\.docx$/i, "") || "document"}-filled.docx`;
@@ -2035,22 +3560,80 @@ export function createApi(options: {
       const form = await c.req.formData();
       const file = form.get("file");
       if (!(file instanceof File)) {
-        return c.json({ error: "กรุณาส่งไฟล์เทมเพลต .docx" }, 400);
+        return c.json(
+          { error: "กรุณาส่งไฟล์เทมเพลต .docx", code: "FILL_MISSING_FILE" },
+          400,
+        );
       }
       if (!isDocx(file) || file.size > MAX_DOCX_BYTES) {
-        return c.json({ error: "ไฟล์เทมเพลตไม่ถูกต้องหรือใหญ่เกินไป" }, 400);
+        return c.json(
+          {
+            error: "ไฟล์เทมเพลตไม่ถูกต้องหรือใหญ่เกินไป",
+            code: "FILL_INVALID_FILE",
+          },
+          400,
+        );
       }
 
       const valuesRaw = form.get("values");
       if (typeof valuesRaw !== "string") {
-        return c.json({ error: "ต้องส่งค่า values เป็น JSON" }, 400);
+        return c.json(
+          {
+            error: "ต้องส่งค่า values เป็น JSON",
+            code: "FILL_MISSING_VALUES",
+          },
+          400,
+        );
       }
 
       let values: Record<string, unknown>;
       try {
         values = JSON.parse(valuesRaw) as Record<string, unknown>;
       } catch {
-        return c.json({ error: "values ต้องเป็น JSON ที่ถูกต้อง" }, 400);
+        return c.json(
+          { error: "values ต้องเป็น JSON ที่ถูกต้อง", code: "FILL_BAD_JSON" },
+          400,
+        );
+      }
+
+      /**
+       * Optional skip maps (docx-form-values style). When present, the server
+       * applies toFillValues so skipped scalars become "" and skipped / empty
+       * loop tables become [] — leftover {{tags}} are removed by the engine.
+       * Existing clients that already send pre-transformed values may omit these.
+       */
+      let skip: Record<string, boolean> = {};
+      let rowSkip: Record<string, Record<string, boolean>[]> = {};
+      const skipRaw = form.get("skip");
+      if (typeof skipRaw === "string" && skipRaw.trim()) {
+        try {
+          const parsed = JSON.parse(skipRaw) as unknown;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            skip = parsed as Record<string, boolean>;
+          }
+        } catch {
+          return c.json(
+            { error: "skip ต้องเป็น JSON object", code: "FILL_BAD_SKIP" },
+            400,
+          );
+        }
+      }
+      const rowSkipRaw = form.get("rowSkip");
+      if (typeof rowSkipRaw === "string" && rowSkipRaw.trim()) {
+        try {
+          const parsed = JSON.parse(rowSkipRaw) as unknown;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            rowSkip = parsed as Record<string, Record<string, boolean>[]>;
+          }
+        } catch {
+          return c.json(
+            {
+              error: "rowSkip ต้องเป็น JSON object",
+              code: "FILL_BAD_ROW_SKIP",
+            },
+            400,
+          );
+        }
       }
 
       const images: {
@@ -2065,8 +3648,12 @@ export function createApi(options: {
         const name = key.slice("image:".length);
         if (!name) continue;
         if (val.size === 0) continue;
+        if (skip[name]) continue;
         if (val.size > MAX_IMAGE_BYTES) {
-          return c.json({ error: `รูป ${name} ใหญ่เกิน 8 MB` }, 400);
+          return c.json(
+            { error: `รูป ${name} ใหญ่เกิน 8 MB`, code: "FILL_IMAGE_TOO_LARGE" },
+            400,
+          );
         }
         const type = (val.type || "").toLowerCase();
         if (
@@ -2074,7 +3661,13 @@ export function createApi(options: {
           !type.startsWith("image/") &&
           type !== "application/octet-stream"
         ) {
-          return c.json({ error: `ไฟล์สำหรับ ${name} ไม่ใช่รูปภาพ` }, 400);
+          return c.json(
+            {
+              error: `ไฟล์สำหรับ ${name} ไม่ใช่รูปภาพ`,
+              code: "FILL_IMAGE_INVALID",
+            },
+            400,
+          );
         }
         images.push({
           name,
@@ -2085,7 +3678,44 @@ export function createApi(options: {
       }
 
       const template = Buffer.from(await file.arrayBuffer());
-      const out = await fillTemplate({ template, values, images });
+      const parsed = await parseTemplate(template);
+      const hasSkipMaps =
+        Object.keys(skip).length > 0 || Object.keys(rowSkip).length > 0;
+      // Always run through toFillValues when skip maps are present so empty
+      // loop tables ([]) and skipped fields render cleanly with no leftover tags.
+      // When skip maps are absent, keep legacy behaviour (client pre-transformed
+      // values) but still normalise empty arrays for list fields found in the
+      // template so generating with [] is never rejected.
+      const { toFillValues } = await import("./source-map");
+      let fillValues = values;
+      if (hasSkipMaps) {
+        fillValues = toFillValues(parsed.fields, values, skip, rowSkip);
+      } else {
+        // Honour empty loop tables already in values (Frontend may send []).
+        for (const f of parsed.fields) {
+          if (f.type !== "list") continue;
+          const v = values[f.name];
+          if (v == null) {
+            // Missing list key → treat as empty loop (no leftover tags).
+            values[f.name] = [];
+          } else if (!Array.isArray(v)) {
+            return c.json(
+              {
+                error: `ฟิลด์ลิสต์「${f.name}」ต้องเป็นอาร์เรย์ (ว่างได้เมื่อข้าม)`,
+                code: "FILL_LIST_NOT_ARRAY",
+              },
+              400,
+            );
+          }
+        }
+        fillValues = values;
+      }
+
+      const out = await fillTemplate({
+        template,
+        values: fillValues,
+        images,
+      });
 
       const base = file.name.replace(/\.docx$/i, "") || "document";
       const utf8Name = `${base}-filled.docx`;

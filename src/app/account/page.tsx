@@ -3,26 +3,9 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { authClient } from "@/lib/auth-client";
-import { getAuthenticatorName } from "@better-auth/passkey";
-import { PasskeyMark } from "@/components/AuthIcons";
 import { BrandLockup } from "@/components/BrandLogo";
 import { ProfileAvatar } from "@/components/ProfileAvatar";
-
-type PasskeyRow = {
-  id: string;
-  name?: string | null;
-  aaguid?: string | null;
-  createdAt?: string | Date;
-  deviceType?: string | null;
-  backedUp?: boolean;
-};
-
-type AccountRow = {
-  id: string;
-  providerId: string;
-  accountId?: string;
-  createdAt?: string | Date;
-};
+import { AiKeysSection } from "@/components/AiKeysSection";
 
 type SessionRow = {
   id: string;
@@ -55,6 +38,27 @@ type MePayload = {
   session: { id: string; expiresAt: string | Date };
 };
 
+type PasskeyRow = {
+  id: string;
+  label: string;
+  createdAt: string | null;
+};
+
+function passkeyStatusMessage(
+  status: string | null,
+): { kind: "ok" | "error"; text: string } | null {
+  if (status === "success") {
+    return { kind: "ok", text: "จัดการ passkey สำเร็จ" };
+  }
+  if (status === "cancelled") {
+    return { kind: "error", text: "ยกเลิกการจัดการ passkey" };
+  }
+  if (status === "error") {
+    return { kind: "error", text: "จัดการ passkey ไม่สำเร็จ" };
+  }
+  return null;
+}
+
 function isSuperAdmin(role: string): boolean {
   return role
     .split(",")
@@ -83,29 +87,20 @@ function shortUa(ua: string | null | undefined): string {
   return s + (ua.length > 80 ? "…" : "");
 }
 
-function providerLabel(id: string): string {
-  const map: Record<string, string> = {
-    google: "Google",
-    github: "GitHub",
-    microsoft: "Microsoft",
-    apple: "Apple",
-    discord: "Discord",
-    credential: "อีเมล/รหัสผ่าน",
-  };
-  return map[id] || id;
-}
+const SSO_LOGOUT_PATH = "/api/auth/oidc/logout";
 
 export default function AccountPage() {
   const [me, setMe] = useState<MePayload | null>(null);
   const [editName, setEditName] = useState("");
-  const [passkeys, setPasskeys] = useState<PasskeyRow[]>([]);
-  const [accounts, setAccounts] = useState<AccountRow[]>([]);
   const [sessions, setSessions] = useState<SessionRow[]>([]);
-  const [providers, setProviders] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [passkeyAddPath, setPasskeyAddPath] = useState<string | null>(null);
+  const [passkeyListEnabled, setPasskeyListEnabled] = useState(false);
+  const [passkeys, setPasskeys] = useState<PasskeyRow[]>([]);
+  const [passkeysLoading, setPasskeysLoading] = useState(false);
 
   const reload = useCallback(async () => {
     setError("");
@@ -114,11 +109,9 @@ export default function AccountPage() {
       error?: string;
       user?: MePayload["user"] | null;
     };
-    // Guests receive 200 + user:null — send them to login without treating it as an error.
     if (meRes.ok && !meData.user) {
-      // Full navigation — account is gated; soft router can leave app.js shell half-mounted.
       // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- hard nav required
-      window.location.assign("/login");
+      window.location.assign("/login?next=/account");
       return;
     }
     if (!meRes.ok || !meData.user) {
@@ -129,40 +122,65 @@ export default function AccountPage() {
     setMe(meData as MePayload);
     setEditName(meData.user.name || "");
 
-    const [pk, acc, sess, cfg] = await Promise.all([
-      authClient.passkey.listUserPasskeys(),
-      authClient.listAccounts(),
-      authClient.listSessions(),
-      fetch("/api/auth-config").then((r) => r.json()).catch(() => ({})),
-    ]);
+    const cfgRes = await fetch("/api/auth-config", { credentials: "include" });
+    const cfg = (await cfgRes.json().catch(() => ({}))) as {
+      passkeyAddPath?: string | null;
+      passkeyListEnabled?: boolean;
+      oidc?: boolean;
+    };
+    const addPath =
+      typeof cfg.passkeyAddPath === "string" && cfg.passkeyAddPath
+        ? cfg.passkeyAddPath
+        : null;
+    setPasskeyAddPath(addPath);
+    const listEnabled = Boolean(cfg.passkeyListEnabled);
+    setPasskeyListEnabled(listEnabled);
 
-    if (pk.error) {
-      setError(pk.error.message || "โหลดพาสคีย์ไม่สำเร็จ");
+    if (listEnabled) {
+      setPasskeysLoading(true);
+      try {
+        const listRes = await fetch("/api/auth/oidc/passkey", {
+          credentials: "include",
+        });
+        const listData = (await listRes.json().catch(() => ({}))) as {
+          credentials?: PasskeyRow[];
+        };
+        setPasskeys(
+          listRes.ok && Array.isArray(listData.credentials)
+            ? listData.credentials
+            : [],
+        );
+      } finally {
+        setPasskeysLoading(false);
+      }
     } else {
-      setPasskeys(Array.isArray(pk.data) ? (pk.data as PasskeyRow[]) : []);
+      setPasskeys([]);
     }
 
-    if (!acc.error && Array.isArray(acc.data)) {
-      setAccounts(acc.data as AccountRow[]);
-    } else {
-      setAccounts([]);
-    }
-
+    const sess = await authClient.listSessions();
     if (!sess.error && Array.isArray(sess.data)) {
       setSessions(sess.data as SessionRow[]);
     } else {
       setSessions([]);
     }
-
-    const prov = (cfg as { providers?: string[] }).providers;
-    setProviders(Array.isArray(prov) ? prov : []);
     setLoading(false);
   }, []);
 
   useEffect(() => {
-    // Defer so setState is not synchronous inside the effect body (react-hooks/set-state-in-effect).
     void Promise.resolve().then(() => reload());
   }, [reload]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const msg = passkeyStatusMessage(params.get("passkey"));
+    if (!msg) return;
+    if (msg.kind === "ok") setOk(msg.text);
+    else setError(msg.text);
+    params.delete("passkey");
+    const next = `${window.location.pathname}${params.toString() ? `?${params}` : ""}${window.location.hash}`;
+    window.history.replaceState({}, "", next);
+  }, []);
 
   async function saveProfile(e: React.FormEvent) {
     e.preventDefault();
@@ -178,88 +196,6 @@ export default function AccountPage() {
         return;
       }
       setOk("บันทึกชื่อแสดงแล้ว");
-      await reload();
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function addPasskey() {
-    setBusy("passkey");
-    setError("");
-    setOk("");
-    try {
-      const label = editName || me?.user.email || "docx-form";
-      const { error: err } = await authClient.passkey.addPasskey({
-        name: `${label} · ${new Date().toLocaleDateString("th-TH")}`,
-      });
-      if (err) {
-        setError(err.message || "ลงทะเบียนพาสคีย์ไม่สำเร็จ");
-        return;
-      }
-      setOk("ลงทะเบียนพาสคีย์แล้ว — เข้าครั้งถัดไปด้วยพาสคีย์ได้จากหน้าล็อกอิน");
-      await reload();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "ลงทะเบียนพาสคีย์ไม่สำเร็จ");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function removePasskey(id: string) {
-    if (!window.confirm("ลบพาสคีย์นี้?")) return;
-    setBusy(`pk-${id}`);
-    setError("");
-    setOk("");
-    try {
-      const { error: err } = await authClient.passkey.deletePasskey({ id });
-      if (err) {
-        setError(err.message || "ลบไม่สำเร็จ");
-        return;
-      }
-      setOk("ลบพาสคีย์แล้ว");
-      await reload();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "ลบไม่สำเร็จ");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function linkProvider(provider: string) {
-    setBusy(`link-${provider}`);
-    setError("");
-    try {
-      await authClient.linkSocial({
-        provider: provider as "google",
-        callbackURL: "/account",
-      });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "เชื่อมบัญชีไม่สำเร็จ");
-      setBusy(null);
-    }
-  }
-
-  async function unlinkProvider(account: AccountRow) {
-    if (accounts.length <= 1 && passkeys.length === 0) {
-      setError("ต้องเหลือช่องทางเข้าอย่างน้อย 1 อย่าง (OAuth หรือพาสคีย์)");
-      return;
-    }
-    if (!window.confirm(`ยกเลิกการเชื่อม ${providerLabel(account.providerId)}?`)) {
-      return;
-    }
-    setBusy(`unlink-${account.id}`);
-    setError("");
-    setOk("");
-    try {
-      const { error: err } = await authClient.unlinkAccount({
-        accountId: account.id,
-      });
-      if (err) {
-        setError(err.message || "ยกเลิกการเชื่อมไม่สำเร็จ");
-        return;
-      }
-      setOk(`ยกเลิกการเชื่อม ${providerLabel(account.providerId)} แล้ว`);
       await reload();
     } finally {
       setBusy(null);
@@ -304,14 +240,19 @@ export default function AccountPage() {
   }
 
   function signOut() {
-    void authClient.signOut({
-      fetchOptions: {
-        onSuccess: () => {
-          // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- hard nav after sign-out
-          window.location.assign("/login");
-        },
-      },
-    });
+    if (
+      !window.confirm(
+        "ออกจากระบบ?\nจะออกจากบัญชีนี้บนเครื่องนี้และที่ Keycloak",
+      )
+    ) {
+      return;
+    }
+    // Top-level document POST → 303 to Keycloak end_session.
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = SSO_LOGOUT_PATH;
+    document.body.appendChild(form);
+    form.submit();
   }
 
   if (loading) {
@@ -332,7 +273,7 @@ export default function AccountPage() {
           <BrandLockup className="brand account-brand" />
           <p className="auth-error">{error || "โหลดบัญชีไม่สำเร็จ"}</p>
           <p className="auth-foot">
-            <Link href="/login">เข้าสู่ระบบ</Link>
+            <Link href="/login?next=/account">เข้าสู่ระบบ</Link>
           </p>
         </div>
       </main>
@@ -340,8 +281,6 @@ export default function AccountPage() {
   }
 
   const { user, premium, session: currentSession } = me;
-  const linkedProviders = new Set(accounts.map((a) => a.providerId));
-  const linkable = providers.filter((p) => !linkedProviders.has(p));
   const currentToken = sessions.find((s) => s.id === currentSession.id)?.token;
 
   return (
@@ -421,8 +360,8 @@ export default function AccountPage() {
               <input className="admin-input" value={user.email || ""} disabled />
             </label>
             <p className="auth-hint">
-              สมัครเมื่อ {fmtDate(user.createdAt)} · เข้าด้วย OAuth / พาสคีย์
-              (ไม่มีรหัสผ่านในระบบ)
+              สมัครเมื่อ {fmtDate(user.createdAt)} · เข้าด้วย TPS18 SSO (Keycloak)
+              เท่านั้น
             </p>
             <button
               type="submit"
@@ -432,6 +371,61 @@ export default function AccountPage() {
               {busy === "profile" ? "กำลังบันทึก…" : "บันทึกโปรไฟล์"}
             </button>
           </form>
+        </section>
+
+        <AiKeysSection />
+
+        <section className="account-panel" id="passkeys">
+          <div className="account-panel-head">
+            <h2 className="auth-section-title">จัดการ passkey</h2>
+            {passkeyAddPath ? (
+              <a
+                className="admin-btn admin-btn-primary"
+                href={`${passkeyAddPath}?next=${encodeURIComponent("/account")}`}
+              >
+                เพิ่ม passkey
+              </a>
+            ) : null}
+          </div>
+          <p className="auth-hint">
+            Passkey ลงทะเบียนที่ Keycloak ผ่าน SSO (ไม่เก็บในแอปนี้)
+          </p>
+          {!passkeyAddPath ? (
+            <p className="auth-hint">
+              SSO ยังไม่ได้ตั้งค่า — ไม่สามารถจัดการ passkey ได้
+            </p>
+          ) : null}
+          {passkeyAddPath && passkeyListEnabled ? (
+            passkeysLoading ? (
+              <p className="auth-hint">กำลังโหลด passkey…</p>
+            ) : passkeys.length === 0 ? (
+              <p className="auth-hint">ยังไม่มี passkey</p>
+            ) : (
+              <ul className="account-row-list">
+                {passkeys.map((pk) => (
+                  <li key={pk.id} className="account-row-item">
+                    <div className="account-row-meta">
+                      <strong>{pk.label || "Passkey"}</strong>
+                      <span className="auth-bar-muted">
+                        สร้างเมื่อ {fmtDate(pk.createdAt)}
+                      </span>
+                    </div>
+                    <a
+                      className="auth-bar-btn auth-bar-ghost"
+                      href={`/api/auth/oidc/passkey/remove?credentialId=${encodeURIComponent(pk.id)}&next=${encodeURIComponent("/account")}`}
+                    >
+                      ลบ
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            )
+          ) : passkeyAddPath ? (
+            <p className="auth-hint">
+              รายการ passkey จะแสดงเมื่อตั้งค่า OIDC_ADMIN_CLIENT_ID /
+              OIDC_ADMIN_CLIENT_SECRET
+            </p>
+          ) : null}
         </section>
 
         <section className="account-panel">
@@ -452,113 +446,6 @@ export default function AccountPage() {
               </strong>
             </li>
           </ul>
-          {!premium.paid ? (
-            <p className="auth-hint">
-              บัญชีฟรีใช้ได้สูงสุด {premium.freeMaxMulti} ไฟล์ต่อครั้ง —
-              เมื่ออัปเกรดจะได้ถึง {premium.paidMaxMulti} (ติดต่อผู้ดูแลระบบ)
-            </p>
-          ) : (
-            <p className="auth-hint">
-              คุณใช้โควตาสมาชิกจ่ายแล้ว · สร้างหลายเทมเพลตได้สูงสุด{" "}
-              {premium.maxMultiTemplates} ไฟล์ต่อครั้ง ({premium.plan || "pro"})
-            </p>
-          )}
-        </section>
-
-        <section className="account-panel">
-          <h2 className="auth-section-title">บัญชีที่เชื่อม</h2>
-          <p className="auth-hint">ผู้ให้บริการ OAuth ที่ใช้เข้าสู่ระบบ</p>
-          {accounts.length === 0 ? (
-            <p className="auth-hint">ยังไม่มีบัญชีที่เชื่อม</p>
-          ) : (
-            <ul className="auth-passkey-list">
-              {accounts.map((a) => (
-                <li key={a.id} className="auth-passkey-item">
-                  <div className="auth-passkey-meta">
-                    <strong>{providerLabel(a.providerId)}</strong>
-                    <span className="auth-bar-muted">
-                      เชื่อมเมื่อ {fmtDate(a.createdAt)}
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    className="auth-bar-btn auth-bar-ghost"
-                    disabled={busy === `unlink-${a.id}`}
-                    onClick={() => void unlinkProvider(a)}
-                  >
-                    ยกเลิกเชื่อม
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-          {linkable.length > 0 ? (
-            <div className="account-link-row">
-              {linkable.map((p) => (
-                <button
-                  key={p}
-                  type="button"
-                  className="admin-btn"
-                  disabled={busy === `link-${p}`}
-                  onClick={() => void linkProvider(p)}
-                >
-                  + เชื่อม {providerLabel(p)}
-                </button>
-              ))}
-            </div>
-          ) : null}
-        </section>
-
-        <section className="account-panel">
-          <h2 className="auth-section-title">พาสคีย์</h2>
-          <p className="auth-hint">
-            Face ID / Touch ID / Windows Hello หรือ security key —
-            เข้าครั้งถัดไปโดยไม่พึ่งรหัสผ่าน
-          </p>
-          <button
-            type="button"
-            className="auth-provider auth-provider-passkey"
-            disabled={busy === "passkey"}
-            onClick={() => void addPasskey()}
-          >
-            <PasskeyMark className="auth-provider-icon" />
-            <span>
-              {busy === "passkey" ? "กำลังทำงาน…" : "เพิ่มพาสคีย์บนเครื่องนี้"}
-            </span>
-          </button>
-          {passkeys.length === 0 ? (
-            <p className="auth-hint">ยังไม่มีพาสคีย์</p>
-          ) : (
-            <ul className="auth-passkey-list">
-              {passkeys.map((pk) => {
-                const label =
-                  pk.name ||
-                  getAuthenticatorName(pk.aaguid || undefined) ||
-                  "Passkey";
-                return (
-                  <li key={pk.id} className="auth-passkey-item">
-                    <PasskeyMark className="auth-passkey-icon" />
-                    <div className="auth-passkey-meta">
-                      <strong>{label}</strong>
-                      <span className="auth-bar-muted">
-                        {pk.deviceType || "device"}
-                        {pk.backedUp ? " · synced" : ""}
-                        {pk.createdAt ? ` · ${fmtDate(pk.createdAt)}` : ""}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      className="auth-bar-btn auth-bar-ghost"
-                      disabled={busy === `pk-${pk.id}`}
-                      onClick={() => void removePasskey(pk.id)}
-                    >
-                      ลบ
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
         </section>
 
         <section className="account-panel">
@@ -576,14 +463,14 @@ export default function AccountPage() {
           {sessions.length === 0 ? (
             <p className="auth-hint">ไม่พบเซสชัน</p>
           ) : (
-            <ul className="auth-passkey-list">
+            <ul className="account-row-list">
               {sessions.map((s) => {
                 const isCurrent =
                   s.id === currentSession.id ||
                   (currentToken ? s.token === currentToken : false);
                 return (
-                  <li key={s.id} className="auth-passkey-item">
-                    <div className="auth-passkey-meta">
+                  <li key={s.id} className="account-row-item">
+                    <div className="account-row-meta">
                       <strong>
                         {shortUa(s.userAgent)}
                         {isCurrent ? " · เครื่องนี้" : ""}
@@ -615,7 +502,11 @@ export default function AccountPage() {
 
         <footer className="account-foot">
           <Link href="/">← หน้าแรก</Link>
-          <button type="button" className="admin-btn admin-btn-danger" onClick={signOut}>
+          <button
+            type="button"
+            className="admin-btn admin-btn-danger"
+            onClick={signOut}
+          >
             ออกจากระบบ
           </button>
         </footer>

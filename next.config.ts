@@ -25,14 +25,18 @@ const nextConfig: NextConfig = {
     "easy-template-x",
     "pg",
     "better-auth",
-    "@better-auth/passkey",
     "@cursor/sdk",
   ],
   async redirects() {
-    return LEGACY_HOME_REDIRECT_PATHS.flatMap((path) => [
+    const legacy = LEGACY_HOME_REDIRECT_PATHS.flatMap((path) => [
       { source: path, destination: "/", permanent: false },
       { source: `${path}/`, destination: "/", permanent: false },
     ]);
+    return [
+      ...legacy,
+      { source: "/settings", destination: "/account", permanent: false },
+      { source: "/keys", destination: "/account", permanent: false },
+    ];
   },
   async headers() {
     return [

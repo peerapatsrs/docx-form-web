@@ -332,6 +332,7 @@ async function callOpenAiJson(
     apiKey: string;
     model: string;
     images: { mimeType: string; base64: string; filename: string }[];
+    signal?: AbortSignal;
   },
 ): Promise<Record<string, unknown> | null> {
   const provider = getAiProvider(providerId);
@@ -366,46 +367,59 @@ async function callOpenAiJson(
   body.response_format = { type: "json_object" };
 
   const url = `${provider.baseUrl.replace(/\/$/, "")}/chat/completions`;
-  let res = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
-  if (!res.ok && res.status === 400) {
-    delete body.response_format;
-    res = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
-  }
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(
-      formatProviderHttpError(
-        provider.label,
-        res.status,
-        errText || res.statusText,
-      ),
-    );
-  }
-  const data = (await res.json()) as {
-    choices?: { message?: { content?: string | unknown } }[];
-  };
-  const raw = data.choices?.[0]?.message?.content;
-  const text =
-    typeof raw === "string"
-      ? raw
-      : Array.isArray(raw)
-        ? raw
-            .map((p) =>
-              p && typeof p === "object" && "text" in p
-                ? String((p as { text?: string }).text || "")
-                : "",
-            )
-            .join("")
-        : "";
-  return parseJsonObject(text);
+  const { withAiTimeout } = await import("./ai-request");
+  return withAiTimeout(
+    async (signal) => {
+      let res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal,
+      });
+      if (!res.ok && res.status === 400) {
+        delete body.response_format;
+        res = await fetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal,
+        });
+      }
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw new Error(
+          formatProviderHttpError(
+            provider.label,
+            res.status,
+            errText || res.statusText,
+          ),
+        );
+      }
+      const data = (await res.json()) as {
+        choices?: { message?: { content?: string | unknown } }[];
+      };
+      const raw = data.choices?.[0]?.message?.content;
+      const text =
+        typeof raw === "string"
+          ? raw
+          : Array.isArray(raw)
+            ? raw
+                .map((p) =>
+                  p && typeof p === "object" && "text" in p
+                    ? String((p as { text?: string }).text || "")
+                    : "",
+                )
+                .join("")
+            : "";
+      return parseJsonObject(text);
+    },
+    {
+      signal: opts.signal,
+      route: "ai-fill.openai",
+      provider: providerId,
+      model: opts.model,
+    },
+  );
 }
 
 async function callAnthropicJson(
@@ -414,6 +428,7 @@ async function callAnthropicJson(
     apiKey: string;
     model: string;
     images: { mimeType: string; base64: string; filename: string }[];
+    signal?: AbortSignal;
   },
 ): Promise<Record<string, unknown> | null> {
   const content: Array<
@@ -432,38 +447,50 @@ async function callAnthropicJson(
   }
   content.push({ type: "text", text: prompt });
 
-  const res = await fetch(`${getAnthropicApiBase()}/v1/messages`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": opts.apiKey,
-      "anthropic-version": "2023-06-01",
+  const { withAiTimeout } = await import("./ai-request");
+  return withAiTimeout(
+    async (signal) => {
+      const res = await fetch(`${getAnthropicApiBase()}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": opts.apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: opts.model,
+          max_tokens: 8192,
+          temperature: 0.1,
+          messages: [{ role: "user", content }],
+        }),
+        signal,
+      });
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw new Error(
+          formatProviderHttpError(
+            "Anthropic",
+            res.status,
+            errText || res.statusText,
+          ),
+        );
+      }
+      const data = (await res.json()) as {
+        content?: { type?: string; text?: string }[];
+      };
+      const text = (data.content || [])
+        .filter((c) => c.type === "text")
+        .map((c) => c.text || "")
+        .join("");
+      return parseJsonObject(text);
     },
-    body: JSON.stringify({
+    {
+      signal: opts.signal,
+      route: "ai-fill.anthropic",
+      provider: "anthropic",
       model: opts.model,
-      max_tokens: 8192,
-      temperature: 0.1,
-      messages: [{ role: "user", content }],
-    }),
-  });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(
-      formatProviderHttpError(
-        "Anthropic",
-        res.status,
-        errText || res.statusText,
-      ),
-    );
-  }
-  const data = (await res.json()) as {
-    content?: { type?: string; text?: string }[];
-  };
-  const text = (data.content || [])
-    .filter((c) => c.type === "text")
-    .map((c) => c.text || "")
-    .join("");
-  return parseJsonObject(text);
+    },
+  );
 }
 
 type CompatApiFamily = "openai" | "anthropic" | "cursor";
@@ -484,6 +511,7 @@ async function callCompatJson(
       apiKey: opts.apiKey,
       model: opts.model,
       signal: opts.signal,
+      route: "ai-fill.cursor",
       images: opts.images.map((img) => ({
         mimeType: img.mimeType,
         base64: img.base64,
@@ -603,6 +631,7 @@ export async function fillDocxFormValues(
       apiKey: opts?.apiKey,
       model: opts?.model,
       fields: opts?.fields,
+      signal: opts?.signal,
     });
   }
   if (
@@ -630,6 +659,7 @@ export async function fillDocxFormValuesBatch(
     return geminiFillDocxFormValuesBatch(items, sourceFiles, {
       apiKey: opts?.apiKey,
       model: opts?.model,
+      signal: opts?.signal,
     });
   }
   if (

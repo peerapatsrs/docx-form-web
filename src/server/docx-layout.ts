@@ -10,6 +10,16 @@ export type LayoutCell = {
   align?: CellAlign;
   /** Preferred width in twips (dxa) from w:tcW or tblGrid. */
   widthDxa?: number;
+  /**
+   * Primary self-tag name when the cell holds one (or the first) `{{name}}`.
+   * FE contract: `fieldName` **or** `tags[]` when the cell contains fill tags.
+   */
+  fieldName?: string;
+  /**
+   * Self-closed `{{name}}` tags found in this cell (not `#` / `/` loop markers).
+   * Same names also appear as normal fields from parseTemplate / template/fields.
+   */
+  tags?: string[];
 };
 
 export type LayoutTextBlock = {
@@ -274,7 +284,7 @@ function resolveMerges(rows: RawCell[][]): LayoutCell[][] {
       if (rowspan > 1) layout.rowspan = rowspan;
       if (cell.align) layout.align = cell.align;
       if (cell.widthDxa) layout.widthDxa = cell.widthDxa;
-      out.push(layout);
+      out.push(withCellTags(layout));
     }
     return out;
   });
@@ -292,12 +302,34 @@ function stripLoopWrappers(cell: string): string {
     .trim();
 }
 
+/** Self tags in cell text — excludes loop open/close. */
+export function extractSelfTagsFromCellText(text: string): string[] {
+  const out: string[] = [];
+  const re = /\{\{\s*([^{}]+?)\s*\}\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(String(text || "")))) {
+    const raw = String(m[1] || "").trim();
+    if (!raw || raw.startsWith("#") || raw.startsWith("/")) continue;
+    if (!out.includes(raw)) out.push(raw);
+  }
+  return out;
+}
+
+function withCellTags(layout: LayoutCell): LayoutCell {
+  const tags = extractSelfTagsFromCellText(layout.text);
+  if (tags.length) {
+    layout.tags = tags;
+    layout.fieldName = tags[0];
+  }
+  return layout;
+}
+
 function rawToTemplateCell(cell: RawCell): LayoutCell {
   const layout: LayoutCell = { text: stripLoopWrappers(cell.text) };
   if (cell.align) layout.align = cell.align;
   if (cell.widthDxa) layout.widthDxa = cell.widthDxa;
   if (cell.colspan > 1) layout.colspan = cell.colspan;
-  return layout;
+  return withCellTags(layout);
 }
 
 function tableToBlock(

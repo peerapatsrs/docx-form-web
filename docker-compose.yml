@@ -20,8 +20,6 @@ services:
     build:
       context: .
       args:
-        # Include dev-auth client UI in the image (production deploys omit this).
-        NEXT_PUBLIC_DEV_AUTH: ${NEXT_PUBLIC_DEV_AUTH:-1}
         NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
     ports:
       - "${PORT:-3000}:3000"
@@ -34,12 +32,13 @@ services:
       NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
       SUPERADMIN_EMAILS: ${SUPERADMIN_EMAILS:-peerapat.srs@gmail.com}
-      # Docker image runs NODE_ENV=production — force the local dev user picker /
-      # auto sign-in (default: first SUPERADMIN / peerapat.srs@gmail.com).
-      DEV_AUTH: ${DEV_AUTH:-1}
-      DEV_AUTH_DEFAULT_EMAIL: ${DEV_AUTH_DEFAULT_EMAIL:-peerapat.srs@gmail.com}
-      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
-      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      # Keycloak OIDC — required for login (no fallback).
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      # Silent SSO cooldown (seconds) + hub Referer bypass origins (comma-separated).
+      OIDC_SSO_COOLDOWN_SEC: ${OIDC_SSO_COOLDOWN_SEC:-60}
+      OIDC_SSO_HUB_ORIGINS: ${OIDC_SSO_HUB_ORIGINS:-}
     depends_on:
       db:
         condition: service_healthy

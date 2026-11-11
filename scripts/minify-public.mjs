@@ -14,6 +14,7 @@ const targets = [
   { file: "public/ui-labels.js", loader: "js" },
   { file: "public/ai-key-client.js", loader: "js" },
   { file: "public/ai-key-dialog.js", loader: "js" },
+  { file: "public/ai-model-picker.js", loader: "js" },
   { file: "public/doc-table-fields.js", loader: "js" },
   { file: "public/app.js", loader: "js" },
   { file: "public/style.css", loader: "css" },

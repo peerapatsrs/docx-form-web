@@ -89,8 +89,10 @@ await check("shared dialog + account + pill wiring present", async () => {
   assert.match(app, /aiStatus\.keySource === "shared"/);
   assert.match(app, /คีย์เซิร์ฟเวอร์/);
   assert.match(account, /AiKeysSection/);
-  assert.match(section, /openAiKeysDialog/);
-  assert.match(section, /ai-key-dialog\.js/);
+  // Account settings: server vs BYOK radio cards via adapter (no system key values).
+  assert.match(section, /ai-key-settings-adapter/);
+  assert.match(section, /ใช้คีย์กลางของระบบ|modeServer/);
+  assert.match(section, /ใช้คีย์ของฉันเอง|modeByok/);
   assert.match(admin, /serverKeySources/);
   assert.match(admin, /ไม่ได้ตั้งค่าคีย์เซิร์ฟเวอร์/);
   assert.match(admin, /\/api\/admin\/ai\/server-key/);

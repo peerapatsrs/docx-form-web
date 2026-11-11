@@ -6187,3 +6187,219 @@ button.danger:hover {
     align-items: center;
   }
 }
+
+/* —— AI key settings (account): server vs BYOK radio cards —— */
+.ai-key-settings-active {
+  margin: 0 0 0.35rem;
+}
+
+.ai-key-settings-active-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0.45rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.ai-key-settings-privacy {
+  margin-top: 0;
+  margin-bottom: 0.85rem;
+}
+
+.ai-key-settings-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  width: 100%;
+}
+
+.ai-key-settings-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  width: 100%;
+  margin: 0;
+  padding: 0.9rem 1rem;
+  border: 1.5px solid var(--border);
+  border-radius: 14px;
+  background: #fff;
+  cursor: pointer;
+  box-sizing: border-box;
+  min-height: 44px;
+}
+
+.ai-key-settings-card input[type="radio"] {
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  min-height: 22px;
+  margin-top: 0.15rem;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ai-key-settings-card.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: rgba(13, 122, 106, 0.06);
+  box-shadow: 0 0 0 3px rgba(13, 122, 106, 0.1);
+}
+
+.ai-key-settings-card.is-disabled {
+  opacity: 0.62;
+  cursor: not-allowed;
+  background: #f4f6f7;
+}
+
+.ai-key-settings-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ai-key-settings-card-title {
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: var(--ink);
+  line-height: 1.35;
+}
+
+.ai-key-settings-card-sub {
+  font-size: 0.84rem;
+  font-weight: 500;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.ai-key-settings-card-status {
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.ai-key-settings-card-status.is-ready {
+  color: var(--accent);
+}
+
+.ai-key-settings-card-status.is-warn {
+  color: #9a4b00;
+}
+
+.ai-key-settings-byok {
+  margin-top: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.ai-key-settings-saved {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #f7faf9;
+}
+
+.ai-key-settings-masked {
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+.ai-key-settings-saved-actions,
+.ai-key-settings-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.ai-key-settings-saved-actions .admin-btn,
+.ai-key-settings-editor-actions .admin-btn,
+.ai-key-settings-toggle {
+  min-height: 44px;
+}
+
+.ai-key-settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.ai-key-settings-input-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: stretch;
+}
+
+.ai-key-settings-input-row .admin-input {
+  flex: 1 1 12rem;
+  min-height: 44px;
+  min-width: 0;
+}
+
+/* —— AI model picker: system vs own groups —— */
+.ai-model-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  width: 100%;
+}
+
+.ai-model-picker-source {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.45rem;
+  min-height: 44px;
+  padding: 0.35rem 0.7rem;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.82rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.ai-model-picker-source[data-source="byok"] {
+  background: #eef2f6;
+  color: var(--ink);
+}
+
+.ai-model-picker select.dialog-select,
+.ai-model-picker-select {
+  width: 100%;
+  min-height: 44px;
+}
+
+.ai-model-picker-reason {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+@media (max-width: 430px) {
+  .ai-key-settings-card {
+    padding: 0.85rem 0.85rem;
+  }
+
+  .ai-key-settings-input-row {
+    flex-direction: column;
+  }
+
+  .ai-key-settings-toggle {
+    width: 100%;
+  }
+}

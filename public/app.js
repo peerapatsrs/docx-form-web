@@ -28,6 +28,11 @@ import {
   mergeMissingTextFields,
   renderCellTemplateHtml,
 } from "./doc-table-fields.js";
+import {
+  bindAiModelPicker,
+  buildAiModelGroups,
+  renderAiModelPickerHtml,
+} from "./ai-model-picker.js";
 
 /** @typedef {{ name: string, type: 'text', aliases?: string[] }} TextField */
 /** @typedef {{ name: string, type: 'image', aliases?: string[] }} ImageField */
@@ -1483,9 +1488,15 @@ function askDialog(opts) {
       : "";
 
     const selectOpts = opts.select?.options || [];
+    const selectGroups = Array.isArray(opts.select?.groups)
+      ? opts.select.groups
+      : null;
     const selectValue = opts.select?.value || selectOpts[0]?.id || "";
     const allowCustom = opts.select ? opts.select.allowCustom !== false : false;
-    const knownIds = new Set(selectOpts.map((o) => o.id));
+    const flatFromGroups = selectGroups
+      ? selectGroups.flatMap((g) => g.options || [])
+      : selectOpts;
+    const knownIds = new Set(flatFromGroups.map((o) => o.id));
     const isCustom = allowCustom && selectValue && !knownIds.has(selectValue);
     const optionsHtml = selectOpts
       .map(
@@ -1494,7 +1505,16 @@ function askDialog(opts) {
       )
       .join("");
     const selectHtml = opts.select
-      ? `<label class="dialog-input-label" for="dialogSelect">${escapeHtml(opts.select.label || "โมเดล")}
+      ? selectGroups
+        ? renderAiModelPickerHtml({
+            groups: selectGroups,
+            selectedId: selectValue,
+            label: opts.select.label || "โมเดล",
+            selectId: "dialogSelect",
+            customInputId: "dialogCustomModel",
+            allowCustom,
+          })
+        : `<label class="dialog-input-label" for="dialogSelect">${escapeHtml(opts.select.label || "โมเดล")}
           <select id="dialogSelect" class="dialog-input dialog-select">
             ${optionsHtml}
             ${allowCustom ? `<option value="__custom__" ${isCustom ? "selected" : ""}>อื่นๆ (พิมพ์เอง)…</option>` : ""}
@@ -1587,6 +1607,12 @@ function askDialog(opts) {
     const selectEl = /** @type {HTMLSelectElement | null} */ (overlay.querySelector("#dialogSelect"));
     const customWrap = overlay.querySelector("#dialogCustomModelWrap");
     const customEl = /** @type {HTMLInputElement | null} */ (overlay.querySelector("#dialogCustomModel"));
+    if (selectGroups) {
+      bindAiModelPicker(overlay, selectGroups, {
+        selectId: "dialogSelect",
+        customInputId: "dialogCustomModel",
+      });
+    }
     const linkWrap = overlay.querySelector("#dialogLinkWrap");
     const linkEl = /** @type {HTMLAnchorElement | null} */ (overlay.querySelector("#dialogLink"));
     const syncSelectLink = () => {
@@ -2846,6 +2872,24 @@ async function promptAddAiKey() {
     setTimeout(() => showBanner(""), 5200);
   }
 
+  const modelGroups = buildAiModelGroups({
+    serverKeyAvailable: aiStatus.serverAiKeyConfigured === true || aiStatus.keySource === "shared",
+    serverKeyAvailabilityKnown:
+      typeof aiStatus.serverAiKeyConfigured === "boolean" ||
+      aiStatus.keySource === "shared" ||
+      aiStatus.keySource === "none",
+    userKeySet: true, // user is actively adding a BYOK key in this flow
+    serverModels: Array.isArray(aiStatus.models)
+      ? aiStatus.models
+          .filter((m) => m?.source === "server" || (!m?.source && aiStatus.keySource === "shared"))
+          .map((m) => ({ id: m.id, label: m.label || m.id, source: "server" }))
+      : [],
+    byokModels: (live.models || []).map((m) => ({
+      id: m.id,
+      label: m.label || m.id,
+      source: "byok",
+    })),
+  });
   const modelPick = await askDialog({
     title: `เลือกโมเดล · ${def.label}`,
     body: !formOk
@@ -2859,6 +2903,7 @@ async function promptAddAiKey() {
       label: "โมเดล",
       value: live.defaultModel || live.models[0]?.id || def.defaultModel || "",
       options: live.models,
+      groups: modelGroups,
     },
     actions: [
       {
@@ -3078,6 +3123,34 @@ async function openAiKeysManager() {
             );
             setTimeout(() => showBanner(""), 4200);
           }
+          const editGroups = buildAiModelGroups({
+            serverKeyAvailable:
+              aiStatus.serverAiKeyConfigured === true ||
+              aiStatus.keySource === "shared",
+            serverKeyAvailabilityKnown:
+              typeof aiStatus.serverAiKeyConfigured === "boolean" ||
+              aiStatus.keySource === "shared" ||
+              aiStatus.keySource === "none",
+            userKeySet: true,
+            serverModels: Array.isArray(aiStatus.models)
+              ? aiStatus.models
+                  .filter(
+                    (m) =>
+                      m?.source === "server" ||
+                      (!m?.source && aiStatus.keySource === "shared"),
+                  )
+                  .map((m) => ({
+                    id: m.id,
+                    label: m.label || m.id,
+                    source: "server",
+                  }))
+              : [],
+            byokModels: models.map((m) => ({
+              id: m.id,
+              label: m.label || m.id,
+              source: "byok",
+            })),
+          });
           const choice = await askDialog({
             title: `โมเดล · ${entry.label}`,
             body:
@@ -3092,6 +3165,7 @@ async function openAiKeysManager() {
                 models,
               ),
               options: models,
+              groups: editGroups,
             },
             actions: [
               { id: "save", label: "บันทึก", kind: "primary" },

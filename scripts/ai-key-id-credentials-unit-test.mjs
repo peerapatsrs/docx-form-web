@@ -566,6 +566,22 @@ await check("vault delete ownership + id validation (local Postgres)", async () 
   assert.equal(isValidUserAiKeyId("../etc/passwd"), false);
   assert.equal(isValidUserAiKeyId(""), false);
 
+  // Reachability probe — skip quietly when CI has no Postgres (unit suite is mostly offline).
+  try {
+    const { Client } = await import("pg");
+    const client = new Client({
+      connectionString: ENV.DATABASE_URL,
+      connectionTimeoutMillis: 1500,
+    });
+    await client.connect();
+    await client.end();
+  } catch (err) {
+    console.log(
+      `⊘ skip vault ownership (Postgres unavailable: ${err?.code || err?.message || "error"})`,
+    );
+    return;
+  }
+
   const owner = "unit-owner-" + Date.now();
   const other = "unit-other-" + Date.now();
   const id = `k-unit-${Date.now().toString(36)}`;

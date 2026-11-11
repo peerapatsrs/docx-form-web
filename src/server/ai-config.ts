@@ -663,6 +663,29 @@ export function hasServerEnvCursorKey(): boolean {
   return Boolean(String(process.env[CURSOR_SERVER_KEY_ENV] || "").trim());
 }
 
+/**
+ * Non-secret readiness: any shared server AI key is present (env and/or DB).
+ * Independent of BYOK mode — reports configuration only, never key material.
+ */
+export function hasServerAiKeyConfigured(): boolean {
+  return (
+    hasServerEnvCursorKey() ||
+    hasServerEnvGeminiKey() ||
+    hasServerFileGeminiKey()
+  );
+}
+
+/** User-facing auth failure when the shared server key was rejected (not BYOK). */
+export function formatSharedServerKeyAuthError(
+  providerLabel?: string | null,
+): string {
+  const label = String(providerLabel || "").trim();
+  if (label) {
+    return `คีย์เซิร์ฟเวอร์ (${label}) ถูกผู้ให้บริการปฏิเสธ — ไม่ใช่คีย์ส่วนตัวของคุณ แจ้งผู้ดูแลระบบให้ตรวจคีย์เซิร์ฟเวอร์`;
+  }
+  return "คีย์เซิร์ฟเวอร์ถูกผู้ให้บริการปฏิเสธ — ไม่ใช่คีย์ส่วนตัวของคุณ แจ้งผู้ดูแลระบบให้ตรวจคีย์เซิร์ฟเวอร์";
+}
+
 /** Effective API key: per-request BYOK → (when not BYOK-only) server env for Gemini/Cursor. */
 export function resolveProviderApiKey(
   provider: string | null | undefined,
@@ -796,6 +819,8 @@ export function geminiStatus(opts?: {
   return {
     connected: !!key,
     byok: isByokOnly(),
+    /** Non-secret: env/DB shared key present (independent of whether this request used it). */
+    serverAiKeyConfigured: hasServerAiKeyConfigured(),
     provider: providerId,
     effectiveProvider: providerId,
     effectiveProviderLabel: provider.label,

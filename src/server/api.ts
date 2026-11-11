@@ -212,6 +212,25 @@ async function resolveRouteAiCredentials(
   };
 }
 
+/** Options for auth-error JSON when the shared server key was in use. */
+function sharedServerKeyErrorOpts(
+  creds: ResolvedRequestAiCredentials,
+  providerId?: string | null,
+): {
+  usedSharedEnvFallback?: boolean;
+  keySource?: "shared";
+  providerLabel?: string;
+} {
+  if (!creds.usedSharedEnvFallback) return {};
+  const id = String(providerId || creds.provider || "").trim();
+  const label = getAiProvider(id)?.label || id || undefined;
+  return {
+    usedSharedEnvFallback: true,
+    keySource: "shared",
+    providerLabel: label,
+  };
+}
+
 export function createApi(options: {
   startedAt: Date;
   version?: string;
@@ -357,18 +376,26 @@ export function createApi(options: {
    */
   api.get("/health", async (c) => {
     const { getBetterAuthSecretHealth } = await import("./auth-secret");
+    const { hasServerAiKeyConfigured } = await import("./ai-config");
     const secret = getBetterAuthSecretHealth();
+    const serverAiKeyConfigured = hasServerAiKeyConfigured();
     if (!secret.ready) {
       return c.json(
         {
           ok: false,
           status: "not-ready",
           reason: "BETTER_AUTH_SECRET",
+          serverAiKeyConfigured,
         },
         503,
       );
     }
-    return c.json({ ok: true, status: "ok" });
+    return c.json({
+      ok: true,
+      status: "ok",
+      /** Non-secret: env/DB shared AI key present (never echoes key material). */
+      serverAiKeyConfigured,
+    });
   });
 
   /** Removed DEV test-login routes — always 404 (OIDC-only). */
@@ -1848,6 +1875,7 @@ export function createApi(options: {
         total?: number;
         label?: string;
         error?: string;
+        code?: string;
         valuesJson?: DocxFormValuesJson;
         values?: unknown;
         skip?: unknown;
@@ -2013,7 +2041,14 @@ export function createApi(options: {
           try {
             await runMap(emit);
           } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
+            const { aiProviderErrorJsonBody: mapErr } = await import(
+              "./ai-request"
+            );
+            const body = mapErr(
+              err,
+              sharedServerKeyErrorOpts(aiCreds, clientProvider),
+            );
+            const message = body.error;
             const banner = message.startsWith("แมปเอกสารต้นทางไม่สำเร็จ")
               ? message
               : `แมปเอกสารต้นทางไม่สำเร็จ — ${message}`;
@@ -2021,6 +2056,7 @@ export function createApi(options: {
               type: "error",
               error: banner,
               message,
+              code: body.code,
             });
           } finally {
             controller.close();
@@ -2036,11 +2072,16 @@ export function createApi(options: {
         },
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const { aiProviderErrorJsonBody: mapErr } = await import("./ai-request");
+      const body = mapErr(
+        err,
+        sharedServerKeyErrorOpts(aiCreds, clientProvider),
+      );
+      const message = body.error;
       const banner = message.startsWith("แมปเอกสารต้นทางไม่สำเร็จ")
         ? message
         : `แมปเอกสารต้นทางไม่สำเร็จ — ${message}`;
-      return c.json({ error: banner }, 400);
+      return c.json({ error: banner, code: body.code }, 400);
     }
   });
 
@@ -2127,6 +2168,7 @@ export function createApi(options: {
     const startedAt = Date.now();
     let logProvider = "";
     let logModel = "";
+    let suggestCreds: ResolvedRequestAiCredentials | null = null;
     try {
       const form = await c.req.formData();
       const file = form.get("file");
@@ -2189,6 +2231,7 @@ export function createApi(options: {
         apiKey: clientKey,
         model: clientModel,
       } = routed;
+      suggestCreds = resolved;
       logProvider = clientProvider;
       logModel = clientModel;
       logAiCall({
@@ -2281,7 +2324,10 @@ export function createApi(options: {
               });
               return payload;
             } catch (err) {
-              const body = aiProviderErrorJsonBody(err);
+              const body = aiProviderErrorJsonBody(
+                err,
+                sharedServerKeyErrorOpts(resolved, clientProvider),
+              );
               logAiCall({
                 route: "/api/template/suggest-tags",
                 provider: clientProvider,
@@ -2316,7 +2362,12 @@ export function createApi(options: {
       });
       return c.json(payload);
     } catch (err) {
-      const body = aiProviderErrorJsonBody(err);
+      const body = aiProviderErrorJsonBody(
+        err,
+        suggestCreds
+          ? sharedServerKeyErrorOpts(suggestCreds, logProvider)
+          : undefined,
+      );
       logAiCall({
         route: "/api/template/suggest-tags",
         provider: logProvider || null,
@@ -2358,6 +2409,7 @@ export function createApi(options: {
     const startedAt = Date.now();
     let logProvider = "";
     let logModel = "";
+    let batchCreds: ResolvedRequestAiCredentials | null = null;
 
     try {
       const form = await c.req.formData();
@@ -2391,6 +2443,7 @@ export function createApi(options: {
         apiKey: clientKey,
         model: clientModel,
       } = routed;
+      batchCreds = headerCreds;
       logProvider = clientProvider;
       logModel = clientModel;
       logAiCall({
@@ -2742,7 +2795,10 @@ export function createApi(options: {
             if (evt.type === "error") box.error = evt.error;
           });
         } catch (err) {
-          const body = aiProviderErrorJsonBody(err);
+          const body = aiProviderErrorJsonBody(
+            err,
+            sharedServerKeyErrorOpts(headerCreds, clientProvider),
+          );
           box.error = body.error;
           box.errorCode = body.code;
         }
@@ -2801,7 +2857,10 @@ export function createApi(options: {
               phase: "finish",
             });
           } catch (err) {
-            const body = aiProviderErrorJsonBody(err);
+            const body = aiProviderErrorJsonBody(
+              err,
+              sharedServerKeyErrorOpts(headerCreds, clientProvider),
+            );
             const message = body.error;
             const cancelled =
               (err instanceof Error && err.name === "AbortError") ||
@@ -2843,7 +2902,12 @@ export function createApi(options: {
         },
       });
     } catch (err) {
-      const body = aiProviderErrorJsonBody(err);
+      const body = aiProviderErrorJsonBody(
+        err,
+        batchCreds
+          ? sharedServerKeyErrorOpts(batchCreds, logProvider)
+          : undefined,
+      );
       logAiCall({
         route: "/api/batch-from-source",
         provider: logProvider || null,

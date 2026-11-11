@@ -240,7 +240,15 @@ let sourceMapSession = null;
 /** @type {AbortController | null} */
 let sourceMapAbort = null;
 /** @type {{ connected: boolean, maskedKey?: string|null, model?: string, models?: {id:string,label:string}[], defaultModel?: string, studioUrl?: string }} */
-let aiStatus = { connected: false, models: [], defaultModel: "gemini-3.8-flash" };
+let aiStatus = {
+  connected: false,
+  models: [],
+  defaultModel: "gemini-3.8-flash",
+  keySource: "none",
+  byok: true,
+  serverKeySources: [],
+  serverAiKeyConfigured: false,
+};
 
 /**
  * Entitlement for multi-template caps (from /api/health).
@@ -2293,6 +2301,32 @@ function hasClientAiCredentials() {
   return !!(e.storeOnServer && e.id && aiUserLoggedIn);
 }
 
+/**
+ * Shared/server key ready from /api/ai/status (and optional health flag).
+ * Driven by server config state — not a hardcoded entitlement flag.
+ */
+function hasSharedServerAiCredentials() {
+  if (aiStatus.keySource === "shared" && aiStatus.connected) return true;
+  if (
+    Array.isArray(aiStatus.serverKeySources) &&
+    aiStatus.serverKeySources.length > 0 &&
+    aiStatus.connected
+  ) {
+    return true;
+  }
+  // BYOK-only off + server reported connected (shared env/DB key).
+  if (aiStatus.byok === false && aiStatus.connected) return true;
+  if (aiStatus.serverAiKeyConfigured === true && aiStatus.connected) {
+    return true;
+  }
+  return false;
+}
+
+/** Personal vault/local key OR shared server key — enables attach / AI actions. */
+function hasUsableAiCredentials() {
+  return hasClientAiCredentials() || hasSharedServerAiCredentials();
+}
+
 function getClientAiModel() {
   const e = getActiveAiEntry();
   if (!e) return "";
@@ -2565,6 +2599,14 @@ function applyAiStatus(data) {
           : data.connected
             ? "shared"
             : "none",
+    serverKeySources: Array.isArray(data.serverKeySources)
+      ? data.serverKeySources
+      : aiStatus.serverKeySources || [],
+    serverAiKeyConfigured:
+      typeof data.serverAiKeyConfigured === "boolean"
+        ? data.serverAiKeyConfigured
+        : aiStatus.serverAiKeyConfigured,
+    usedSharedEnvFallback: Boolean(data.usedSharedEnvFallback),
   };
 }
 
@@ -3315,10 +3357,7 @@ function syncAiStatusPill() {
   }
   const hasFile = !!(state.file || taggerSession);
   const hasPersonalKey = hasClientAiCredentials();
-  const sharedReady =
-    !hasPersonalKey &&
-    !!aiStatus.connected &&
-    (aiStatus.keySource === "shared" || aiStatus.byok === false);
+  const sharedReady = !hasPersonalKey && hasSharedServerAiCredentials();
   if (!hasPersonalKey && !sharedReady) {
     statusText.textContent = UI_LABELS.aiStatusNoKey;
     statusDot.classList.remove("ok");
@@ -3405,15 +3444,28 @@ async function checkHealth() {
       refreshPlanQuotaUi();
     }
 
+    if (health && typeof health.serverAiKeyConfigured === "boolean") {
+      aiStatus.serverAiKeyConfigured = health.serverAiKeyConfigured;
+    }
+
     if (aiRes.ok) {
       const ai = await aiRes.json().catch(() => ({}));
-      if (ai && typeof ai === "object") applyAiStatus(ai);
-      else await refreshAiStatus();
+      if (ai && typeof ai === "object") {
+        applyAiStatus({
+          ...ai,
+          serverAiKeyConfigured:
+            typeof ai.serverAiKeyConfigured === "boolean"
+              ? ai.serverAiKeyConfigured
+              : health.serverAiKeyConfigured,
+        });
+      } else await refreshAiStatus();
     } else {
       await refreshAiStatus();
     }
 
     syncAiStatusPill();
+    // Re-render form so attach button enables once shared/server key status lands.
+    if (state.file) renderForm();
   } catch {
     if (statusDot) {
       statusDot.classList.remove("ok");
@@ -10609,9 +10661,15 @@ function renderForm() {
       ${fieldsHtmlOutside}
     </div>`;
 
-  const aiReady = hasClientAiCredentials();
+  const aiReady = hasUsableAiCredentials();
+  const sharedOnlyReady =
+    !hasClientAiCredentials() && hasSharedServerAiCredentials();
   const aiBtnLabel = aiReady
-    ? `${escapeHtml(UI_LABELS.aiConnectedPrefix)}${escapeHtml(getClientAiLabel() || aiStatus.providerLabel || String(getClientAiModel() || UI_LABELS.aiReadyFallback).replace(/^gemini-/i, ""))}`
+    ? sharedOnlyReady
+      ? escapeHtml(
+          `คีย์เซิร์ฟเวอร์ · ${aiStatus.providerLabel || providerLabel(getClientAiProvider())}`,
+        )
+      : `${escapeHtml(UI_LABELS.aiConnectedPrefix)}${escapeHtml(getClientAiLabel() || aiStatus.providerLabel || String(getClientAiModel() || UI_LABELS.aiReadyFallback).replace(/^gemini-/i, ""))}`
     : escapeHtml(UI_LABELS.putAiKey);
   const attachLabel = isMultiMode()
     ? UI_LABELS.attachSourceMulti
@@ -10736,7 +10794,7 @@ function renderForm() {
   document.getElementById("googleAiBtnMobile")?.addEventListener("click", openAiKey);
   const attachInput = /** @type {HTMLInputElement | null} */ (document.getElementById("attachSourceInput"));
   const openAttach = () => {
-    if (!aiStatus.connected && !hasClientAiCredentials()) {
+    if (!hasUsableAiCredentials()) {
       showBanner(UI_LABELS.attachSourceNeedKeyBanner);
       void connectGoogleAi();
       return;

@@ -19,10 +19,14 @@ function toPosix(p) {
   return p.split(sep).join("/");
 }
 
+/** Skip local build artifacts (gitignored / .dockerignore); pin is source-only. */
+const SKIP_DIR_NAMES = new Set(["node_modules", "dist", "coverage", ".git"]);
+
 function walkFiles(dir, root, out) {
   for (const ent of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, ent.name);
     if (ent.isDirectory()) {
+      if (SKIP_DIR_NAMES.has(ent.name)) continue;
       walkFiles(full, root, out);
       continue;
     }

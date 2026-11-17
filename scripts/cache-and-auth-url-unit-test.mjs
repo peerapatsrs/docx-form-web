@@ -120,6 +120,38 @@ await check("home `/` stays public (session UI is client-fetched, not SSR)", asy
   assert.match(documentCacheControl("/"), /s-maxage=60/);
 });
 
+await check("CSP form-action includes OIDC issuer origin for RP logout", async () => {
+  process.env.OIDC_ISSUER = "https://auth.tps18.space/realms/tps18-dev";
+  const {
+    contentSecurityPolicy,
+    oidcIssuerOrigin,
+    staticSecurityHeaders,
+  } = await loadSecurityHeaders();
+  assert.equal(oidcIssuerOrigin(), "https://auth.tps18.space");
+  const csp = contentSecurityPolicy();
+  assert.match(csp, /form-action 'self' https:\/\/auth\.tps18\.space/);
+  assert.doesNotMatch(csp, /form-action 'self';(?! https)/);
+  // Build-time headers must omit CSP (runtime proxy supplies issuer-aware CSP).
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(
+      staticSecurityHeaders(),
+      "Content-Security-Policy",
+    ),
+    false,
+  );
+});
+
+await check("CSP form-action stays self-only when OIDC_ISSUER unset", async () => {
+  delete process.env.OIDC_ISSUER;
+  const { contentSecurityPolicy, oidcIssuerOrigin } = await loadSecurityHeaders();
+  assert.equal(oidcIssuerOrigin(), null);
+  assert.match(contentSecurityPolicy(), /form-action 'self'/);
+  assert.doesNotMatch(
+    contentSecurityPolicy(),
+    /form-action 'self' https:/,
+  );
+});
+
 await check("BETTER_AUTH_URL wins over APP_BASE_URL for auth origin", async () => {
   process.env.APP_BASE_URL = "https://app.example.com";
   process.env.BETTER_AUTH_URL = "https://auth.example.com";

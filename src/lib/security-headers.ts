@@ -14,8 +14,35 @@ export const SECURITY_HEADER_NAMES = [
   "X-DNS-Prefetch-Control",
 ] as const;
 
+/**
+ * Origin of OIDC_ISSUER for CSP form-action (RP logout 303 → end_session).
+ * Never hardcode the IdP host — derive from env only.
+ */
+export function oidcIssuerOrigin(
+  envSource: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const raw = String(envSource.OIDC_ISSUER || "").trim();
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return u.origin;
+  } catch {
+    return null;
+  }
+}
+
 /** CSP for same-origin APIs, fonts, images, and BYOK AI (via same-origin API). */
-export function contentSecurityPolicy(): string {
+export function contentSecurityPolicy(
+  envSource: NodeJS.ProcessEnv = process.env,
+): string {
+  const issuerOrigin = oidcIssuerOrigin(envSource);
+  // form-action must allow the IdP origin so a top-level logout form POST can
+  // follow the 303 Location to end_session_endpoint. Without it, browsers with
+  // CSP block the redirect, leave Keycloak SSO alive, and silent SSO re-logs in.
+  const formAction = issuerOrigin
+    ? `form-action 'self' ${issuerOrigin}`
+    : "form-action 'self'";
   const directives = [
     "default-src 'self'",
     // Next.js + hybrid /public/app.js shell use inline bootstraps.
@@ -29,16 +56,18 @@ export function contentSecurityPolicy(): string {
     "media-src 'self' blob:",
     "object-src 'none'",
     "base-uri 'self'",
-    "form-action 'self'",
+    formAction,
     "frame-ancestors 'none'",
     "upgrade-insecure-requests",
   ];
   return directives.join("; ");
 }
 
-export function securityHeaders(): Record<string, string> {
+export function securityHeaders(
+  envSource: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
   return {
-    "Content-Security-Policy": contentSecurityPolicy(),
+    "Content-Security-Policy": contentSecurityPolicy(envSource),
     "Strict-Transport-Security": "max-age=31536000; includeSubDomains; preload",
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
@@ -48,6 +77,18 @@ export function securityHeaders(): Record<string, string> {
       "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=(), interest-cohort=(), publickey-credentials-get=(), publickey-credentials-create=()",
     "X-DNS-Prefetch-Control": "off",
   };
+}
+
+/**
+ * Headers for next.config (build-time). Omit CSP so a build without
+ * OIDC_ISSUER does not bake `form-action 'self'` alone — that would AND with
+ * the runtime proxy CSP and still block IdP end_session redirects.
+ * Runtime CSP (with issuer) is applied by `src/proxy.ts`.
+ */
+export function staticSecurityHeaders(): Record<string, string> {
+  const all = securityHeaders();
+  const { "Content-Security-Policy": _csp, ...rest } = all;
+  return rest;
 }
 
 /** Short TTL for public HTML / document navigations (CDN + browser). */

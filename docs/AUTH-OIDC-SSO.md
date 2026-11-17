@@ -79,8 +79,13 @@ Pattern: `https://auth.tps18.space/realms/tps18-{env}` where `{env}` is
    `/api/auth/oidc/login` (clears cooldown).
 5. Callback validates ID token (JWKS), maps `(issuer, sub)` / email / create
    (see `OIDC_TRUST_IDP_EMAIL`) in one transaction with `ON CONFLICT`.
-6. Logout → RP-initiated logout (ends Keycloak session) + clear cooldown →
-   `/logged-out`. A later hub login can silent-check again.
+6. Logout → top-level HTML `POST /api/auth/oidc/logout` (never `fetch`). Clears
+   the app session, loads `id_token` from the server session index (fallback:
+   cookie), then navigates to the discovered `end_session_endpoint` with
+   `id_token_hint` (when fresh), `post_logout_redirect_uri`, and `client_id`.
+   Cross-origin end_session uses a same-origin HTML continue page so CSP
+   `form-action` cannot block the Keycloak hop; CSP also allows the issuer
+   origin in `form-action` when `OIDC_ISSUER` is set. Lands on `/logged-out`.
 7. `/login?error=…` Thai error page + `docx_oidc_fail` loop guard (unchanged).
 
 ## Passkeys (Keycloak AIA)

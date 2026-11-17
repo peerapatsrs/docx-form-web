@@ -121,11 +121,61 @@ console.log("✓ isWordprocessingMlDocumentPackage");
 }
 
 {
+  // 0-byte .docx name — reject.
+  const bad = await validateDocxUpload(
+    { name: "empty.docx" },
+    Buffer.alloc(0),
+  );
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, UNSUPPORTED_FILE_TYPE);
+}
+
+{
+  // PK-only (local header bytes, no central directory) — reject.
+  const pkOnly = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+  const bad = await validateDocxUpload({ name: "pk.docx" }, pkOnly);
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, UNSUPPORTED_FILE_TYPE);
+}
+
+{
+  // Truncated valid package — reject.
+  const truncated = validDocx.subarray(0, Math.min(64, validDocx.length - 1));
+  assert.ok(truncated.length < validDocx.length);
+  const bad = await validateDocxUpload({ name: "cut.docx" }, truncated);
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, UNSUPPORTED_FILE_TYPE);
+}
+
+{
+  // Corrupt ZIP with PK magic but garbage — reject.
+  const corrupt = Buffer.concat([
+    Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+    Buffer.alloc(64, 0xff),
+  ]);
+  const bad = await validateDocxUpload({ name: "corrupt.docx" }, corrupt);
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, UNSUPPORTED_FILE_TYPE);
+}
+
+{
+  // .docx-named plain ZIP without Word Content_Types — reject.
+  const plainZip = new JSZip();
+  plainZip.file("readme.txt", "not a word package");
+  const plainBuf = Buffer.from(await plainZip.generateAsync({ type: "nodebuffer" }));
+  const bad = await validateDocxUpload({ name: "plain.docx" }, plainBuf);
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, UNSUPPORTED_FILE_TYPE);
+}
+
+{
   const body = unsupportedFileTypeBody();
   assert.equal(body.code, UNSUPPORTED_FILE_TYPE);
   assert.ok(body.error.length > 0);
 }
-console.log("✓ validateDocxUpload (pdf / dotx / octet-stream / valid docx)");
+console.log(
+  "✓ validateDocxUpload (pdf / dotx / octet-stream / 0-byte / PK-only / truncated / corrupt / valid docx)",
+);
 
 // api.ts must use the shared validator (no MIME octet-stream bypass for docx).
 {
@@ -142,7 +192,39 @@ console.log("✓ validateDocxUpload (pdf / dotx / octet-stream / valid docx)");
     apiSrc,
     /wordprocessingml\.document"\s*\|\|\s*[\s\S]*?octet-stream/,
   );
+
+  // DEF-BE-SUGGEST-TAGS-VALIDATES-AFTER-AI-KEY: file validation before AI creds.
+  const suggestIdx = apiSrc.indexOf('api.post("/template/suggest-tags"');
+  assert.ok(suggestIdx >= 0, "suggest-tags route present");
+  const suggestChunk = apiSrc.slice(suggestIdx, suggestIdx + 4500);
+  const validatePos = suggestChunk.indexOf("validateDocxUpload");
+  const credsPos = suggestChunk.indexOf("resolveRouteAiCredentials");
+  const premiumPos = suggestChunk.indexOf("requirePremium");
+  assert.ok(validatePos >= 0, "suggest-tags calls validateDocxUpload");
+  assert.ok(credsPos >= 0, "suggest-tags resolves AI credentials");
+  assert.ok(
+    validatePos < credsPos,
+    "suggest-tags must validateDocxUpload before resolveRouteAiCredentials",
+  );
+  assert.ok(
+    validatePos < premiumPos || premiumPos < 0,
+    "suggest-tags must validateDocxUpload before requirePremium",
+  );
+
+  // batch-fill 400 envelope includes top-level code.
+  const batchIdx = apiSrc.indexOf('api.post("/batch-fill"');
+  assert.ok(batchIdx >= 0);
+  const batchChunk = apiSrc.slice(batchIdx, batchIdx + 8000);
+  assert.match(batchChunk, /code:\s*"BATCH_FILL_FAILED"/);
+  assert.match(batchChunk, /unsupportedFileTypeBody\(\)/);
+  const batchValidatePos = batchChunk.indexOf("validateDocxUpload");
+  const batchPremiumPos = batchChunk.indexOf("requirePremium");
+  assert.ok(batchValidatePos >= 0 && batchPremiumPos >= 0);
+  assert.ok(
+    batchValidatePos < batchPremiumPos,
+    "batch-fill must validate templates before requirePremium",
+  );
 }
-console.log("✓ api.ts wired to validateDocxUpload");
+console.log("✓ api.ts order + batch-fill code envelope");
 
 console.log("docx-upload-unit-test: ok");

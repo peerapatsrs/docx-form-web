@@ -2507,8 +2507,6 @@ export function createApi(options: {
   });
 
   api.post("/template/tag", async (c) => {
-    const denied = await requirePremium(c, PremiumFeature.TemplateTagger);
-    if (denied) return denied;
     try {
       const form = await c.req.formData();
       const file = form.get("file");
@@ -2521,6 +2519,16 @@ export function createApi(options: {
       if (file.size > MAX_DOCX_BYTES) {
         return c.json({ error: "ไฟล์ใหญ่เกินไป (สูงสุด 25 MB)" }, 400);
       }
+
+      // Validate package before premium gate so bad files get UNSUPPORTED_FILE_TYPE.
+      const buffer = Buffer.from(await file.arrayBuffer());
+      const uploadCheck = await validateDocxUpload(file, buffer);
+      if (!uploadCheck.ok) {
+        return c.json(unsupportedFileTypeBody(), 400);
+      }
+
+      const denied = await requirePremium(c, PremiumFeature.TemplateTagger);
+      if (denied) return denied;
 
       const tagger = await import("./template-tagger");
       const replacementsRaw = form.get("replacements");
@@ -2537,11 +2545,6 @@ export function createApi(options: {
         }
       }
 
-      const buffer = Buffer.from(await file.arrayBuffer());
-      const uploadCheck = await validateDocxUpload(file, buffer);
-      if (!uploadCheck.ok) {
-        return c.json(unsupportedFileTypeBody(), 400);
-      }
       const { assertDocxReadable } = await import("./docx-errors");
       await assertDocxReadable(buffer);
       const result = await tagger.tagTemplate(buffer, replacements);
@@ -2573,8 +2576,6 @@ export function createApi(options: {
 
   /** AI draft {{tags}} for template tagger — BYOK; free via AiTagDraft. */
   api.post("/template/suggest-tags", async (c) => {
-    const denied = await requirePremium(c, PremiumFeature.AiTagDraft);
-    if (denied) return denied;
     const {
       getOrCreateRequestId,
       logAiCall,
@@ -2598,6 +2599,17 @@ export function createApi(options: {
       if (file.size > MAX_DOCX_BYTES) {
         return c.json({ error: "ไฟล์ใหญ่เกินไป (สูงสุด 25 MB)" }, 400);
       }
+
+      // File shape before premium / AI credentials — guests with no key must
+      // still get 400 UNSUPPORTED_FILE_TYPE for bad packages (not 401).
+      const buffer = Buffer.from(await file.arrayBuffer());
+      const uploadCheck = await validateDocxUpload(file, buffer);
+      if (!uploadCheck.ok) {
+        return c.json(unsupportedFileTypeBody(), 400);
+      }
+
+      const denied = await requirePremium(c, PremiumFeature.AiTagDraft);
+      if (denied) return denied;
 
       const formKey =
         typeof form.get("geminiApiKey") === "string"
@@ -2661,11 +2673,6 @@ export function createApi(options: {
         phase: "begin",
       });
 
-      const buffer = Buffer.from(await file.arrayBuffer());
-      const uploadCheck = await validateDocxUpload(file, buffer);
-      if (!uploadCheck.ok) {
-        return c.json(unsupportedFileTypeBody(), 400);
-      }
       const { assertDocxReadable } = await import("./docx-errors");
       await assertDocxReadable(buffer);
       const { parseAiTagNameLanguage, suggestTemplateTags } = await import(
@@ -3371,9 +3378,6 @@ export function createApi(options: {
    * No AI. Form: templates (docx×N), items = JSON [{ filename, values }]
    */
   api.post("/batch-fill", async (c) => {
-    const denied = await requirePremium(c, PremiumFeature.BatchFill);
-    if (denied) return denied;
-
     try {
       const form = await c.req.formData();
       const templates: File[] = [];
@@ -3385,8 +3389,38 @@ export function createApi(options: {
         }
       }
       if (!templates.length) {
-        return c.json({ error: "ต้องส่งเทมเพลต .docx อย่างน้อย 1 ไฟล์" }, 400);
+        return c.json(
+          {
+            error: "ต้องส่งเทมเพลต .docx อย่างน้อย 1 ไฟล์",
+            code: "BATCH_FILL_MISSING_TEMPLATES",
+          },
+          400,
+        );
       }
+
+      // Validate every template package before premium / fill work.
+      const templateBuffers: Buffer[] = [];
+      for (const tmpl of templates) {
+        if (tmpl.size > MAX_DOCX_BYTES) {
+          return c.json(
+            {
+              error: "เทมเพลตไม่ถูกต้องหรือใหญ่เกินไป",
+              code: "BATCH_FILL_TOO_LARGE",
+            },
+            400,
+          );
+        }
+        const buffer = Buffer.from(await tmpl.arrayBuffer());
+        const uploadCheck = await validateDocxUpload(tmpl, buffer);
+        if (!uploadCheck.ok) {
+          return c.json(unsupportedFileTypeBody(), 400);
+        }
+        templateBuffers.push(buffer);
+      }
+
+      const denied = await requirePremium(c, PremiumFeature.BatchFill);
+      if (denied) return denied;
+
       {
         const ent = await resolveEntitlement(c.req.raw);
         const maxT = ent.maxMultiTemplates;
@@ -3398,6 +3432,7 @@ export function createApi(options: {
               error: ent.paid
                 ? `สร้างได้ไม่เกิน ${maxT} ไฟล์ต่อครั้ง (จ่ายแล้ว)`
                 : `บัญชีฟรีสร้างได้ไม่เกิน ${maxT} ไฟล์ต่อครั้ง — จ่ายแล้วได้ถึง ${paidCap}`,
+              code: "BATCH_FILL_LIMIT",
             },
             400,
           );
@@ -3407,7 +3442,10 @@ export function createApi(options: {
       const itemsRaw = form.get("items");
       if (typeof itemsRaw !== "string") {
         return c.json(
-          { error: "ต้องส่ง items เป็น JSON [{ filename, values }]" },
+          {
+            error: "ต้องส่ง items เป็น JSON [{ filename, values }]",
+            code: "BATCH_FILL_MISSING_ITEMS",
+          },
           400,
         );
       }
@@ -3422,13 +3460,19 @@ export function createApi(options: {
         const parsed = JSON.parse(itemsRaw) as unknown;
         if (!Array.isArray(parsed) || parsed.length !== templates.length) {
           return c.json(
-            { error: "จำนวน items ต้องเท่ากับจำนวนเทมเพลต" },
+            {
+              error: "จำนวน items ต้องเท่ากับจำนวนเทมเพลต",
+              code: "BATCH_FILL_BAD_ITEMS",
+            },
             400,
           );
         }
         items = parsed as FillItem[];
       } catch {
-        return c.json({ error: "items ต้องเป็น JSON ที่ถูกต้อง" }, 400);
+        return c.json(
+          { error: "items ต้องเป็น JSON ที่ถูกต้อง", code: "BATCH_FILL_BAD_ITEMS" },
+          400,
+        );
       }
 
       type BatchFillResult = {
@@ -3445,14 +3489,6 @@ export function createApi(options: {
         const tmpl = templates[i];
         const name = tmpl.name || items[i]?.filename || `template-${i + 1}.docx`;
         try {
-          if (tmpl.size > MAX_DOCX_BYTES) {
-            results.push({
-              filename: name,
-              ok: false,
-              error: "เทมเพลตไม่ถูกต้องหรือใหญ่เกินไป",
-            });
-            continue;
-          }
           const values = items[i]?.values;
           if (!values || typeof values !== "object") {
             results.push({
@@ -3462,16 +3498,7 @@ export function createApi(options: {
             });
             continue;
           }
-          const buffer = Buffer.from(await tmpl.arrayBuffer());
-          const uploadCheck = await validateDocxUpload(tmpl, buffer);
-          if (!uploadCheck.ok) {
-            results.push({
-              filename: name,
-              ok: false,
-              error: uploadCheck.error,
-            });
-            continue;
-          }
+          const buffer = templateBuffers[i];
           const skip = items[i]?.skip;
           const rowSkip = items[i]?.rowSkip;
           let fillValues = values;
@@ -3522,6 +3549,7 @@ export function createApi(options: {
         return c.json(
           {
             error: `สร้างเอกสารไม่สำเร็จทุกไฟล์ — ${reasons}`,
+            code: "BATCH_FILL_FAILED",
             results,
           },
           400,
@@ -3543,7 +3571,13 @@ export function createApi(options: {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: `สร้างหลายเอกสารไม่สำเร็จ: ${message}` }, 400);
+      return c.json(
+        {
+          error: `สร้างหลายเอกสารไม่สำเร็จ: ${message}`,
+          code: "BATCH_FILL_FAILED",
+        },
+        400,
+      );
     }
   });
 

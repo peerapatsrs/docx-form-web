@@ -44,10 +44,15 @@ export function hasZipPkSignature(buffer: Buffer): boolean {
  * True when buffer is a ZIP whose [Content_Types].xml declares the
  * WordprocessingML document main content type (rejects templates / non-Word ZIPs).
  * Templates use `…template.main+xml` and therefore fail this check.
+ *
+ * Also rejects empty, PK-only, truncated, and corrupt ZIP payloads (JSZip fails
+ * or Content_Types is missing / wrong).
  */
 export async function isWordprocessingMlDocumentPackage(
   buffer: Buffer,
 ): Promise<boolean> {
+  // Empty / tiny buffers cannot be a real OPC package (need local header + CD).
+  if (!Buffer.isBuffer(buffer) || buffer.length < 22) return false;
   if (!hasZipPkSignature(buffer)) return false;
   try {
     const zip = await JSZip.loadAsync(buffer);
@@ -61,27 +66,31 @@ export async function isWordprocessingMlDocumentPackage(
   }
 }
 
+function unsupportedResult(): {
+  ok: false;
+  error: string;
+  code: typeof UNSUPPORTED_FILE_TYPE;
+} {
+  return {
+    ok: false,
+    error: UNSUPPORTED_FILE_TYPE_MESSAGE,
+    code: UNSUPPORTED_FILE_TYPE,
+  };
+}
+
 /**
  * Full upload gate: .docx name + WordprocessingML document package.
  * Does not special-case individual filenames — only extension + package shape.
+ * Rejects 0-byte, PK-only, truncated, and corrupt ZIPs with UNSUPPORTED_FILE_TYPE.
  */
 export async function validateDocxUpload(
   file: { name?: string | null },
   buffer: Buffer,
 ): Promise<{ ok: true } | { ok: false; error: string; code: typeof UNSUPPORTED_FILE_TYPE }> {
-  if (!hasDocxFilename(file)) {
-    return {
-      ok: false,
-      error: UNSUPPORTED_FILE_TYPE_MESSAGE,
-      code: UNSUPPORTED_FILE_TYPE,
-    };
-  }
+  if (!hasDocxFilename(file)) return unsupportedResult();
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) return unsupportedResult();
   if (!(await isWordprocessingMlDocumentPackage(buffer))) {
-    return {
-      ok: false,
-      error: UNSUPPORTED_FILE_TYPE_MESSAGE,
-      code: UNSUPPORTED_FILE_TYPE,
-    };
+    return unsupportedResult();
   }
   return { ok: true };
 }

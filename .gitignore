@@ -44,3 +44,4 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 verify/screenshots/qa-ux-local/*.png
+verify/screenshots/repeater-skip-tap/*.png

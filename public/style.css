@@ -6248,8 +6248,18 @@ button.danger:hover {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
-  min-height: 44px;
+  min-width: var(--tap-min);
+  min-height: var(--tap-min);
   padding: 0 0.15rem;
+  box-sizing: border-box;
+}
+
+/* List-level ข้าม in repeater toolbar — never collapse below the tap floor. */
+.repeater-actions .skip-opt,
+.repeater-actions .skip-opt-field {
+  min-width: var(--tap-min);
+  min-height: var(--tap-min);
+  flex-shrink: 0;
 }
 
 .skip-opt-field .skip-opt-label {
@@ -6266,6 +6276,14 @@ button.danger:hover {
 .skip-opt-field:has(input:checked) .skip-opt-label {
   max-width: 4rem;
   opacity: 1;
+}
+
+/* Touch / coarse pointers: keep the label visible so the control stays ≥ tap-min wide. */
+@media (hover: none), (pointer: coarse) {
+  .skip-opt-field .skip-opt-label {
+    max-width: 4rem;
+    opacity: 1;
+  }
 }
 
 .skip-first-use-tip {

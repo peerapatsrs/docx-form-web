@@ -88,7 +88,7 @@ function LogoutButton({
         }
       }}
     >
-      {/* Top-level document POST — required so the browser follows 303 to end_session. */}
+      {/* Top-level document POST — never fetch; server returns HTML continue → Keycloak end_session. */}
       <button type="submit" className={className}>
         {children}
       </button>

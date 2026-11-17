@@ -457,7 +457,18 @@ export class MwAuthClient {
       this.cooldownClearCookie(),
     ];
 
+    // Prefer an explicit hint, then the server-side session id_token (survives
+    // oversized/dropped cookies), then the RP id_token cookie.
+    let sessionIdToken: string | null = null;
     if (input.sessionId) {
+      try {
+        const existing = await this.deps.sessions.get(input.sessionId);
+        if (existing?.idToken) sessionIdToken = existing.idToken;
+      } catch (err) {
+        this.logger.log("warn", "session get failed on logout", {
+          error: summarizeOidcError(err),
+        });
+      }
       try {
         await this.deps.sessions.delete(input.sessionId);
       } catch (err) {
@@ -469,6 +480,7 @@ export class MwAuthClient {
 
     const rawHint =
       input.idTokenHint ||
+      sessionIdToken ||
       readCookie(input.cookieHeader, this.config.idTokenCookieName);
     // Hub behaviour: only send id_token_hint while the token is still fresh.
     // Stale hints trigger Keycloak's logout confirmation page.

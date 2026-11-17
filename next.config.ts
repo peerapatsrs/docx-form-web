@@ -3,12 +3,15 @@ import {
   HTML_CACHE_CONTROL,
   PRIVATE_NO_STORE_CACHE_CONTROL,
   VERSIONED_ASSET_CACHE_CONTROL,
-  securityHeaders,
+  staticSecurityHeaders,
 } from "./src/lib/security-headers";
 import { LEGACY_HOME_REDIRECT_PATHS } from "./src/lib/legacy-routes";
 import { MAX_UPLOAD_BODY_BYTES } from "./src/lib/upload-limits";
 
-const security = Object.entries(securityHeaders()).map(([key, value]) => ({
+// CSP (incl. form-action + OIDC issuer) is applied at runtime by src/proxy.ts
+// so OIDC_ISSUER is available. Build-time headers omit CSP to avoid baking
+// form-action 'self' alone, which would block Keycloak end_session redirects.
+const security = Object.entries(staticSecurityHeaders()).map(([key, value]) => ({
   key,
   value,
 }));

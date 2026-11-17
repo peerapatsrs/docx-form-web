@@ -49,3 +49,4 @@ jobs:
           node --import tsx scripts/oidc-link-loop-unit-test.mjs
           node --import tsx scripts/oidc-silent-sso-unit-test.mjs
           node --import tsx scripts/oidc-backchannel-unit-test.mjs
+          node --import tsx scripts/oidc-logout-unit-test.mjs

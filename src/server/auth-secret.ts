@@ -1,11 +1,13 @@
 /**
  * Single source for Better Auth signing secret resolution.
  * Production must set BETTER_AUTH_SECRET (or AUTH_SECRET) — no silent fallback.
+ * Non-production generates a cryptographically random secret per process.
  */
 
-/** Dev / test / build-placeholder only — never rely on this in real prod. */
-export const DEV_AUTH_SECRET_FALLBACK =
-  "docx-form-dev-secret-change-me-32b";
+import { randomBytes } from "node:crypto";
+
+/** Cached ephemeral secret for this process (dev / test only). */
+let ephemeralDevSecret: string | undefined;
 
 export type BetterAuthSecretHealth = {
   /** False when production is missing a configured secret. */
@@ -28,6 +30,16 @@ export function getBetterAuthSecretHealth(
   return { ready: !isProd, configured: false };
 }
 
+function getEphemeralDevSecret(): string {
+  if (!ephemeralDevSecret) {
+    ephemeralDevSecret = randomBytes(32).toString("base64url");
+    console.warn(
+      "[auth] BETTER_AUTH_SECRET unset; generated ephemeral per-process secret (not for production)",
+    );
+  }
+  return ephemeralDevSecret;
+}
+
 /**
  * Startup check — logs when production is missing BETTER_AUTH_SECRET.
  * Does not throw (health reports not-ready); resolveBetterAuthSecret still
@@ -42,9 +54,8 @@ export function checkBetterAuthSecretAtStartup(
       "[auth] BETTER_AUTH_SECRET (or AUTH_SECRET) is required in production — not ready",
     );
   } else if (!health.configured) {
-    console.warn(
-      "[auth] BETTER_AUTH_SECRET unset; using dev fallback (not for production)",
-    );
+    // Ensure the ephemeral secret exists and the warn fires once at startup.
+    getEphemeralDevSecret();
   }
   return health;
 }
@@ -65,5 +76,5 @@ export function resolveBetterAuthSecret(
       "BETTER_AUTH_SECRET (or AUTH_SECRET) is required in production",
     );
   }
-  return DEV_AUTH_SECRET_FALLBACK;
+  return getEphemeralDevSecret();
 }

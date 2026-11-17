@@ -171,6 +171,10 @@ const FILL_CODE_MESSAGES = {
     th: "ไฟล์เทมเพลตใช้ไม่ได้ — เลือกไฟล์ .docx ที่ถูกต้อง",
     en: "Template file is not a usable .docx.",
   },
+  UNSUPPORTED_FILE_TYPE: {
+    th: "รองรับเฉพาะไฟล์ .docx ที่เป็นเอกสาร Word — ตรวจนามสกุลและชนิดไฟล์",
+    en: "Only a Word .docx document is supported — check the file name and type.",
+  },
   FILL_MISSING_VALUES: {
     th: "ไม่มีค่าที่จะใส่ในเอกสาร",
     en: "Fill values are missing.",

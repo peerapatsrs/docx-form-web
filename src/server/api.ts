@@ -59,6 +59,11 @@ import {
   roleIsStaffPaid,
   type PremiumFeatureId,
 } from "./premium";
+import {
+  hasDocxFilename,
+  unsupportedFileTypeBody,
+  validateDocxUpload,
+} from "./docx-upload";
 
 // Heavy AI / ZIP / OCR deps are dynamic-imported inside those handlers only.
 // Static import pulled pdf/AI graph into every /api/parse and made upload feel slow after batch/ZIP work.
@@ -68,16 +73,6 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_SOURCE_FILE_BYTES = 25 * 1024 * 1024;
 const MAX_SOURCE_TOTAL_BYTES = 40 * 1024 * 1024;
 const MAX_SOURCE_FILES = 12;
-
-function isDocx(file: File): boolean {
-  const name = file.name.toLowerCase();
-  if (name.endsWith(".docx")) return true;
-  const t = (file.type || "").toLowerCase();
-  return (
-    t === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-    t === "application/octet-stream"
-  );
-}
 
 function summarizeFields(fields: FormField[]) {
   let text = 0;
@@ -2091,22 +2086,18 @@ export function createApi(options: {
       if (!(file instanceof File)) {
         return c.json({ error: "กรุณาอัปโหลดไฟล์ .docx" }, 400);
       }
-      if (!isDocx(file)) {
-        return c.json(
-          {
-            error:
-              file.name.toLowerCase().endsWith(".doc")
-                ? "รองรับเฉพาะ .docx — ให้ Save As เป็น .docx ใน Word ก่อน"
-                : "ไฟล์ต้องเป็น .docx เท่านั้น",
-          },
-          400,
-        );
+      if (!hasDocxFilename(file)) {
+        return c.json(unsupportedFileTypeBody(), 400);
       }
       if (file.size > MAX_DOCX_BYTES) {
         return c.json({ error: "ไฟล์ใหญ่เกินไป (สูงสุด 25 MB)" }, 400);
       }
 
       const buffer = Buffer.from(await file.arrayBuffer());
+      const uploadCheck = await validateDocxUpload(file, buffer);
+      if (!uploadCheck.ok) {
+        return c.json(unsupportedFileTypeBody(), 400);
+      }
       const includeContent =
         String(form.get("includeContent") || "").toLowerCase() === "1" ||
         String(form.get("includeContent") || "").toLowerCase() === "true";
@@ -2524,16 +2515,8 @@ export function createApi(options: {
       if (!(file instanceof File)) {
         return c.json({ error: "กรุณาอัปโหลดไฟล์ .docx" }, 400);
       }
-      if (!isDocx(file)) {
-        return c.json(
-          {
-            error:
-              file.name.toLowerCase().endsWith(".doc")
-                ? "รองรับเฉพาะ .docx — ให้ Save As เป็น .docx ใน Word ก่อน"
-                : "ไฟล์ต้องเป็น .docx เท่านั้น",
-          },
-          400,
-        );
+      if (!hasDocxFilename(file)) {
+        return c.json(unsupportedFileTypeBody(), 400);
       }
       if (file.size > MAX_DOCX_BYTES) {
         return c.json({ error: "ไฟล์ใหญ่เกินไป (สูงสุด 25 MB)" }, 400);
@@ -2555,6 +2538,10 @@ export function createApi(options: {
       }
 
       const buffer = Buffer.from(await file.arrayBuffer());
+      const uploadCheck = await validateDocxUpload(file, buffer);
+      if (!uploadCheck.ok) {
+        return c.json(unsupportedFileTypeBody(), 400);
+      }
       const { assertDocxReadable } = await import("./docx-errors");
       await assertDocxReadable(buffer);
       const result = await tagger.tagTemplate(buffer, replacements);
@@ -2605,16 +2592,8 @@ export function createApi(options: {
       if (!(file instanceof File)) {
         return c.json({ error: "กรุณาอัปโหลดไฟล์ .docx" }, 400);
       }
-      if (!isDocx(file)) {
-        return c.json(
-          {
-            error:
-              file.name.toLowerCase().endsWith(".doc")
-                ? "รองรับเฉพาะ .docx — ให้ Save As เป็น .docx ใน Word ก่อน"
-                : "ไฟล์ต้องเป็น .docx เท่านั้น",
-          },
-          400,
-        );
+      if (!hasDocxFilename(file)) {
+        return c.json(unsupportedFileTypeBody(), 400);
       }
       if (file.size > MAX_DOCX_BYTES) {
         return c.json({ error: "ไฟล์ใหญ่เกินไป (สูงสุด 25 MB)" }, 400);
@@ -2683,6 +2662,10 @@ export function createApi(options: {
       });
 
       const buffer = Buffer.from(await file.arrayBuffer());
+      const uploadCheck = await validateDocxUpload(file, buffer);
+      if (!uploadCheck.ok) {
+        return c.json(unsupportedFileTypeBody(), 400);
+      }
       const { assertDocxReadable } = await import("./docx-errors");
       await assertDocxReadable(buffer);
       const { parseAiTagNameLanguage, suggestTemplateTags } = await import(
@@ -3462,7 +3445,7 @@ export function createApi(options: {
         const tmpl = templates[i];
         const name = tmpl.name || items[i]?.filename || `template-${i + 1}.docx`;
         try {
-          if (!isDocx(tmpl) || tmpl.size > MAX_DOCX_BYTES) {
+          if (tmpl.size > MAX_DOCX_BYTES) {
             results.push({
               filename: name,
               ok: false,
@@ -3480,6 +3463,15 @@ export function createApi(options: {
             continue;
           }
           const buffer = Buffer.from(await tmpl.arrayBuffer());
+          const uploadCheck = await validateDocxUpload(tmpl, buffer);
+          if (!uploadCheck.ok) {
+            results.push({
+              filename: name,
+              ok: false,
+              error: uploadCheck.error,
+            });
+            continue;
+          }
           const skip = items[i]?.skip;
           const rowSkip = items[i]?.rowSkip;
           let fillValues = values;
@@ -3565,7 +3557,10 @@ export function createApi(options: {
           400,
         );
       }
-      if (!isDocx(file) || file.size > MAX_DOCX_BYTES) {
+      if (!hasDocxFilename(file)) {
+        return c.json(unsupportedFileTypeBody(), 400);
+      }
+      if (file.size > MAX_DOCX_BYTES) {
         return c.json(
           {
             error: "ไฟล์เทมเพลตไม่ถูกต้องหรือใหญ่เกินไป",
@@ -3678,6 +3673,10 @@ export function createApi(options: {
       }
 
       const template = Buffer.from(await file.arrayBuffer());
+      const uploadCheck = await validateDocxUpload(file, template);
+      if (!uploadCheck.ok) {
+        return c.json(unsupportedFileTypeBody(), 400);
+      }
       const parsed = await parseTemplate(template);
       const hasSkipMaps =
         Object.keys(skip).length > 0 || Object.keys(rowSkip).length > 0;

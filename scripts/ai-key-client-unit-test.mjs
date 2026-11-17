@@ -93,6 +93,7 @@ console.log("✓ mapAiKeySuccess");
 for (const code of [
   "FILL_MISSING_FILE",
   "FILL_INVALID_FILE",
+  "UNSUPPORTED_FILE_TYPE",
   "FILL_MISSING_VALUES",
   "FILL_BAD_JSON",
   "FILL_BAD_SKIP",

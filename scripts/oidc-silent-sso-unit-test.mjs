@@ -426,14 +426,21 @@ await check("refused ?sso=1 is stripped once from the URL", async () => {
 await check("shared BETTER_AUTH_SECRET helper; prod fail-fast + health", async () => {
   const {
     resolveBetterAuthSecret,
-    DEV_AUTH_SECRET_FALLBACK,
     getBetterAuthSecretHealth,
     checkBetterAuthSecretAtStartup,
   } = await load("src/server/auth-secret.ts");
   delete process.env.BETTER_AUTH_SECRET;
   delete process.env.AUTH_SECRET;
   process.env.NODE_ENV = "development";
-  assert.equal(resolveBetterAuthSecret(), DEV_AUTH_SECRET_FALLBACK);
+  const ephemeral = resolveBetterAuthSecret();
+  assert.equal(typeof ephemeral, "string");
+  assert.ok(ephemeral.length >= 32, "ephemeral secret must be long enough");
+  assert.equal(
+    resolveBetterAuthSecret(),
+    ephemeral,
+    "same process must reuse ephemeral secret",
+  );
+  assert.doesNotMatch(ephemeral, /docx-form-dev-secret-change-me-32b/);
   assert.equal(getBetterAuthSecretHealth().ready, true);
   assert.equal(getBetterAuthSecretHealth().configured, false);
 
@@ -447,6 +454,12 @@ await check("shared BETTER_AUTH_SECRET helper; prod fail-fast + health", async (
   process.env.BETTER_AUTH_SECRET = "prod-secret-value-32chars-minimum!!";
   assert.equal(resolveBetterAuthSecret(), "prod-secret-value-32chars-minimum!!");
   assert.equal(getBetterAuthSecretHealth().ready, true);
+
+  const secretSrc = readFileSync(join(root, "src/server/auth-secret.ts"), "utf8");
+  assert.doesNotMatch(secretSrc, /docx-form-dev-secret-change-me-32b/);
+  assert.doesNotMatch(secretSrc, /DEV_AUTH_SECRET_FALLBACK/);
+  assert.match(secretSrc, /randomBytes/);
+  assert.match(secretSrc, /ephemeral/);
 
   const authSrc = readFileSync(join(root, "src/server/auth.ts"), "utf8");
   assert.match(authSrc, /resolveBetterAuthSecret/);

@@ -64,15 +64,33 @@ import {
   unsupportedFileTypeBody,
   validateDocxUpload,
 } from "./docx-upload";
+import {
+  FILE_TOO_LARGE,
+  MAX_DOCX_BYTES,
+  checkUploadSizeLimits,
+} from "@/lib/upload-limits";
 
 // Heavy AI / ZIP / OCR deps are dynamic-imported inside those handlers only.
 // Static import pulled pdf/AI graph into every /api/parse and made upload feel slow after batch/ZIP work.
 
-const MAX_DOCX_BYTES = 25 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-const MAX_SOURCE_FILE_BYTES = 25 * 1024 * 1024;
+const MAX_SOURCE_FILE_BYTES = MAX_DOCX_BYTES;
 const MAX_SOURCE_TOTAL_BYTES = 40 * 1024 * 1024;
 const MAX_SOURCE_FILES = 12;
+
+/** Shared Content-Length + file-size gate for every upload route. */
+function rejectUploadTooLarge(
+  c: { req: { header: (name: string) => string | undefined }; json: (body: unknown, status?: number) => Response },
+  opts: { fileSize?: number | null; code?: string } = {},
+): Response | null {
+  const hit = checkUploadSizeLimits({
+    contentLengthHeader: c.req.header("content-length"),
+    fileSize: opts.fileSize,
+    code: opts.code || FILE_TOO_LARGE,
+  });
+  if (!hit) return null;
+  return c.json(hit.body, hit.status);
+}
 
 function summarizeFields(fields: FormField[]) {
   let text = 0;
@@ -2075,22 +2093,21 @@ export function createApi(options: {
 
   api.post("/parse", async (c) => {
     try {
-      const contentLength = Number(c.req.header("content-length") || 0);
-      // Multipart overhead is small vs 25MB — reject clearly oversized bodies early.
-      if (contentLength > MAX_DOCX_BYTES + 1024 * 1024) {
-        return c.json({ error: "ไฟล์ใหญ่เกินไป (สูงสุด 25 MB)" }, 400);
-      }
+      const early = rejectUploadTooLarge(c, { code: FILE_TOO_LARGE });
+      if (early) return early;
 
       const form = await c.req.formData();
       const file = form.get("file");
       if (!(file instanceof File)) {
         return c.json({ error: "กรุณาอัปโหลดไฟล์ .docx" }, 400);
       }
+      const tooLarge = rejectUploadTooLarge(c, {
+        fileSize: file.size,
+        code: FILE_TOO_LARGE,
+      });
+      if (tooLarge) return tooLarge;
       if (!hasDocxFilename(file)) {
         return c.json(unsupportedFileTypeBody(), 400);
-      }
-      if (file.size > MAX_DOCX_BYTES) {
-        return c.json({ error: "ไฟล์ใหญ่เกินไป (สูงสุด 25 MB)" }, 400);
       }
 
       const buffer = Buffer.from(await file.arrayBuffer());
@@ -2163,6 +2180,9 @@ export function createApi(options: {
     let choiceSource: "server" | "byok" = "byok";
 
     try {
+      const early = rejectUploadTooLarge(c, { code: FILE_TOO_LARGE });
+      if (early) return early;
+
       const form = await c.req.formData();
       const formKey =
         typeof form.get("geminiApiKey") === "string"
@@ -2243,6 +2263,11 @@ export function createApi(options: {
         if (f.size <= 0) {
           return c.json({ error: `ไฟล์ ${f.name} ว่างเปล่า` }, 400);
         }
+        const tooLarge = rejectUploadTooLarge(c, {
+          fileSize: f.size,
+          code: FILE_TOO_LARGE,
+        });
+        if (tooLarge) return tooLarge;
         if (f.size > MAX_SOURCE_FILE_BYTES) {
           return c.json({ error: `ไฟล์ ${f.name} ใหญ่เกิน 25 MB` }, 400);
         }
@@ -2508,16 +2533,21 @@ export function createApi(options: {
 
   api.post("/template/tag", async (c) => {
     try {
+      const early = rejectUploadTooLarge(c, { code: FILE_TOO_LARGE });
+      if (early) return early;
+
       const form = await c.req.formData();
       const file = form.get("file");
       if (!(file instanceof File)) {
         return c.json({ error: "กรุณาอัปโหลดไฟล์ .docx" }, 400);
       }
+      const tooLarge = rejectUploadTooLarge(c, {
+        fileSize: file.size,
+        code: FILE_TOO_LARGE,
+      });
+      if (tooLarge) return tooLarge;
       if (!hasDocxFilename(file)) {
         return c.json(unsupportedFileTypeBody(), 400);
-      }
-      if (file.size > MAX_DOCX_BYTES) {
-        return c.json({ error: "ไฟล์ใหญ่เกินไป (สูงสุด 25 MB)" }, 400);
       }
 
       // Validate package before premium gate so bad files get UNSUPPORTED_FILE_TYPE.
@@ -2588,16 +2618,21 @@ export function createApi(options: {
     let logModel = "";
     let suggestCreds: ResolvedRequestAiCredentials | null = null;
     try {
+      const early = rejectUploadTooLarge(c, { code: FILE_TOO_LARGE });
+      if (early) return early;
+
       const form = await c.req.formData();
       const file = form.get("file");
       if (!(file instanceof File)) {
         return c.json({ error: "กรุณาอัปโหลดไฟล์ .docx" }, 400);
       }
+      const tooLarge = rejectUploadTooLarge(c, {
+        fileSize: file.size,
+        code: FILE_TOO_LARGE,
+      });
+      if (tooLarge) return tooLarge;
       if (!hasDocxFilename(file)) {
         return c.json(unsupportedFileTypeBody(), 400);
-      }
-      if (file.size > MAX_DOCX_BYTES) {
-        return c.json({ error: "ไฟล์ใหญ่เกินไป (สูงสุด 25 MB)" }, 400);
       }
 
       // File shape before premium / AI credentials — guests with no key must
@@ -2844,6 +2879,9 @@ export function createApi(options: {
     let batchCreds: ResolvedRequestAiCredentials | null = null;
 
     try {
+      const early = rejectUploadTooLarge(c, { code: FILE_TOO_LARGE });
+      if (early) return early;
+
       const form = await c.req.formData();
       const formKey =
         typeof form.get("geminiApiKey") === "string"
@@ -2960,6 +2998,11 @@ export function createApi(options: {
 
       let totalBytes = 0;
       for (const f of sources) {
+        const tooLarge = rejectUploadTooLarge(c, {
+          fileSize: f.size,
+          code: FILE_TOO_LARGE,
+        });
+        if (tooLarge) return tooLarge;
         if (f.size > MAX_SOURCE_FILE_BYTES) {
           return c.json({ error: `ไฟล์ต้นทางใหญ่เกินไป: ${f.name}` }, 400);
         }
@@ -3379,6 +3422,9 @@ export function createApi(options: {
    */
   api.post("/batch-fill", async (c) => {
     try {
+      const early = rejectUploadTooLarge(c, { code: "BATCH_FILL_TOO_LARGE" });
+      if (early) return early;
+
       const form = await c.req.formData();
       const templates: File[] = [];
       const seenT = new Set<File>();
@@ -3401,15 +3447,11 @@ export function createApi(options: {
       // Validate every template package before premium / fill work.
       const templateBuffers: Buffer[] = [];
       for (const tmpl of templates) {
-        if (tmpl.size > MAX_DOCX_BYTES) {
-          return c.json(
-            {
-              error: "เทมเพลตไม่ถูกต้องหรือใหญ่เกินไป",
-              code: "BATCH_FILL_TOO_LARGE",
-            },
-            400,
-          );
-        }
+        const tooLarge = rejectUploadTooLarge(c, {
+          fileSize: tmpl.size,
+          code: "BATCH_FILL_TOO_LARGE",
+        });
+        if (tooLarge) return tooLarge;
         const buffer = Buffer.from(await tmpl.arrayBuffer());
         const uploadCheck = await validateDocxUpload(tmpl, buffer);
         if (!uploadCheck.ok) {
@@ -3583,6 +3625,9 @@ export function createApi(options: {
 
   api.post("/fill", async (c) => {
     try {
+      const early = rejectUploadTooLarge(c, { code: FILE_TOO_LARGE });
+      if (early) return early;
+
       const form = await c.req.formData();
       const file = form.get("file");
       if (!(file instanceof File)) {
@@ -3591,17 +3636,13 @@ export function createApi(options: {
           400,
         );
       }
+      const tooLarge = rejectUploadTooLarge(c, {
+        fileSize: file.size,
+        code: FILE_TOO_LARGE,
+      });
+      if (tooLarge) return tooLarge;
       if (!hasDocxFilename(file)) {
         return c.json(unsupportedFileTypeBody(), 400);
-      }
-      if (file.size > MAX_DOCX_BYTES) {
-        return c.json(
-          {
-            error: "ไฟล์เทมเพลตไม่ถูกต้องหรือใหญ่เกินไป",
-            code: "FILL_INVALID_FILE",
-          },
-          400,
-        );
       }
 
       const valuesRaw = form.get("values");

@@ -180,7 +180,9 @@ function mockDiscoveryFetch(meta) {
 await check("login page is server OIDC redirect (no chooser / SSO button)", async () => {
   const login = readFileSync(join(root, "src/app/login/page.tsx"), "utf8");
   assert.match(login, /\/api\/auth\/oidc\/login/);
-  assert.match(login, /SSO not configured/);
+  assert.match(login, /ระบบล็อกอินยังไม่พร้อม/);
+  assert.doesNotMatch(login, /OIDC_ISSUER|OIDC_CLIENT_ID|OIDC_CLIENT_SECRET/);
+  assert.doesNotMatch(login, /SSO not configured/);
   assert.match(login, /LoginErrorPanel|shouldBlockOidcAutoRedirect/);
   assert.doesNotMatch(login, /เข้าด้วย TPS18 SSO/);
   assert.doesNotMatch(login, /signInSocial|passkey|test-accounts|DevPicker/);

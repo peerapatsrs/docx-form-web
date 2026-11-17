@@ -40,8 +40,12 @@ assert.equal(UI_LABELS.skip, "ข้าม");
 assert.equal(UI_LABELS.putAiKey, "ตั้งค่าคีย์ AI");
 assert.ok(UI_LABELS.stickyCtaHint.includes("จะได้ไฟล์ใหม่"));
 assert.equal(UI_LABELS.uploadInvalidFile.includes(".docx"), true);
-assert.equal(UI_LABELS.removeRow, "ลบแถว");
+assert.equal(UI_LABELS.removeRow, "×");
 assert.equal(UI_LABELS.removeRowTitle(2), "ลบแถว 2");
+assert.equal(UI_LABELS.removeRowAria(2), "ลบแถว 2");
+assert.equal(UI_LABELS.addTemplateBtn, "+ เพิ่ม");
+assert.equal(UI_LABELS.addTemplateBtnAria, "เพิ่มเทมเพลต");
+assert.equal(UI_LABELS.aiStatusNoKey, "ยังไม่มีคีย์ AI");
 assert.equal(
   UI_LABELS.shortValidationLabel("ก".repeat(50)).endsWith("…"),
   true,

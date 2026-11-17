@@ -1,0 +1,218 @@
+{
+  "base": "http://127.0.0.1:3000",
+  "fixture": "/agent/repos/docx-form-web/fixtures/fill-form/docx-form-test-tagged.docx",
+  "viewports": {
+    "390": {
+      "home": {
+        "shot": "/agent/repos/docx-form-web/verify/screenshots/qa-ux-local/home-390.png",
+        "status": {
+          "text": "ยังไม่มีคีย์ AI",
+          "overflow": "visible",
+          "textOverflow": "clip",
+          "whiteSpace": "normal",
+          "scrollW": 60,
+          "clientW": 60
+        },
+        "loginBtn": {
+          "w": 82,
+          "h": 44,
+          "minH": "44px",
+          "text": "เข้าสู่ระบบ"
+        }
+      },
+      "login": {
+        "shot": "/agent/repos/docx-form-web/verify/screenshots/qa-ux-local/login-390.png",
+        "body": "ข้ามไปยังเนื้อหาหลัก (ลัด)\ndocx-form\nเข้าสู่ระบบ\ndocx-form\ndocx-form\nระบบล็อกอินยังไม่พร้อม\n\nไม่สามารถเข้าสู่ระบบได้ในขณะนี้ กรุณาลองใหม่ภายหลัง หรือติดต่อผู้ดูแลระบบ\n\nไม่มีช่องทางเข้าอื่นนอกจากระบบล็อกอินกลาง\n\nv0.1.0"
+      },
+      "form": {
+        "shot": "/agent/repos/docx-form-web/verify/screenshots/qa-ux-local/form-390.png",
+        "remove": {
+          "text": "×",
+          "aria": "ลบแถว 1",
+          "w": 44,
+          "h": 44,
+          "flexShrink": "0",
+          "whiteSpace": "nowrap",
+          "cellW": 479,
+          "cellMinW": "52px"
+        },
+        "addTab": {
+          "text": "+ เพิ่ม",
+          "aria": "เพิ่มเทมเพลต",
+          "w": 59,
+          "h": 44,
+          "overflow": "visible",
+          "textOverflow": "clip",
+          "scrollW": 57,
+          "clientW": 57
+        },
+        "badge": null,
+        "tokens": {
+          "tapMin": "44px",
+          "accentInk": "#065a4e"
+        },
+        "tipOverlap": {
+          "present": true,
+          "position": "static",
+          "tipTop": 549,
+          "tipBottom": 656,
+          "vh": 900,
+          "overlapCount": 0,
+          "overlaps": []
+        }
+      }
+    },
+    "1280": {
+      "home": {
+        "shot": "/agent/repos/docx-form-web/verify/screenshots/qa-ux-local/home-1280.png",
+        "status": {
+          "text": "ยังไม่มีคีย์ AI",
+          "overflow": "visible",
+          "textOverflow": "clip",
+          "whiteSpace": "normal",
+          "scrollW": 66,
+          "clientW": 66
+        },
+        "loginBtn": {
+          "w": 82,
+          "h": 44,
+          "minH": "44px",
+          "text": "เข้าสู่ระบบ"
+        }
+      },
+      "login": {
+        "shot": "/agent/repos/docx-form-web/verify/screenshots/qa-ux-local/login-1280.png",
+        "body": "ข้ามไปยังเนื้อหาหลัก (ลัด)\ndocx-form\nเข้าสู่ระบบ\ndocx-form\ndocx-form\nระบบล็อกอินยังไม่พร้อม\n\nไม่สามารถเข้าสู่ระบบได้ในขณะนี้ กรุณาลองใหม่ภายหลัง หรือติดต่อผู้ดูแลระบบ\n\nไม่มีช่องทางเข้าอื่นนอกจากระบบล็อกอินกลาง\n\nv0.1.0"
+      },
+      "form": {
+        "shot": "/agent/repos/docx-form-web/verify/screenshots/qa-ux-local/form-1280.png",
+        "remove": {
+          "text": "×",
+          "aria": "ลบแถว 1",
+          "w": 44,
+          "h": 44,
+          "flexShrink": "0",
+          "whiteSpace": "nowrap",
+          "cellW": 1050,
+          "cellMinW": "52px"
+        },
+        "addTab": {
+          "text": "+ เพิ่ม",
+          "aria": "เพิ่มเทมเพลต",
+          "w": 59,
+          "h": 44,
+          "overflow": "visible",
+          "textOverflow": "clip",
+          "scrollW": 57,
+          "clientW": 57
+        },
+        "badge": null,
+        "tokens": {
+          "tapMin": "44px",
+          "accentInk": "#065a4e"
+        },
+        "tipOverlap": {
+          "present": true,
+          "position": "absolute",
+          "tipTop": 266,
+          "tipBottom": 372,
+          "vh": 900,
+          "overlapCount": 0,
+          "overlaps": []
+        }
+      }
+    }
+  },
+  "checks": [
+    {
+      "name": "home status no ellipsis @390",
+      "ok": true,
+      "detail": "{\"text\":\"ยังไม่มีคีย์ AI\",\"overflow\":\"visible\",\"textOverflow\":\"clip\",\"whiteSpace\":\"normal\",\"scrollW\":60,\"clientW\":60}"
+    },
+    {
+      "name": "login tap ≥44 @390",
+      "ok": true,
+      "detail": "{\"w\":82,\"h\":44,\"minH\":\"44px\",\"text\":\"เข้าสู่ระบบ\"}"
+    },
+    {
+      "name": "home status no ellipsis @1280",
+      "ok": true,
+      "detail": "{\"text\":\"ยังไม่มีคีย์ AI\",\"overflow\":\"visible\",\"textOverflow\":\"clip\",\"whiteSpace\":\"normal\",\"scrollW\":66,\"clientW\":66}"
+    },
+    {
+      "name": "login tap ≥44 @1280",
+      "ok": true,
+      "detail": "{\"w\":82,\"h\":44,\"minH\":\"44px\",\"text\":\"เข้าสู่ระบบ\"}"
+    },
+    {
+      "name": "login Thai no env leak @390",
+      "ok": true,
+      "detail": "ข้ามไปยังเนื้อหาหลัก (ลัด) docx-form เข้าสู่ระบบ docx-form docx-form ระบบล็อกอินยังไม่พร้อม ไม่สามารถเข้าสู่ระบบได้ในขณะนี้ กรุณาลองใหม่ภายหลัง หรือติดต่อผู้ดูแลระบบ ไม่มีช่องทางเข้าอื่นนอกจากระบบล็อกอินกลาง v0.1.0"
+    },
+    {
+      "name": "login Thai no env leak @1280",
+      "ok": true,
+      "detail": "ข้ามไปยังเนื้อหาหลัก (ลัด) docx-form เข้าสู่ระบบ docx-form docx-form ระบบล็อกอินยังไม่พร้อม ไม่สามารถเข้าสู่ระบบได้ในขณะนี้ กรุณาลองใหม่ภายหลัง หรือติดต่อผู้ดูแลระบบ ไม่มีช่องทางเข้าอื่นนอกจากระบบล็อกอินกลาง v0.1.0"
+    },
+    {
+      "name": "remove-row ≥44 single-line @390",
+      "ok": true,
+      "detail": "{\"text\":\"×\",\"aria\":\"ลบแถว 1\",\"w\":44,\"h\":44,\"flexShrink\":\"0\",\"whiteSpace\":\"nowrap\",\"cellW\":479,\"cellMinW\":\"52px\"}"
+    },
+    {
+      "name": "add-template label visible @390",
+      "ok": true,
+      "detail": "{\"text\":\"+ เพิ่ม\",\"aria\":\"เพิ่มเทมเพลต\",\"w\":59,\"h\":44,\"overflow\":\"visible\",\"textOverflow\":\"clip\",\"scrollW\":57,\"clientW\":57}"
+    },
+    {
+      "name": "tap-min token @390",
+      "ok": true,
+      "detail": "{\"tapMin\":\"44px\",\"accentInk\":\"#065a4e\"}"
+    },
+    {
+      "name": "skip tip no input overlap @390",
+      "ok": true,
+      "detail": "{\"present\":true,\"position\":\"static\",\"tipTop\":549,\"tipBottom\":656,\"vh\":900,\"overlapCount\":0,\"overlaps\":[]}"
+    },
+    {
+      "name": "remove-row ≥44 single-line @1280",
+      "ok": true,
+      "detail": "{\"text\":\"×\",\"aria\":\"ลบแถว 1\",\"w\":44,\"h\":44,\"flexShrink\":\"0\",\"whiteSpace\":\"nowrap\",\"cellW\":1050,\"cellMinW\":\"52px\"}"
+    },
+    {
+      "name": "add-template label visible @1280",
+      "ok": true,
+      "detail": "{\"text\":\"+ เพิ่ม\",\"aria\":\"เพิ่มเทมเพลต\",\"w\":59,\"h\":44,\"overflow\":\"visible\",\"textOverflow\":\"clip\",\"scrollW\":57,\"clientW\":57}"
+    },
+    {
+      "name": "tap-min token @1280",
+      "ok": true,
+      "detail": "{\"tapMin\":\"44px\",\"accentInk\":\"#065a4e\"}"
+    },
+    {
+      "name": "source taggerAiKeyLabel เลือกโมเดล",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "source login no env names",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "source --tap-min",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "source --accent-ink",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "source skip tip mobile in-flow",
+      "ok": true,
+      "detail": ""
+    }
+  ]
+}

@@ -11,6 +11,8 @@
   --accent: #0d7a6a;
   --accent-2: #149485;
   --accent-soft: rgba(13, 122, 106, 0.12);
+  /* Darker accent for small text on accent-soft (≥4.5:1). */
+  --accent-ink: #065a4e;
   --accent-glow: rgba(13, 122, 106, 0.28);
   --danger: #c23b2e;
   --danger-soft: rgba(194, 59, 46, 0.1);
@@ -24,6 +26,8 @@
   --font: "Sarabun", "Be Vietnam Pro", system-ui, sans-serif;
   --font-display: "Be Vietnam Pro", "Sarabun", system-ui, sans-serif;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* WCAG-friendly tap / click target floor (mobile + desktop). */
+  --tap-min: 44px;
 }
 
 *,
@@ -201,8 +205,10 @@ body {
   font-weight: 500;
   box-shadow: var(--shadow-soft);
   min-width: 0;
-  max-width: min(280px, 42vw);
-  line-height: 1.2;
+  max-width: min(16rem, 56vw);
+  line-height: 1.25;
+  min-height: var(--tap-min);
+  height: auto;
 }
 
 .status-pill.is-clickable {
@@ -219,10 +225,11 @@ body {
 }
 
 .status-pill #statusText {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow: visible;
+  text-overflow: unset;
+  white-space: normal;
   min-width: 0;
+  line-height: 1.25;
 }
 
 .status-dot {
@@ -339,11 +346,16 @@ body {
   font: inherit;
   font-size: 1.25rem;
   line-height: 1;
-  width: 1.75rem;
-  height: 1.75rem;
+  width: var(--tap-min);
+  height: var(--tap-min);
+  min-width: var(--tap-min);
+  min-height: var(--tap-min);
   border-radius: 999px;
   cursor: pointer;
   opacity: 0.65;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .banner-close:hover {
@@ -1182,9 +1194,15 @@ body {
 }
 
 .btn-compact {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  min-height: var(--tap-min) !important;
+  min-width: var(--tap-min);
   padding: 0.35rem 0.7rem !important;
   font-size: 0.8rem !important;
   border-radius: 8px !important;
+  box-sizing: border-box;
 }
 
 .btn-compact:disabled {
@@ -1249,14 +1267,19 @@ body {
   color: var(--muted);
   cursor: pointer;
   user-select: none;
-  min-height: 1.5rem;
+  min-height: var(--tap-min);
+  padding: 0.15rem 0.25rem;
+  box-sizing: border-box;
 }
 
 .skip-opt input {
-  width: 0.95rem;
-  height: 0.95rem;
+  width: 1.1rem;
+  height: 1.1rem;
+  min-width: 1.1rem;
+  min-height: 1.1rem;
   accent-color: var(--accent);
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .skip-opt-sm {
@@ -1274,12 +1297,14 @@ body {
   .skip-opt {
     font-size: 0.9rem;
     gap: 0.45rem;
-    min-height: 1.75rem;
+    min-height: var(--tap-min);
   }
 
   .skip-opt input {
-    width: 1.1rem;
-    height: 1.1rem;
+    width: 1.15rem;
+    height: 1.15rem;
+    min-width: 1.15rem;
+    min-height: 1.15rem;
   }
 
   .skip-opt-sm {
@@ -1315,7 +1340,7 @@ body {
   padding: 0.12rem 0.5rem;
   border-radius: 999px;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-ink);
   font-size: 0.72rem;
   font-weight: 650;
 }
@@ -1914,12 +1939,17 @@ textarea.doc-blank:focus,
   font-size: 0.68rem;
   color: var(--muted);
   cursor: pointer;
+  min-height: var(--tap-min);
+  box-sizing: border-box;
 }
 
 .doc-skip input {
-  width: 0.85rem;
-  height: 0.85rem;
+  width: 1.05rem;
+  height: 1.05rem;
+  min-width: 1.05rem;
+  min-height: 1.05rem;
   accent-color: var(--accent);
+  flex-shrink: 0;
 }
 
 .doc-list {
@@ -2031,6 +2061,11 @@ textarea.doc-blank:focus,
   overflow: hidden;
 }
 
+.doc-table-resizable td.doc-table-rownum,
+.doc-table-resizable th.doc-table-rownum {
+  overflow: visible;
+}
+
 .doc-table-resizable .doc-table-input {
   min-width: 0 !important;
   width: 100%;
@@ -2043,8 +2078,8 @@ textarea.doc-blank:focus,
 }
 
 .doc-table-stretch col.doc-table-rownum-col {
-  width: 3.2rem;
-  min-width: 3.2rem;
+  width: var(--doc-table-rownum-min, 3.75rem);
+  min-width: var(--doc-table-rownum-min, 3.75rem);
 }
 
 .doc-table-scroll.is-col-resizable {
@@ -2145,12 +2180,17 @@ textarea.doc-blank:focus,
 }
 
 .doc-table-rownum {
-  width: 3.2rem;
+  --doc-table-rownum-min: calc(var(--tap-min) + 0.5rem);
+  width: var(--doc-table-rownum-min);
+  min-width: var(--doc-table-rownum-min);
+  max-width: none;
   text-align: center !important;
   background: #fafcfc;
   color: var(--muted);
   font-weight: 600;
   white-space: nowrap;
+  overflow: visible;
+  vertical-align: middle;
 }
 
 .doc-table-rownum .linkish {
@@ -3862,11 +3902,13 @@ button.danger:hover {
   font-size: 0.82rem;
   cursor: pointer;
   min-width: 0;
+  min-height: var(--tap-min);
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: left;
+  box-sizing: border-box;
 }
 .multi-tab-item:hover {
   border-color: rgba(13, 122, 106, 0.35);
@@ -3876,6 +3918,9 @@ button.danger:hover {
 }
 .multi-tab-close {
   appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 0;
   background: transparent;
   color: inherit;
@@ -3883,9 +3928,14 @@ button.danger:hover {
   font: inherit;
   font-size: 1rem;
   line-height: 1;
-  padding: 0 0.55rem 0 0.2rem;
+  width: var(--tap-min);
+  height: var(--tap-min);
+  min-width: var(--tap-min);
+  min-height: var(--tap-min);
+  padding: 0;
   opacity: 0.55;
   flex-shrink: 0;
+  box-sizing: border-box;
 }
 .multi-tab-item.is-active .multi-tab-close {
   color: #fff;
@@ -3896,15 +3946,26 @@ button.danger:hover {
 }
 .multi-tab-add {
   appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 1px dashed var(--border);
   background: #fff;
   color: var(--accent);
   border-radius: 999px;
+  min-height: var(--tap-min);
   padding: 0.28rem 0.75rem;
   font: inherit;
   font-size: 0.82rem;
   font-weight: 600;
   cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  flex: 0 0 auto;
+  overflow: visible;
+  text-overflow: unset;
+  max-width: none;
+  box-sizing: border-box;
 }
 .multi-tab-add:hover {
   background: rgba(13, 122, 106, 0.08);
@@ -4029,10 +4090,15 @@ button.danger:hover {
 
 .auth-bar-btn {
   appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 1px solid var(--border);
   background: #fff;
   color: var(--ink);
   border-radius: 999px;
+  min-height: var(--tap-min);
+  min-width: var(--tap-min);
   padding: 0.28rem 0.75rem;
   font: inherit;
   font-size: 0.82rem;
@@ -4041,6 +4107,7 @@ button.danger:hover {
   text-decoration: none;
   line-height: 1.2;
   white-space: nowrap;
+  box-sizing: border-box;
 }
 
 .auth-bar-primary,
@@ -4059,8 +4126,8 @@ button.danger:hover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 44px;
-  min-height: 44px;
+  min-width: var(--tap-min);
+  min-height: var(--tap-min);
   padding: 0;
   margin: 0;
   border: none;
@@ -4950,15 +5017,21 @@ button.danger:hover {
 }
 
 .admin-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font: inherit;
   font-weight: 650;
   font-size: 0.88rem;
+  min-height: var(--tap-min);
+  min-width: var(--tap-min);
   padding: 0.45rem 0.85rem;
   border-radius: 10px;
   border: 1px solid var(--border);
   background: #fff;
   color: var(--ink);
   cursor: pointer;
+  box-sizing: border-box;
 }
 
 .admin-btn:hover:not(:disabled) {
@@ -5111,9 +5184,11 @@ button.danger:hover {
   }
 
   .status-pill {
-    max-width: min(150px, 38vw);
+    max-width: min(12rem, 52vw);
     padding: 0.28rem 0.55rem 0.28rem 0.4rem;
     font-size: 0.72rem;
+    height: auto;
+    min-height: var(--tap-min);
   }
 
   .auth-bar-name {
@@ -5151,9 +5226,11 @@ button.danger:hover {
   }
 
   .status-pill {
-    max-width: min(7.5rem, 32vw);
+    max-width: min(11rem, 58vw);
     padding: 0.28rem 0.5rem 0.28rem 0.35rem;
     font-size: 0.7rem;
+    height: auto;
+    min-height: var(--tap-min);
   }
 
   .auth-bar-desktop {
@@ -5294,8 +5371,10 @@ button.danger:hover {
 .skip-first-use-tip {
   position: absolute;
   left: 0;
-  top: calc(100% + 8px);
-  z-index: 20;
+  /* Desktop: float above the control so it does not cover the next field. */
+  top: auto;
+  bottom: calc(100% + 8px);
+  z-index: 40;
   width: min(260px, 70vw);
   padding: 0.65rem 0.75rem;
   border-radius: 10px;
@@ -5310,10 +5389,39 @@ button.danger:hover {
 .skip-first-use-tip::before {
   content: "";
   position: absolute;
-  top: -6px;
+  top: auto;
+  bottom: -6px;
   left: 18px;
   border: 6px solid transparent;
-  border-bottom-color: var(--ink);
+  border-top-color: var(--ink);
+  border-bottom-color: transparent;
+}
+
+/* Narrow viewports: keep tip in normal flow so it pushes the next field down (no overlay). */
+@media (max-width: 720px) {
+  .doc-skip.has-skip-tip,
+  .skip-opt.has-skip-tip {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.45rem;
+  }
+
+  .skip-first-use-tip {
+    position: static;
+    left: auto;
+    right: auto;
+    top: auto;
+    bottom: auto;
+    width: min(100%, 20rem);
+    max-width: 100%;
+    z-index: auto;
+    margin: 0.15rem 0 0.35rem;
+  }
+
+  .skip-first-use-tip::before {
+    display: none;
+  }
 }
 
 /* —— UX review: blank layout (label | input | skip) —— */
@@ -5355,12 +5463,17 @@ button.danger:hover {
 .doc-skip {
   margin-top: 0;
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
   font-size: 0.75rem;
   color: var(--muted);
   border: 1px solid var(--border);
   border-radius: 999px;
+  min-height: var(--tap-min);
   padding: 0.25rem 0.65rem;
   background: #fff;
+  box-sizing: border-box;
 }
 
 .doc-list-seed-tip {
@@ -5965,6 +6078,8 @@ button.danger:hover {
 
 .banner-action-secondary {
   opacity: 0.92;
+}
+
 /* —— UX 2026-11-10: AI key dialog, skip field-object, validation jumps —— */
 .ai-key-overlay {
   z-index: 12050;
@@ -6165,7 +6280,8 @@ button.danger:hover {
   align-self: flex-start;
   border: 0;
   border-radius: 8px;
-  min-height: 36px;
+  min-width: var(--tap-min);
+  min-height: var(--tap-min);
   padding: 0.35rem 0.7rem;
   background: rgba(255, 255, 255, 0.18);
   color: #fff;
@@ -6173,6 +6289,7 @@ button.danger:hover {
   font-size: 0.78rem;
   font-weight: 600;
   cursor: pointer;
+  box-sizing: border-box;
 }
 
 .btn-remove-row {
@@ -6180,17 +6297,23 @@ button.danger:hover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 44px;
-  min-height: 44px;
-  padding: 0.35rem 0.55rem;
+  width: var(--tap-min);
+  height: var(--tap-min);
+  min-width: var(--tap-min);
+  min-height: var(--tap-min);
+  flex-shrink: 0;
+  padding: 0;
   border-radius: 10px;
   border: 1px solid rgba(180, 35, 24, 0.35);
   background: #fff;
   color: #b42318;
   font: inherit;
-  font-size: 0.82rem;
-  font-weight: 600;
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
+  box-sizing: border-box;
 }
 
 .banner-validation-jump {
@@ -6236,13 +6359,15 @@ button.danger:hover {
   }
 
   .status-pill {
-    max-width: min(200px, 48vw);
+    max-width: min(12rem, 58vw);
+    height: auto;
+    min-height: var(--tap-min);
   }
 
   .status-pill #statusText {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow: visible;
+    text-overflow: unset;
+    white-space: normal;
   }
 
   .tagger-entry-chip .file-meta {
@@ -6269,13 +6394,13 @@ button.danger:hover {
 .doc-table th .doc-table-input {
   width: 100%;
   min-width: 0;
-  min-height: 44px;
+  min-height: var(--tap-min);
   box-sizing: border-box;
 }
 
 .doc-table td .doc-skip,
 .doc-table th .doc-skip {
-  min-height: 44px;
+  min-height: var(--tap-min);
   display: inline-flex;
   align-items: center;
   width: fit-content;

@@ -422,8 +422,7 @@ export default function AccountPage() {
             )
           ) : passkeyAddPath ? (
             <p className="auth-hint">
-              รายการ passkey จะแสดงเมื่อตั้งค่า OIDC_ADMIN_CLIENT_ID /
-              OIDC_ADMIN_CLIENT_SECRET
+              รายการ passkey ยังไม่พร้อมแสดง — กรุณาติดต่อผู้ดูแลระบบ
             </p>
           ) : null}
         </section>

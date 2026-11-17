@@ -88,16 +88,12 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           <div className="auth-brand">
             <BrandLockup />
           </div>
-          <h1 className="auth-title">SSO not configured</h1>
+          <h1 className="auth-title">ระบบล็อกอินยังไม่พร้อม</h1>
           <p className="auth-lead" role="alert">
-            Central Keycloak login is not configured on this deployment. Set{" "}
-            <code>OIDC_ISSUER</code>, <code>OIDC_CLIENT_ID</code>, and{" "}
-            <code>OIDC_CLIENT_SECRET</code> (realm via issuer path, e.g.
-            …/realms/tps18-dev). There is no alternate login.
+            ไม่สามารถเข้าสู่ระบบได้ในขณะนี้ กรุณาลองใหม่ภายหลัง
+            หรือติดต่อผู้ดูแลระบบ
           </p>
-          <p className="auth-hint">
-            ระบบล็อกอินกลางยังไม่ได้ตั้งค่า — ไม่มีช่องทางเข้าอื่น
-          </p>
+          <p className="auth-hint">ไม่มีช่องทางเข้าอื่นนอกจากระบบล็อกอินกลาง</p>
         </div>
       </main>
     );

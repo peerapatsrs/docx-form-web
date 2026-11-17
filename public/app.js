@@ -354,7 +354,13 @@ function refreshPlanQuotaUi() {
     label.textContent = multiTabsQuotaLabel(n || 1);
   }
   const addBtn = document.getElementById("addTemplateTabBtn");
-  if (addBtn) addBtn.title = addTemplateBtnTitle();
+  if (addBtn) {
+    addBtn.title = addTemplateBtnTitle();
+    addBtn.setAttribute(
+      "aria-label",
+      UI_LABELS.addTemplateBtnAria || addTemplateBtnTitle(),
+    );
+  }
   const optHint = document.querySelector("#showFullContent + span small");
   if (optHint && (optHint.textContent || "").includes("อัปโหลดหลาย")) {
     optHint.textContent = multiUploadOptHint();
@@ -2098,7 +2104,7 @@ function renderMultiTabs() {
   return `<div class="multi-tabs" role="tablist" aria-label="เทมเพลต">
     <span class="multi-tabs-label">${escapeHtml(label)}</span>
     ${tabs}
-    <button type="button" class="multi-tab multi-tab-add" id="addTemplateTabBtn" title="${escapeAttr(addTemplateBtnTitle())}">${escapeHtml(UI_LABELS.addTemplateBtn)}</button>
+    <button type="button" class="multi-tab multi-tab-add" id="addTemplateTabBtn" title="${escapeAttr(addTemplateBtnTitle())}" aria-label="${escapeAttr(UI_LABELS.addTemplateBtnAria || addTemplateBtnTitle())}">${escapeHtml(UI_LABELS.addTemplateBtn)}</button>
   </div>`;
 }
 
@@ -4929,7 +4935,7 @@ function renderTaggerWorkspace() {
     : "ใส่ AI API key ของคุณ (หลายเจ้าได้ · เก็บในเบราว์เซอร์)";
   const taggerAiKeyLabel = taggerAiOn
     ? `AI · ${escapeHtml(getClientAiLabel() || aiStatus.providerLabel || String(aiStatus.model || getClientAiModel() || "พร้อม").replace(/^gemini-/i, ""))}`
-    : "เลือก model";
+    : "เลือกโมเดล";
   const taggerAiDrafting = !!s.aiDrafting;
   const taggerAiKeyDisabled = s.busy || taggerAiDrafting ? "disabled" : "";
   const taggerAiDraftLabel = taggerAiDrafting

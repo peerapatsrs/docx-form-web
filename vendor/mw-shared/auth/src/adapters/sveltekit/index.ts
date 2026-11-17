@@ -11,7 +11,7 @@
  */
 import type { MwAuthClient } from "../../core/client.js";
 import { toWebResponse, readFormOrJson } from "../../core/http.js";
-import { readCookie } from "../../core/cookies.js";
+import { readCookie, withClearCookies } from "../../core/cookies.js";
 import {
   hasSsoBypassQuery,
   safeReturnTo,
@@ -113,24 +113,30 @@ export function createSvelteKitAuthHandle(
       const silentPath = client.config.paths.silent;
       const q = new URLSearchParams({ next });
       if (decision.viaBypass) q.set("bypass", "1");
-      return new Response(null, {
-        status: 302,
-        headers: {
-          Location: `${silentPath}?${q.toString()}`,
-          "Referrer-Policy": "no-referrer",
-        },
-      });
+      return withClearCookies(
+        new Response(null, {
+          status: 302,
+          headers: {
+            Location: `${silentPath}?${q.toString()}`,
+            "Referrer-Policy": "no-referrer",
+          },
+        }),
+        session.clearCookies,
+      );
     }
 
     if (decision.stripSsoParam && hasSsoBypassQuery(event.url.search)) {
-      return new Response(null, {
-        status: 307,
-        headers: {
-          Location: stripSsoBypassParam(
-            `${event.url.pathname}${event.url.search}`,
-          ),
-        },
-      });
+      return withClearCookies(
+        new Response(null, {
+          status: 307,
+          headers: {
+            Location: stripSsoBypassParam(
+              `${event.url.pathname}${event.url.search}`,
+            ),
+          },
+        }),
+        session.clearCookies,
+      );
     }
 
     if (!session.hasSession && isProtected(event.url.pathname, protectedPrefixes)) {
@@ -139,15 +145,19 @@ export function createSvelteKitAuthHandle(
         "/",
         client.config.publicOrigin,
       );
-      return new Response(null, {
-        status: 302,
-        headers: {
-          Location: `${loginPath}?next=${encodeURIComponent(next)}`,
-        },
-      });
+      return withClearCookies(
+        new Response(null, {
+          status: 302,
+          headers: {
+            Location: `${loginPath}?next=${encodeURIComponent(next)}`,
+          },
+        }),
+        session.clearCookies,
+      );
     }
 
-    return resolve(event);
+    const resolved = await resolve(event);
+    return withClearCookies(resolved, session.clearCookies);
   };
 }
 

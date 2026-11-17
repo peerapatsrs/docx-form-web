@@ -108,4 +108,64 @@ describe("adapters", () => {
     // Cooldown active, no bypass → no redirect (null = continue)
     expect(res).toBeNull();
   });
+
+  it("DEF-BE-ADAPTER-STALE-SESSION-COOKIE: Next proxy expires unknown mw_session on silent 307", async () => {
+    const { client } = await createTestClient();
+    // Empty session store — cookie is unknown/stale.
+    const adapter = createNextAuthAdapter({
+      client,
+      protectedPathPrefixes: ["/account"],
+    });
+    const res = await adapter.handleProxy(
+      new Request("https://app.test/", {
+        headers: {
+          accept: "text/html",
+          "sec-fetch-dest": "document",
+          "sec-fetch-mode": "navigate",
+          cookie: "mw_session=stale-unknown",
+        },
+      }),
+    );
+    expect(res).not.toBeNull();
+    expect(res!.status).toBe(307);
+    expect(res!.headers.get("location")).toContain(client.config.paths.silent);
+    const setCookies = res!.headers.getSetCookie?.() ?? [];
+    expect(
+      setCookies.some(
+        (c) =>
+          c.startsWith(`${client.sessionCookieName}=`) && /Max-Age=0/i.test(c),
+      ),
+    ).toBe(true);
+  });
+
+  it("DEF-BE-ADAPTER-STALE-SESSION-COOKIE: SvelteKit handle expires unknown mw_session on silent 302", async () => {
+    const { client } = await createTestClient();
+    const handle = createSvelteKitAuthHandle({ client });
+    const res = await handle({
+      event: {
+        request: new Request("https://app.test/", {
+          headers: {
+            accept: "text/html",
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            cookie: "mw_session=stale-unknown",
+          },
+        }),
+        url: new URL("https://app.test/"),
+        cookies: { get: () => undefined },
+        locals: {},
+        fetch,
+      },
+      resolve: async () => new Response("ok"),
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toContain(client.config.paths.silent);
+    const setCookies = res.headers.getSetCookie?.() ?? [];
+    expect(
+      setCookies.some(
+        (c) =>
+          c.startsWith(`${client.sessionCookieName}=`) && /Max-Age=0/i.test(c),
+      ),
+    ).toBe(true);
+  });
 });

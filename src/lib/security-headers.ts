@@ -1,6 +1,7 @@
 /**
  * Production response headers: CSP + common browser hardening.
- * Keep CSP aligned with auth/passkeys, same-origin APIs, Google Fonts, and blob downloads.
+ * Keep CSP aligned with same-origin APIs, Google Fonts, and blob downloads.
+ * Passkeys/WebAuthn are managed at Keycloak — not in this app.
  */
 
 export const SECURITY_HEADER_NAMES = [
@@ -13,11 +14,11 @@ export const SECURITY_HEADER_NAMES = [
   "X-DNS-Prefetch-Control",
 ] as const;
 
-/** CSP that preserves OAuth redirects, passkeys, fonts, images, and BYOK AI (via same-origin API). */
+/** CSP for same-origin APIs, fonts, images, and BYOK AI (via same-origin API). */
 export function contentSecurityPolicy(): string {
   const directives = [
     "default-src 'self'",
-    // Next.js + hybrid /public/app.js shell use inline bootstraps; passkeys stay same-origin.
+    // Next.js + hybrid /public/app.js shell use inline bootstraps.
     "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com data:",
@@ -42,9 +43,9 @@ export function securityHeaders(): Record<string, string> {
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "strict-origin-when-cross-origin",
-    // Passkeys need publickey-credentials-*; disable unused powerful features.
+    // App no longer hosts WebAuthn (passkeys live at Keycloak). Disable powerful features.
     "Permissions-Policy":
-      "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=(), interest-cohort=(), publickey-credentials-get=(self), publickey-credentials-create=(self)",
+      "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=(), interest-cohort=(), publickey-credentials-get=(), publickey-credentials-create=()",
     "X-DNS-Prefetch-Control": "off",
   };
 }

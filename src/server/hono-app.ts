@@ -2,10 +2,12 @@ import { Hono } from "hono";
 import { createApi } from "./api";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { formatAppVersionLabel } from "@/lib/app-build-info";
 
 const startedAt = new Date();
 
 function readPackageMeta(): {
+  packageVersion: string;
   version: string;
   authorName: string;
   authorEmail: string;
@@ -26,13 +28,21 @@ function readPackageMeta(): {
       typeof author === "object" && author
         ? String(author.email || "").trim()
         : "";
+    const packageVersion = pkg.version ?? "0.1.0";
     return {
-      version: pkg.version ?? "0.1.0",
+      packageVersion,
+      // Prefer short build commit (RENDER_GIT_COMMIT / SOURCE_COMMIT / GIT_SHA / …).
+      version: formatAppVersionLabel(packageVersion),
       authorName,
       authorEmail,
     };
   } catch {
-    return { version: "0.1.0", authorName: "", authorEmail: "" };
+    return {
+      packageVersion: "0.1.0",
+      version: formatAppVersionLabel("0.1.0"),
+      authorName: "",
+      authorEmail: "",
+    };
   }
 }
 

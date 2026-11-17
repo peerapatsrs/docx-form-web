@@ -20,6 +20,8 @@ export type AiJobRecord = {
   progress: AiJobProgress;
   result?: unknown;
   error?: string;
+  /** Stable error code when status=error (e.g. AI_SERVER_KEY_INVALID). */
+  code?: string;
   ownerUserId: string | null;
   createdAt: number;
   updatedAt: number;
@@ -48,6 +50,10 @@ export function publicAiJob(job: AiJobRecord): AiJobRecord {
     progress: job.progress,
     result: job.status === "done" ? job.result : undefined,
     error: job.status === "error" || job.status === "cancelled" ? job.error : undefined,
+    code:
+      job.status === "error" || job.status === "cancelled"
+        ? job.code
+        : undefined,
     ownerUserId: job.ownerUserId,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
@@ -166,9 +172,18 @@ export function startAiJob(opts: RunAiJobOpts): AiJobRecord {
       if (abortController.signal.aborted) {
         job.status = "cancelled";
         job.error = job.error || "ยกเลิกแล้ว";
+        job.code = job.code || "AI_JOB_CANCELLED";
       } else {
         job.status = "error";
         job.error = err instanceof Error ? err.message : String(err);
+        const code =
+          err &&
+          typeof err === "object" &&
+          "code" in err &&
+          typeof (err as { code?: unknown }).code === "string"
+            ? String((err as { code: string }).code).trim()
+            : "";
+        job.code = code || "AI_PROVIDER_ERROR";
       }
     } finally {
       job.updatedAt = Date.now();

@@ -11,6 +11,7 @@ import {
   type AiModelOption,
   type AiProviderDef,
 } from "./ai-providers";
+import { formatModelsListError } from "./ai-http-errors";
 
 function niceLabel(id: string): string {
   const s = String(id || "").trim();
@@ -21,60 +22,13 @@ function niceLabel(id: string): string {
     .replace(/-/g, " ");
 }
 
-/** Short Thai hint for UI — never dump raw JSON into dialogs. */
+/** Short Thai hint for UI — shared mapper (never invents credits blame). */
 export function friendlyModelsError(
   providerLabel: string,
   status: number,
   body: string,
 ): string {
-  const raw = String(body || "");
-  let msg = "";
-  try {
-    const j = JSON.parse(raw) as {
-      error?: string | { message?: string; code?: string };
-      message?: string;
-      code?: string;
-    };
-    if (typeof j.error === "string") msg = j.error;
-    else if (j.error && typeof j.error === "object") {
-      msg = String(j.error.message || j.error.code || "");
-    }
-    if (!msg) msg = String(j.message || "");
-  } catch {
-    msg = raw.replace(/\s+/g, " ").trim();
-  }
-  const low = msg.toLowerCase();
-  if (
-    status === 402 ||
-    /insufficient[_\s-]?balance|insufficient[_\s-]?credits|out of credits|no credits/i.test(
-      low,
-    )
-  ) {
-    return `${providerLabel}: เครดิต/ยอดเงินไม่พอ — เติมที่คอนโซลของเจ้านี้ หรือเปลี่ยนคีย์`;
-  }
-  if (
-    status === 401 ||
-    status === 403 ||
-    /permission|denied|invalid.?api.?key|incorrect api key|unauthorized|authentication/i.test(
-      low,
-    )
-  ) {
-    if (/credit|license|billing|quota|purchase|payment/i.test(low)) {
-      return `${providerLabel}: คีย์ใช้ได้แต่ยังไม่มีเครดิต/สิทธิ์ในทีม — เติมที่คอนโซลของเจ้านี้`;
-    }
-    return `${providerLabel}: คีย์ไม่มีสิทธิ์ดึงรายการโมเดล (ตรวจคีย์หรือสิทธิ์บัญชี)`;
-  }
-  if (status === 429 || /rate.?limit/i.test(low)) {
-    return `${providerLabel}: เรียกถี่เกินไป — ลองใหม่ภายหลัง`;
-  }
-  if (status >= 500) {
-    return `${providerLabel}: เซิร์ฟเวอร์เจ้านี้มีปัญหาชั่วคราว`;
-  }
-  if (msg) {
-    const short = msg.length > 90 ? `${msg.slice(0, 87)}…` : msg;
-    return `${providerLabel}: ดึงโมเดลไม่สำเร็จ — ${short}`;
-  }
-  return `${providerLabel}: ดึงรายการโมเดลไม่สำเร็จ (${status || "?"})`;
+  return formatModelsListError(providerLabel, status, body);
 }
 
 function dedupeModels(list: AiModelOption[]): AiModelOption[] {

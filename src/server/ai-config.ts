@@ -1,15 +1,100 @@
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   defaultModelForProvider,
   getAiProvider,
+  listAiProviders,
   listAiProvidersPublic,
   normalizeProviderModel,
+  resolveEffectiveModelForProvider,
+  type AiApiFamily,
+  type AiProviderDef,
   type AiProviderId,
 } from "./ai-providers";
+import { getAiTimeoutMs } from "./ai-request";
 
 const CURSOR_SERVER_KEY_ENV = "DOCX_FORM_CURSOR_API_KEY";
+
+/** Human-facing server key row for /admin/ai (no env var names). */
+export type ServerKeySource = {
+  providerId: string;
+  label: string;
+  /** e.g. "set via server" — never an env var name */
+  sourceLabel: string;
+  /** True when the key can be cleared via DELETE /api/admin/ai/server-key */
+  clearable: boolean;
+};
+
+/**
+ * Families that can carry a shared server key (env and/or DB).
+ * Driven by apiFamily — not by hardcoding provider ids in the admin UI.
+ */
+function serverKeyConfigurableFamilies(): ReadonlySet<AiApiFamily> {
+  return new Set(["gemini", "cursor"]);
+}
+
+function hasServerEnvGeminiKey(): boolean {
+  return !!(
+    process.env.DOCX_FORM_GEMINI_API_KEY ||
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY
+  );
+}
+
+/**
+ * Resolve configured shared server-key rows from the live provider catalog.
+ * Only providers whose apiFamily supports server keys and that currently have
+ * a key are returned. Empty → admin shows a single neutral line.
+ */
+export function listConfiguredServerKeySources(): ServerKeySource[] {
+  if (isByokOnly()) return [];
+  const families = serverKeyConfigurableFamilies();
+  const out: ServerKeySource[] = [];
+  for (const p of listAiProviders()) {
+    if (!families.has(p.apiFamily)) continue;
+    const row = configuredServerKeyForProvider(p);
+    if (row) out.push(row);
+  }
+  return out;
+}
+
+function configuredServerKeyForProvider(
+  p: AiProviderDef,
+): ServerKeySource | null {
+  if (p.apiFamily === "gemini") {
+    if (hasServerEnvGeminiKey()) {
+      return {
+        providerId: p.id,
+        label: p.label,
+        sourceLabel: "set via server",
+        clearable: false,
+      };
+    }
+    if (hasServerFileGeminiKey()) {
+      return {
+        providerId: p.id,
+        label: p.label,
+        sourceLabel: maskServerFileGeminiKey() || "database",
+        clearable: true,
+      };
+    }
+    return null;
+  }
+  if (p.apiFamily === "cursor") {
+    if (hasServerEnvCursorKey()) {
+      return {
+        providerId: p.id,
+        label: p.label,
+        sourceLabel: "set via server",
+        clearable: false,
+      };
+    }
+    return null;
+  }
+  return null;
+}
 
 export type AiConfig = {
   /** Google AI Studio / Gemini API key — only used when BYOK is off (legacy/local) */
@@ -23,7 +108,25 @@ export type RequestAiCredentials = {
   model?: string;
 };
 
-function resolveConfigDir(): string {
+/** Credentials after vault / header resolution (may include vault metadata). */
+export type ResolvedRequestAiCredentials = RequestAiCredentials & {
+  keyId?: string;
+  /** True when apiKey came from this user's vault row. */
+  fromUserVault?: boolean;
+  /** Vault label for error messages (never a secret). */
+  keyLabel?: string;
+  /** X-Ai-Key-Id that was requested, even when the row was missing/deleted. */
+  requestedKeyId?: string;
+  /** True when missing vault key was replaced by DOCX_FORM_CURSOR_API_KEY. */
+  usedSharedEnvFallback?: boolean;
+};
+
+/**
+ * Legacy on-disk path (may be under /tmp on some hosts). Kept only as a
+ * one-time read fallback when migrating into Postgres `app_settings`.
+ * New writes go to the DB — never depend on /tmp for admin AI config.
+ */
+function resolveLegacyConfigDir(): string {
   const fromEnv = String(process.env.DOCX_FORM_CONFIG_DIR || "").trim();
   if (fromEnv) return fromEnv;
 
@@ -44,8 +147,10 @@ function resolveConfigDir(): string {
   return join(tmpdir(), "docx-form");
 }
 
-const CONFIG_DIR = resolveConfigDir();
-const CONFIG_PATH = join(CONFIG_DIR, "config.json");
+const LEGACY_CONFIG_DIR = resolveLegacyConfigDir();
+const LEGACY_CONFIG_PATH = join(LEGACY_CONFIG_DIR, "config.json");
+const AI_SERVER_SETTINGS_KEY = "ai_server";
+
 export const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
 
 export const GEMINI_MODEL_OPTIONS: { id: string; label: string }[] = [
@@ -64,45 +169,133 @@ export function isByokOnly(): boolean {
   return v !== "0" && v !== "false" && v !== "no";
 }
 
+/** @deprecated Human-facing APIs must not expose filesystem paths. */
 export function getConfigPath(): string {
-  return CONFIG_PATH;
+  return "(database)";
 }
 
-export function readAiConfig(): AiConfig {
-  if (isByokOnly()) return {};
+function readLegacyFileConfig(): AiConfig {
   try {
-    if (!existsSync(CONFIG_PATH)) return {};
-    const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as AiConfig;
+    if (!existsSync(LEGACY_CONFIG_PATH)) return {};
+    const raw = JSON.parse(readFileSync(LEGACY_CONFIG_PATH, "utf-8")) as AiConfig;
     return raw && typeof raw === "object" ? raw : {};
   } catch {
     return {};
   }
 }
 
-export function writeAiConfig(patch: Partial<AiConfig>): AiConfig {
-  if (isByokOnly()) {
-    // Do not write user keys to disk in web BYOK mode.
-    return { ...readAiConfig(), ...patch, geminiApiKey: undefined };
-  }
-  const next: AiConfig = { ...readAiConfig(), ...patch };
-  // turbopackIgnore: CONFIG_DIR is dynamic (env/home/tmp); without it Turbopack
-  // traces the whole project into the server bundle.
-  if (!existsSync(/* turbopackIgnore: true */ CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { recursive: true });
-  }
-  writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2), "utf-8");
-  return next;
+/** In-memory cache of DB-backed server AI config (non-BYOK). */
+let aiServerCache: AiConfig | null = null;
+let aiServerLoad: Promise<void> | null = null;
+
+async function persistAiServerConfig(value: AiConfig): Promise<void> {
+  const { ensureAdminSchema } = await import("./admin-store");
+  const { getAuthPool } = await import("./auth-db");
+  await ensureAdminSchema();
+  const pool = getAuthPool();
+  await pool.query(
+    `INSERT INTO app_settings (key, value, "updatedAt")
+     VALUES ($1, $2::jsonb, NOW())
+     ON CONFLICT (key) DO UPDATE
+       SET value = EXCLUDED.value, "updatedAt" = NOW()`,
+    [AI_SERVER_SETTINGS_KEY, JSON.stringify(value || {})],
+  );
+  aiServerCache = { ...(value || {}) };
 }
 
-export function clearGeminiKey(): AiConfig {
-  if (isByokOnly()) return {};
-  const cur = readAiConfig();
-  delete cur.geminiApiKey;
-  if (!existsSync(/* turbopackIgnore: true */ CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { recursive: true });
+/**
+ * Load server AI config from Postgres; one-time migrate from legacy file
+ * (including /tmp) when the DB row is empty.
+ */
+export async function ensureAiServerConfigLoaded(): Promise<void> {
+  if (isByokOnly()) {
+    aiServerCache = {};
+    return;
   }
-  writeFileSync(CONFIG_PATH, JSON.stringify(cur, null, 2), "utf-8");
-  return cur;
+  if (aiServerCache !== null) return;
+  if (!aiServerLoad) {
+    aiServerLoad = (async () => {
+      try {
+        const { ensureAdminSchema } = await import("./admin-store");
+        const { getAuthPool } = await import("./auth-db");
+        await ensureAdminSchema();
+        const pool = getAuthPool();
+        const { rows } = await pool.query<{ value: AiConfig }>(
+          `SELECT value FROM app_settings WHERE key = $1 LIMIT 1`,
+          [AI_SERVER_SETTINGS_KEY],
+        );
+        let value =
+          rows[0]?.value && typeof rows[0].value === "object"
+            ? { ...rows[0].value }
+            : {};
+        const hasDb =
+          Boolean(String(value.geminiApiKey || "").trim()) ||
+          Boolean(String(value.geminiModel || "").trim());
+        if (!hasDb) {
+          const legacy = readLegacyFileConfig();
+          if (
+            String(legacy.geminiApiKey || "").trim() ||
+            String(legacy.geminiModel || "").trim()
+          ) {
+            value = { ...legacy };
+            await persistAiServerConfig(value);
+          } else {
+            aiServerCache = {};
+          }
+        } else {
+          aiServerCache = value;
+        }
+      } catch {
+        // DB unavailable — fall back to legacy file for this process only.
+        aiServerCache = readLegacyFileConfig();
+      } finally {
+        if (aiServerCache === null) aiServerCache = {};
+      }
+    })().finally(() => {
+      aiServerLoad = null;
+    });
+  }
+  await aiServerLoad;
+}
+
+export function readAiConfig(): AiConfig {
+  if (isByokOnly()) return {};
+  if (aiServerCache) return { ...aiServerCache };
+  // Cold path before async load: legacy file only (never write back to /tmp).
+  return readLegacyFileConfig();
+}
+
+export async function writeAiConfig(patch: Partial<AiConfig>): Promise<AiConfig> {
+  if (isByokOnly()) {
+    // Do not write user keys in web BYOK mode.
+    return { ...readAiConfig(), ...patch, geminiApiKey: undefined };
+  }
+  await ensureAiServerConfigLoaded();
+  const next: AiConfig = { ...readAiConfig(), ...patch };
+  await persistAiServerConfig(next);
+  return { ...next };
+}
+
+export async function clearGeminiKey(): Promise<AiConfig> {
+  if (isByokOnly()) return {};
+  await ensureAiServerConfigLoaded();
+  const cur = { ...readAiConfig() };
+  delete cur.geminiApiKey;
+  await persistAiServerConfig(cur);
+  return { ...cur };
+}
+
+/** True when a Gemini key is persisted in the server config file (not env). */
+export function hasServerFileGeminiKey(): boolean {
+  if (isByokOnly()) return false;
+  const cfg = readAiConfig().geminiApiKey;
+  return Boolean(cfg && String(cfg).trim());
+}
+
+/** Mask for file-stored Gemini key only — never masks env key material. */
+export function maskServerFileGeminiKey(): string | null {
+  if (!hasServerFileGeminiKey()) return null;
+  return maskGeminiKey(String(readAiConfig().geminiApiKey || ""));
 }
 
 /** Mask secrets for UI lists — last 4 only (never prefix+suffix of the secret). */
@@ -230,11 +423,13 @@ export function getRequestAiCredentials(
 /**
  * Resolve credentials preferring vault key id (no plaintext round-trip).
  * Falls back to per-request API key header for unsynced / guest BYOK.
+ * Missing/deleted vault ids do not throw — callers use
+ * {@link coalesceAiCredentialsWithSharedEnv} / {@link missingAiCredentialsError}.
  */
 export async function resolveRequestAiCredentials(
   req: Request,
   userId?: string | null,
-): Promise<RequestAiCredentials & { keyId?: string }> {
+): Promise<ResolvedRequestAiCredentials> {
   const base = getRequestAiCredentials(req);
   const keyId = getRequestAiKeyId(req);
   if (keyId && userId) {
@@ -250,20 +445,211 @@ export async function resolveRequestAiCredentials(
             base.model ||
             defaultModelForProvider(row.provider || base.provider),
           keyId: row.id,
+          requestedKeyId: keyId,
+          fromUserVault: true,
+          keyLabel: row.label || row.provider || row.id,
         };
       }
     } catch {
       /* fall through to header key */
     }
+    return {
+      ...base,
+      keyId,
+      requestedKeyId: keyId,
+      fromUserVault: false,
+    };
   }
-  return { ...base, keyId };
+  return { ...base, keyId, requestedKeyId: keyId, fromUserVault: false };
+}
+
+/**
+ * Shared Cursor env key for auth/missing-vault fallback.
+ * Reads DOCX_FORM_CURSOR_API_KEY even when BYOK-only is on (unlike getCursorApiKey).
+ * Never log or return this value to clients.
+ */
+export function peekSharedCursorEnvApiKey(): string | undefined {
+  const fromEnv = process.env[CURSOR_SERVER_KEY_ENV];
+  const key = fromEnv && String(fromEnv).trim() ? String(fromEnv).trim() : "";
+  return key || undefined;
+}
+
+export function formatSavedAiKeyAuthError(opts: {
+  keyId?: string | null;
+  label?: string | null;
+}): string {
+  const label = String(opts.label || "").trim();
+  const id = String(opts.keyId || "").trim();
+  if (label && id && label !== id) {
+    return `คีย์ AI ที่บันทึกไว้「${label}」(id: ${id}) ถูกปฏิเสธจากผู้ให้บริการ (ไม่ถูกต้อง/หมดอายุ/ไม่มีสิทธิ์) — ตรวจคีย์นี้หรือตั้ง DOCX_FORM_CURSOR_API_KEY เป็นตัวสำรอง`;
+  }
+  if (label) {
+    return `คีย์ AI ที่บันทึกไว้「${label}」ถูกปฏิเสธจากผู้ให้บริการ (ไม่ถูกต้อง/หมดอายุ/ไม่มีสิทธิ์) — ตรวจคีย์นี้หรือตั้ง DOCX_FORM_CURSOR_API_KEY เป็นตัวสำรอง`;
+  }
+  if (id) {
+    return `คีย์ AI ที่บันทึกไว้ (id: ${id}) ถูกปฏิเสธจากผู้ให้บริการ (ไม่ถูกต้อง/หมดอายุ/ไม่มีสิทธิ์) — ตรวจคีย์นี้หรือตั้ง DOCX_FORM_CURSOR_API_KEY เป็นตัวสำรอง`;
+  }
+  return "คีย์ AI ที่บันทึกไว้ถูกปฏิเสธจากผู้ให้บริการ (ไม่ถูกต้อง/หมดอายุ/ไม่มีสิทธิ์)";
+}
+
+export function formatMissingVaultAiKeyError(opts: {
+  keyId?: string | null;
+}): string {
+  const id = String(opts.keyId || "").trim();
+  if (id) {
+    return `ไม่พบคีย์ AI ที่บันทึกไว้ (id: ${id}) — อาจถูกลบแล้ว หรือไม่มีสิทธิ์ใช้คีย์นี้`;
+  }
+  return "ไม่พบคีย์ AI ที่บันทึกไว้ — อาจถูกลบแล้ว หรือไม่มีสิทธิ์ใช้คีย์นี้";
+}
+
+export function missingAiCredentialsError(
+  creds?: Pick<ResolvedRequestAiCredentials, "requestedKeyId" | "fromUserVault"> | null,
+): string {
+  const requested = String(creds?.requestedKeyId || "").trim();
+  if (requested && !creds?.fromUserVault) {
+    return formatMissingVaultAiKeyError({ keyId: requested });
+  }
+  return "ยังไม่มี AI API key — กด «ใส่ AI key» แล้วเลือกผู้ให้บริการและใส่ key ของคุณ หรือซิงก์คีย์ขึ้นเซิร์ฟเวอร์แล้วส่ง X-Ai-Key-Id";
+}
+
+/**
+ * Fill missing personal credentials from shared server keys.
+ *
+ * 1. X-Ai-Key-Id sent but vault row gone → Cursor env key (even when BYOK-only),
+ *    same rule as auth-rejection fallback.
+ * 2. No personal key at all + BYOK-only off → Cursor env key, else Gemini
+ *    env/DB server key. Any logged-in user (and status/route resolvers) can use
+ *    this path; plan quotas stay separate in premium/limits.
+ *
+ * Never returns the secret to clients — only attaches it for server-side calls.
+ */
+export function coalesceAiCredentialsWithSharedEnv(
+  creds: ResolvedRequestAiCredentials,
+): ResolvedRequestAiCredentials {
+  if (creds.apiKey && String(creds.apiKey).trim()) return creds;
+  const requested = String(creds.requestedKeyId || creds.keyId || "").trim();
+
+  // Missing vault id → Cursor env fallback (allowed even when BYOK-only).
+  if (requested) {
+    const shared = peekSharedCursorEnvApiKey();
+    if (!shared) return creds;
+    return {
+      provider: "cursor",
+      apiKey: shared,
+      model: defaultModelForProvider("cursor"),
+      keyId: requested,
+      requestedKeyId: requested,
+      fromUserVault: false,
+      usedSharedEnvFallback: true,
+    };
+  }
+
+  // No personal key: shared server key only when BYOK-only is off.
+  if (isByokOnly()) return creds;
+
+  const sharedCursor = peekSharedCursorEnvApiKey();
+  if (sharedCursor) {
+    return {
+      provider: "cursor",
+      apiKey: sharedCursor,
+      model: defaultModelForProvider("cursor"),
+      fromUserVault: false,
+      usedSharedEnvFallback: true,
+    };
+  }
+
+  const sharedGemini = getGeminiApiKey(undefined);
+  if (sharedGemini) {
+    const geminiProvider =
+      getAiProvider(creds.provider)?.apiFamily === "gemini"
+        ? getAiProvider(creds.provider)!.id
+        : "google";
+    return {
+      provider: geminiProvider,
+      apiKey: sharedGemini,
+      model: defaultModelForProvider(geminiProvider),
+      fromUserVault: false,
+      usedSharedEnvFallback: true,
+    };
+  }
+
+  return creds;
+}
+
+/**
+ * Run an AI call; if the user's own vault key is rejected (auth only),
+ * optionally retry once with DOCX_FORM_CURSOR_API_KEY when configured.
+ *
+ * BYOK / `source=byok` callers must pass `{ allowSharedAuthFallback: false }`
+ * so a provider rejection surfaces as an error — never a silent shared-key or
+ * non-AI fallback.
+ */
+export async function runWithSavedAiKeyAuthFallback<T>(
+  creds: ResolvedRequestAiCredentials,
+  run: (effective: RequestAiCredentials) => Promise<T>,
+  opts?: { allowSharedAuthFallback?: boolean },
+): Promise<T> {
+  try {
+    return await run({
+      provider: creds.provider,
+      apiKey: creds.apiKey,
+      model: creds.model,
+    });
+  } catch (err) {
+    if (!creds.fromUserVault) throw err;
+    const { isAiCredentialAuthError } = await import("./ai-http-errors");
+    if (!isAiCredentialAuthError(err)) throw err;
+    if (opts?.allowSharedAuthFallback === false) {
+      throw new Error(
+        formatSavedAiKeyAuthError({
+          keyId: creds.keyId || creds.requestedKeyId,
+          label: creds.keyLabel,
+        }),
+      );
+    }
+    const shared = peekSharedCursorEnvApiKey();
+    if (!shared) {
+      throw new Error(
+        formatSavedAiKeyAuthError({
+          keyId: creds.keyId || creds.requestedKeyId,
+          label: creds.keyLabel,
+        }),
+      );
+    }
+    return await run({
+      provider: "cursor",
+      apiKey: shared,
+      model: defaultModelForProvider("cursor"),
+    });
+  }
+}
+
+/**
+ * Cursor API keys commonly start with `crsr_` / `key_`.
+ * Never treat these as a Gemini/Google BYOK override — that made
+ * resolveEffectiveAiProvider keep admin default=google while the only
+ * shared secret was DOCX_FORM_CURSOR_API_KEY (AI_AUTH 400).
+ */
+export function looksLikeCursorApiKey(raw: string | null | undefined): boolean {
+  const k = String(raw || "").trim();
+  if (!k) return false;
+  return /^(crsr_|key_)/i.test(k);
+}
+
+/** Google AI Studio keys commonly start with `AIza`. */
+export function looksLikeGeminiApiKey(raw: string | null | undefined): boolean {
+  const k = String(raw || "").trim();
+  if (!k) return false;
+  return /^AIza/i.test(k);
 }
 
 /**
  * Resolve API key: per-request override → (if not BYOK) env/file.
+ * Override is ignored when it clearly belongs to another provider family.
  */
 export function getGeminiApiKey(override?: string | null): string | undefined {
-  if (override && String(override).trim()) return String(override).trim();
+  const o = override && String(override).trim() ? String(override).trim() : "";
+  if (o && !looksLikeCursorApiKey(o)) return o;
   if (isByokOnly()) return undefined;
 
   const fromEnv =
@@ -278,7 +664,8 @@ export function getGeminiApiKey(override?: string | null): string | undefined {
 
 /** Shared Cursor key (DOCX_FORM_CURSOR_API_KEY) when BYOK-only is off; BYOK override wins. */
 export function getCursorApiKey(override?: string | null): string | undefined {
-  if (override && String(override).trim()) return String(override).trim();
+  const o = override && String(override).trim() ? String(override).trim() : "";
+  if (o && !looksLikeGeminiApiKey(o)) return o;
   if (isByokOnly()) return undefined;
   const fromEnv = process.env[CURSOR_SERVER_KEY_ENV];
   if (fromEnv && String(fromEnv).trim()) return String(fromEnv).trim();
@@ -287,6 +674,29 @@ export function getCursorApiKey(override?: string | null): string | undefined {
 
 export function hasServerEnvCursorKey(): boolean {
   return Boolean(String(process.env[CURSOR_SERVER_KEY_ENV] || "").trim());
+}
+
+/**
+ * Non-secret readiness: any shared server AI key is present (env and/or DB).
+ * Independent of BYOK mode — reports configuration only, never key material.
+ */
+export function hasServerAiKeyConfigured(): boolean {
+  return (
+    hasServerEnvCursorKey() ||
+    hasServerEnvGeminiKey() ||
+    hasServerFileGeminiKey()
+  );
+}
+
+/** User-facing auth failure when the shared server key was rejected (not BYOK). */
+export function formatSharedServerKeyAuthError(
+  providerLabel?: string | null,
+): string {
+  const label = String(providerLabel || "").trim();
+  if (label) {
+    return `คีย์เซิร์ฟเวอร์ (${label}) ถูกผู้ให้บริการปฏิเสธ — ไม่ใช่คีย์ส่วนตัวของคุณ แจ้งผู้ดูแลระบบให้ตรวจคีย์เซิร์ฟเวอร์`;
+  }
+  return "คีย์เซิร์ฟเวอร์ถูกผู้ให้บริการปฏิเสธ — ไม่ใช่คีย์ส่วนตัวของคุณ แจ้งผู้ดูแลระบบให้ตรวจคีย์เซิร์ฟเวอร์";
 }
 
 /** Effective API key: per-request BYOK → (when not BYOK-only) server env for Gemini/Cursor. */
@@ -336,29 +746,13 @@ export async function getGeminiModelAsync(
   }
 }
 
+export type AiKeySource = "user" | "shared" | "none";
+
 export type AiReadinessState =
   | "ready"
   | "needs_key"
   | "generating"
   | "error";
-
-export type AiKeySource =
-  | "request"
-  | "vault"
-  | "server_env"
-  | "none";
-
-function deriveKeySource(opts: {
-  requestKey?: string | null;
-  keyId?: string | null;
-  connected: boolean;
-  byok: boolean;
-}): AiKeySource {
-  if (opts.requestKey && String(opts.requestKey).trim()) return "request";
-  if (opts.keyId) return "vault";
-  if (opts.connected && !opts.byok) return "server_env";
-  return "none";
-}
 
 function deriveReadinessState(opts: {
   connected: boolean;
@@ -376,11 +770,24 @@ export function geminiStatus(opts?: {
   requestModel?: string | null;
   requestProvider?: string | null;
   explicitProvider?: boolean;
-  keyId?: string | null;
-  jobState?: "idle" | "queued" | "running" | "error";
   /** Admin-configured default when file/env has none */
   adminDefaultModel?: string | null;
   adminDefaultProvider?: string | null;
+  /** Vault / header resolution hints for truthful pill status. */
+  fromUserVault?: boolean;
+  keyId?: string | null;
+  usedSharedEnvFallback?: boolean;
+  lastTestAt?: string | null;
+  lastTestOk?: boolean | null;
+  lastTestCode?: string | null;
+  lastTestMessage?: string | null;
+  /**
+   * When true (BYOK-only env, or user mode=byok with no personal key), never
+   * report connected/keySource from a shared server key.
+   */
+  suppressSharedKey?: boolean;
+  /** Optional active-job hint for status-pill readiness (dev UX). */
+  jobState?: "idle" | "queued" | "running" | "error";
 }) {
   const adminDefaultProvider = adminDefaultProviderFromSettings({
     defaultProvider: opts?.adminDefaultProvider,
@@ -393,64 +800,116 @@ export function geminiStatus(opts?: {
     adminDefaultProvider,
   });
   const provider = getAiProvider(providerId)!;
-  const key =
-    provider.apiFamily === "gemini"
-      ? getGeminiApiKey(opts?.requestKey)
+  const requestKey = opts?.requestKey && String(opts.requestKey).trim()
+    ? String(opts.requestKey).trim()
+    : undefined;
+  const suppressShared = Boolean(opts?.suppressSharedKey);
+  const key = suppressShared
+    ? requestKey || undefined
+    : provider.apiFamily === "gemini"
+      ? getGeminiApiKey(requestKey)
       : provider.apiFamily === "cursor"
-        ? getCursorApiKey(opts?.requestKey)
-        : opts?.requestKey && String(opts.requestKey).trim()
-          ? String(opts.requestKey).trim()
-          : undefined;
-  const model =
-    normalizeProviderModel(providerId, opts?.requestModel) ||
+        ? getCursorApiKey(requestKey)
+        : requestKey;
+  const rawModel =
+    opts?.requestModel ||
     (provider.apiFamily === "gemini"
       ? normalizeGeminiModel(readAiConfig().geminiModel)
       : null) ||
     (provider.apiFamily === "gemini"
       ? normalizeGeminiModel(opts?.adminDefaultModel)
       : null) ||
-    provider.defaultModel;
+    null;
+  // Same resolver the fill/tag paths use — pill must not show a cross-family
+  // leftover like gemini-3.8-flash when effective provider is Cursor.
+  const model = resolveEffectiveModelForProvider(providerId, rawModel);
+  const hasEnvGemini = hasServerEnvGeminiKey();
+  const hasEnvCursor = hasServerEnvCursorKey();
+  const hasFileGemini = hasServerFileGeminiKey();
+  const serverKeySources = listConfiguredServerKeySources();
+  const fromVault = Boolean(opts?.fromUserVault && key);
+  const usedShared = Boolean(opts?.usedSharedEnvFallback) && !suppressShared;
+  let keySource: AiKeySource = "none";
+  if (fromVault || (requestKey && !usedShared)) {
+    keySource = "user";
+  } else if (
+    !suppressShared &&
+    key &&
+    (usedShared || hasEnvCursor || hasEnvGemini || hasFileGemini)
+  ) {
+    keySource = "shared";
+  } else if (!suppressShared && key) {
+    // Server resolved a key without vault/header — treat as shared.
+    keySource = "shared";
+  }
+  const keyId =
+    keySource === "user" && opts?.keyId ? String(opts.keyId).trim() || null : null;
+  const lastTestOk =
+    typeof opts?.lastTestOk === "boolean" ? opts.lastTestOk : null;
+  const lastTestStatus: "ok" | "error" | "untested" | null =
+    keySource === "user"
+      ? lastTestOk === true
+        ? "ok"
+        : lastTestOk === false
+          ? "error"
+          : "untested"
+      : null;
+  const premiumEnforce =
+    String(process.env.PREMIUM_ENFORCE || "").trim() === "1" ||
+    String(process.env.PREMIUM_ENFORCE || "")
+      .trim()
+      .toLowerCase() === "true";
   const connected = !!key;
-  const byok = isByokOnly();
   const jobState = opts?.jobState ?? "idle";
-  const keySource = deriveKeySource({
-    requestKey: opts?.requestKey,
-    keyId: opts?.keyId,
-    connected,
-    byok,
-  });
   const readinessState = deriveReadinessState({ connected, jobState });
   return {
     connected,
-    byok,
+    byok: isByokOnly(),
+    /** Non-secret: env/DB shared key present (independent of whether this request used it). */
+    serverAiKeyConfigured: hasServerAiKeyConfigured(),
     provider: providerId,
     effectiveProvider: providerId,
     effectiveProviderLabel: provider.label,
+    /** Same value as `model` — alias for pill/admin agreement. */
     effectiveModel: model,
     adminDefaultProvider,
     providerLabel: provider.label,
     apiFamily: provider.apiFamily,
     model,
+    /** Server AI call budget (DOCX_FORM_AI_TIMEOUT_MS); client should wait slightly longer. */
+    aiTimeoutMs: getAiTimeoutMs(),
     models: provider.models,
+    /** Provider registry default for the effective provider (not admin setting). */
     defaultModel: provider.defaultModel,
     adminDefaultModel: normalizeGeminiModel(opts?.adminDefaultModel) || null,
-    maskedKey: key ? maskGeminiKey(key) : null,
+    maskedKey: key && keySource === "user" ? maskGeminiKey(key) : keySource === "shared" ? null : null,
     keySource,
     readinessState,
     jobState,
-    hasServerEnvKey: !!(
-      process.env.DOCX_FORM_GEMINI_API_KEY ||
-      process.env.GEMINI_API_KEY ||
-      process.env.GOOGLE_API_KEY ||
-      process.env.GOOGLE_GENERATIVE_AI_API_KEY
-    ),
-    hasServerEnvCursorKey: hasServerEnvCursorKey(),
-    premiumEnforce:
-      String(process.env.PREMIUM_ENFORCE || "").trim() === "1" ||
-      String(process.env.PREMIUM_ENFORCE || "")
-        .trim()
-        .toLowerCase() === "true",
-    configPath: byok ? "(browser session — not stored on server)" : CONFIG_PATH,
+    keyId,
+    lastTestAt: keySource === "user" ? opts?.lastTestAt || null : null,
+    lastTestOk: keySource === "user" ? lastTestOk : null,
+    lastTestCode: keySource === "user" ? opts?.lastTestCode || null : null,
+    lastTestMessage: keySource === "user" ? opts?.lastTestMessage || null : null,
+    lastTestStatus,
+    hasServerEnvKey: hasEnvGemini,
+    hasServerEnvCursorKey: hasEnvCursor,
+    /** Human label only — never leak env var names. */
+    serverEnvGeminiKeySource: hasEnvGemini ? "set via server" : null,
+    serverEnvCursorKeySource: hasEnvCursor ? "set via server" : null,
+    /**
+     * Configured shared server keys from the provider catalog (generic).
+     * Admin UI lists these; empty → show a single neutral “not set” line.
+     */
+    serverKeySources,
+    /** True when any catalog server key is clearable via admin DELETE. */
+    hasClearableServerKey: serverKeySources.some((s) => s.clearable),
+    premiumEnforce,
+    /** Human storage label — never leak filesystem paths (DB-backed, not /tmp). */
+    configStore: isByokOnly() ? "browser" : "database",
+    configStoreLabel: isByokOnly()
+      ? "เบราว์เซอร์ (ไม่เก็บบนเซิร์ฟเวอร์)"
+      : "เก็บบนเซิร์ฟเวอร์ (ฐานข้อมูล)",
     studioUrl: provider.docsUrl,
     docsUrl: provider.docsUrl,
     providers: listAiProvidersPublic(),

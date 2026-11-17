@@ -64,7 +64,7 @@ await check("running job → generating readiness", async () => {
   assert.equal(status.connected, true);
   assert.equal(status.readinessState, "generating");
   assert.equal(status.jobState, "running");
-  assert.equal(status.keySource, "request");
+  assert.equal(status.keySource, "user");
 });
 
 await check("summarizeAiJobsForUser picks latest active job", async () => {

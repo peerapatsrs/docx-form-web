@@ -20,16 +20,25 @@ import {
   validateUploadedTagName,
 } from "./field-names";
 
+/** Optional table-cell location for FE fill preview (non-loop + loop template cells). */
+export type FieldTableLocation = {
+  tableIndex?: number;
+  rowIndexInTable?: number;
+  cellIndex?: number;
+};
+
 export type TextField = {
   name: string;
   type: "text";
   /** Other exact tag names in the document that share this field. */
   aliases?: string[];
+  location?: FieldTableLocation;
 };
 export type ImageField = {
   name: string;
   type: "image";
   aliases?: string[];
+  location?: FieldTableLocation;
 };
 /** Checkbox: checked → trueText, unchecked → falseText. Tag e.g. {{พบ?√,x}} */
 export type BoolField = {
@@ -39,6 +48,7 @@ export type BoolField = {
   falseText: string;
   label: string;
   aliases?: string[];
+  location?: FieldTableLocation;
 };
 /** Auto row number in loops. Tag e.g. {{+ลำดับ}} → 1, 2, 3… */
 export type AutoField = {
@@ -46,6 +56,7 @@ export type AutoField = {
   type: "auto";
   label: string;
   aliases?: string[];
+  location?: FieldTableLocation;
 };
 export type ListItemField = TextField | BoolField | AutoField | ListField;
 export type ListField = {
@@ -53,6 +64,7 @@ export type ListField = {
   type: "list";
   itemFields: ListItemField[];
   aliases?: string[];
+  location?: FieldTableLocation;
 };
 export type FormField = TextField | ImageField | ListField | BoolField | AutoField;
 
@@ -358,11 +370,80 @@ async function prepareTemplateBuffer(buffer: Buffer): Promise<Buffer> {
   return mergeSplitTemplateTagsInDocx(buffer);
 }
 
+/**
+ * Attach `location` to fields that appear inside table cells (staticRows /
+ * templateCells). First occurrence wins. Safe no-op when layout has no tables.
+ */
+export function enrichFieldsWithTableCellLocations(
+  fields: FormField[],
+  blocks: import("./docx-layout").LayoutBlock[],
+  extractSelfTags: (text: string) => string[] = (text) => {
+    const out: string[] = [];
+    const re = /\{\{\s*([^{}]+?)\s*\}\}/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(String(text || "")))) {
+      const raw = String(m[1] || "").trim();
+      if (!raw || raw.startsWith("#") || raw.startsWith("/")) continue;
+      if (!out.includes(raw)) out.push(raw);
+    }
+    return out;
+  },
+): void {
+  let tableIndex = -1;
+  for (const b of blocks) {
+    if (b.type !== "table") continue;
+    tableIndex += 1;
+    const attach = (
+      cell: { text?: string; tags?: string[]; fieldName?: string },
+      rowIndexInTable: number,
+      cellIndex: number,
+    ) => {
+      const fromTags =
+        Array.isArray(cell.tags) && cell.tags.length
+          ? cell.tags
+          : extractSelfTags(String(cell.text || ""));
+      const names = cell.fieldName
+        ? [String(cell.fieldName), ...fromTags]
+        : fromTags;
+      for (const raw of names) {
+        const name = String(raw || "").trim();
+        if (!name) continue;
+        const field = fields.find(
+          (f) => f.name === name || (f.aliases || []).includes(name),
+        );
+        if (!field || field.location) continue;
+        field.location = { tableIndex, rowIndexInTable, cellIndex };
+      }
+    };
+    const staticRows = b.staticRows || [];
+    staticRows.forEach((row, ri) => {
+      row.forEach((cell, ci) => attach(cell, ri, ci));
+    });
+    if (b.templateCells?.length) {
+      const ri = b.headerRows?.length || 0;
+      b.templateCells.forEach((cell, ci) => attach(cell, ri, ci));
+    }
+  }
+}
+
 export async function parseTemplate(buffer: Buffer): Promise<ParseResult> {
   const prepared = await prepareTemplateBuffer(buffer);
   const tags = await handler.parseTags(prepared);
   assertTagsBalanced(tags);
   const { fields, warnings } = tagsToFieldsWithWarnings(tags);
+  try {
+    const { extractDocumentLayout, extractSelfTagsFromCellText } = await import(
+      "./docx-layout"
+    );
+    const layout = await extractDocumentLayout(prepared);
+    enrichFieldsWithTableCellLocations(
+      fields,
+      layout.blocks,
+      extractSelfTagsFromCellText,
+    );
+  } catch {
+    /* layout enrichment is best-effort — fields still valid without location */
+  }
   return warnings.length ? { fields, warnings } : { fields };
 }
 

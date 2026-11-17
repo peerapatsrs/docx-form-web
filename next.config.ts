@@ -6,6 +6,7 @@ import {
   securityHeaders,
 } from "./src/lib/security-headers";
 import { LEGACY_HOME_REDIRECT_PATHS } from "./src/lib/legacy-routes";
+import { MAX_UPLOAD_BODY_BYTES } from "./src/lib/upload-limits";
 
 const security = Object.entries(securityHeaders()).map(([key, value]) => ({
   key,
@@ -18,6 +19,11 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   // Dev: allow both localhost and 127.0.0.1 (HMR was blocking 127.0.0.1 → blank page)
   allowedDevOrigins: ["127.0.0.1", "localhost"],
+  // Default proxy body buffer is 10MB — raise to file cap + multipart margin
+  // so /api/parse|/fill|/template/tag|/batch-fill accept advertised 25MB uploads.
+  experimental: {
+    proxyClientMaxBodySize: MAX_UPLOAD_BODY_BYTES,
+  },
   serverExternalPackages: [
     "pdfjs-dist",
     "tesseract.js",
@@ -25,14 +31,18 @@ const nextConfig: NextConfig = {
     "easy-template-x",
     "pg",
     "better-auth",
-    "@better-auth/passkey",
     "@cursor/sdk",
   ],
   async redirects() {
-    return LEGACY_HOME_REDIRECT_PATHS.flatMap((path) => [
+    const legacy = LEGACY_HOME_REDIRECT_PATHS.flatMap((path) => [
       { source: path, destination: "/", permanent: false },
       { source: `${path}/`, destination: "/", permanent: false },
     ]);
+    return [
+      ...legacy,
+      { source: "/settings", destination: "/account", permanent: false },
+      { source: "/keys", destination: "/account", permanent: false },
+    ];
   },
   async headers() {
     return [

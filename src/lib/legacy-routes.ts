@@ -5,6 +5,7 @@ export const LEGACY_HOME_REDIRECT_PATHS = [
   "/progress",
   "/success",
   "/components",
+  "/history",
 ] as const;
 
 /** Normalize `/foo/` → `/foo` for legacy redirect matching. */

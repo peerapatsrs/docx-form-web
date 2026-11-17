@@ -835,6 +835,7 @@ async function callGeminiSuggest(
     model: string;
     docxBuffer?: Buffer;
     filename?: string;
+    signal?: AbortSignal;
   },
 ): Promise<SuggestCallResult> {
   const url = `${getGeminiApiBase()}/v1beta/models/${encodeURIComponent(opts.model)}:generateContent?key=${encodeURIComponent(opts.apiKey)}`;
@@ -861,40 +862,53 @@ async function callGeminiSuggest(
       },
     });
   }
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts }],
-      generationConfig: {
-        temperature: 0.1,
-        responseMimeType: "application/json",
-      },
-    }),
-  });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(
-      formatProviderHttpError(
-        "Google AI",
-        res.status,
-        errText || res.statusText,
-      ),
-    );
-  }
-  const data = (await res.json()) as {
-    candidates?: { content?: { parts?: { text?: string }[] } }[];
-  };
-  const rawText =
-    data.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") ||
-    "";
-  return { parsed: parseJsonObject(rawText), rawText };
+  const { withAiTimeout } = await import("./ai-request");
+  return withAiTimeout(
+    async (signal) => {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts }],
+          generationConfig: {
+            temperature: 0.1,
+            responseMimeType: "application/json",
+          },
+        }),
+        signal,
+      });
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw new Error(
+          formatProviderHttpError(
+            "Google AI",
+            res.status,
+            errText || res.statusText,
+          ),
+        );
+      }
+      const data = (await res.json()) as {
+        candidates?: { content?: { parts?: { text?: string }[] } }[];
+      };
+      const rawText =
+        data.candidates?.[0]?.content?.parts
+          ?.map((p) => p.text || "")
+          .join("") || "";
+      return { parsed: parseJsonObject(rawText), rawText };
+    },
+    {
+      signal: opts.signal,
+      route: "suggest-tags.gemini",
+      provider: "google",
+      model: opts.model,
+    },
+  );
 }
 
 async function callOpenAiSuggest(
   providerId: string,
   prompt: string,
-  opts: { apiKey: string; model: string },
+  opts: { apiKey: string; model: string; signal?: AbortSignal },
 ): Promise<SuggestCallResult> {
   const provider = getAiProvider(providerId);
   if (!provider || provider.apiFamily !== "openai" || !provider.baseUrl) {
@@ -912,84 +926,109 @@ async function callOpenAiSuggest(
     response_format: { type: "json_object" },
   };
   const url = `${provider.baseUrl.replace(/\/$/, "")}/chat/completions`;
-  let res = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
-  if (!res.ok && res.status === 400) {
-    delete body.response_format;
-    res = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
-  }
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(
-      formatProviderHttpError(
-        provider.label,
-        res.status,
-        errText || res.statusText,
-      ),
-    );
-  }
-  const data = (await res.json()) as {
-    choices?: { message?: { content?: string | unknown } }[];
-  };
-  const raw = data.choices?.[0]?.message?.content;
-  const rawText =
-    typeof raw === "string"
-      ? raw
-      : Array.isArray(raw)
-        ? raw
-            .map((p) =>
-              p && typeof p === "object" && "text" in p
-                ? String((p as { text?: string }).text || "")
-                : "",
-            )
-            .join("")
-        : "";
-  return { parsed: parseJsonObject(rawText), rawText };
+  const { withAiTimeout } = await import("./ai-request");
+  return withAiTimeout(
+    async (signal) => {
+      let res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal,
+      });
+      if (!res.ok && res.status === 400) {
+        delete body.response_format;
+        res = await fetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal,
+        });
+      }
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw new Error(
+          formatProviderHttpError(
+            provider.label,
+            res.status,
+            errText || res.statusText,
+          ),
+        );
+      }
+      const data = (await res.json()) as {
+        choices?: { message?: { content?: string | unknown } }[];
+      };
+      const raw = data.choices?.[0]?.message?.content;
+      const rawText =
+        typeof raw === "string"
+          ? raw
+          : Array.isArray(raw)
+            ? raw
+                .map((p) =>
+                  p && typeof p === "object" && "text" in p
+                    ? String((p as { text?: string }).text || "")
+                    : "",
+                )
+                .join("")
+            : "";
+      return { parsed: parseJsonObject(rawText), rawText };
+    },
+    {
+      signal: opts.signal,
+      route: "suggest-tags.openai",
+      provider: providerId,
+      model: opts.model,
+    },
+  );
 }
 
 async function callAnthropicSuggest(
   prompt: string,
-  opts: { apiKey: string; model: string },
+  opts: { apiKey: string; model: string; signal?: AbortSignal },
 ): Promise<SuggestCallResult> {
-  const res = await fetch(`${getAnthropicApiBase()}/v1/messages`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": opts.apiKey,
-      "anthropic-version": "2023-06-01",
+  const { withAiTimeout } = await import("./ai-request");
+  return withAiTimeout(
+    async (signal) => {
+      const res = await fetch(`${getAnthropicApiBase()}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": opts.apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: opts.model,
+          max_tokens: 8192,
+          temperature: 0.1,
+          messages: [{ role: "user", content: prompt }],
+        }),
+        signal,
+      });
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw new Error(
+          formatProviderHttpError(
+            "Anthropic",
+            res.status,
+            errText || res.statusText,
+          ),
+        );
+      }
+      const data = (await res.json()) as {
+        content?: { type?: string; text?: string }[];
+      };
+      const rawText = (data.content || [])
+        .filter((c) => c.type === "text")
+        .map((c) => c.text || "")
+        .join("");
+      return { parsed: parseJsonObject(rawText), rawText };
     },
-    body: JSON.stringify({
+    {
+      signal: opts.signal,
+      route: "suggest-tags.anthropic",
+      provider: "anthropic",
       model: opts.model,
-      max_tokens: 8192,
-      temperature: 0.1,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(
-      formatProviderHttpError(
-        "Anthropic",
-        res.status,
-        errText || res.statusText,
-      ),
-    );
-  }
-  const data = (await res.json()) as {
-    content?: { type?: string; text?: string }[];
-  };
-  const rawText = (data.content || [])
-    .filter((c) => c.type === "text")
-    .map((c) => c.text || "")
-    .join("");
-  return { parsed: parseJsonObject(rawText), rawText };
+    },
+  );
 }
 
 function normalizeRawSuggestions(
@@ -2065,6 +2104,7 @@ export async function suggestTemplateTags(
       model: geminiModel,
       docxBuffer: attachDocx ? buffer : undefined,
       filename,
+      signal: opts?.signal,
     });
   } else if (provider.apiFamily === "cursor") {
     const cursorKey = getCursorApiKey(apiKey);
@@ -2075,17 +2115,23 @@ export async function suggestTemplateTags(
       apiKey: cursorKey,
       model,
       signal: opts?.signal,
+      route: "suggest-tags.cursor",
     });
     callResult = {
       parsed,
       rawText: parsed ? JSON.stringify(parsed, null, 2) : "",
     };
   } else if (provider.apiFamily === "anthropic") {
-    callResult = await callAnthropicSuggest(prompt, { apiKey, model });
+    callResult = await callAnthropicSuggest(prompt, {
+      apiKey,
+      model,
+      signal: opts?.signal,
+    });
   } else {
     callResult = await callOpenAiSuggest(provider.id, prompt, {
       apiKey,
       model,
+      signal: opts?.signal,
     });
   }
 

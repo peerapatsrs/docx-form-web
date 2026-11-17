@@ -1,0 +1,154 @@
+{
+  "base": "http://127.0.0.1:3000",
+  "fixture": "/agent/repos/docx-form-web/fixtures/fill-form/docx-form-test-tagged.docx",
+  "checks": [
+    {
+      "name": "repeater skip default ≥44×44 @390",
+      "ok": true,
+      "detail": "{\"w\":44,\"h\":44,\"minW\":\"44px\",\"minH\":\"44px\",\"flexShrink\":\"0\"}"
+    },
+    {
+      "name": "repeater skip hover ≥44×44 @390",
+      "ok": true,
+      "detail": "{\"w\":44,\"h\":44,\"minW\":\"44px\",\"minH\":\"44px\",\"flexShrink\":\"0\"}"
+    },
+    {
+      "name": "repeater skip focus ≥44×44 @390",
+      "ok": true,
+      "detail": "{\"w\":44,\"h\":44,\"minW\":\"44px\",\"minH\":\"44px\",\"flexShrink\":\"0\"}"
+    },
+    {
+      "name": "repeater skip checked ≥44×44 @390",
+      "ok": true,
+      "detail": "{\"w\":48.4,\"h\":44,\"minW\":\"44px\",\"minH\":\"44px\",\"flexShrink\":\"0\"}"
+    },
+    {
+      "name": "repeater skip uses --tap-min @390",
+      "ok": true,
+      "detail": "{\"tokens\":{\"tapMin\":\"44px\"},\"default\":{\"w\":44,\"h\":44,\"minW\":\"44px\",\"minH\":\"44px\",\"flexShrink\":\"0\"}}"
+    },
+    {
+      "name": "field-level doc-skip still ≥54×44 @390",
+      "ok": true,
+      "detail": "{\"w\":302.8,\"h\":183.5,\"minW\":\"auto\",\"minH\":\"44px\",\"flexShrink\":\"0\"}"
+    },
+    {
+      "name": "repeater skip default ≥44×44 @1280",
+      "ok": true,
+      "detail": "{\"w\":44,\"h\":44,\"minW\":\"44px\",\"minH\":\"44px\",\"flexShrink\":\"0\"}"
+    },
+    {
+      "name": "repeater skip hover ≥44×44 @1280",
+      "ok": true,
+      "detail": "{\"w\":57.2,\"h\":44,\"minW\":\"44px\",\"minH\":\"44px\",\"flexShrink\":\"0\"}"
+    },
+    {
+      "name": "repeater skip focus ≥44×44 @1280",
+      "ok": true,
+      "detail": "{\"w\":57.2,\"h\":44,\"minW\":\"44px\",\"minH\":\"44px\",\"flexShrink\":\"0\"}"
+    },
+    {
+      "name": "repeater skip checked ≥44×44 @1280",
+      "ok": true,
+      "detail": "{\"w\":57.2,\"h\":44,\"minW\":\"44px\",\"minH\":\"44px\",\"flexShrink\":\"0\"}"
+    },
+    {
+      "name": "repeater skip uses --tap-min @1280",
+      "ok": true,
+      "detail": "{\"tokens\":{\"tapMin\":\"44px\"},\"default\":{\"w\":44,\"h\":44,\"minW\":\"44px\",\"minH\":\"44px\",\"flexShrink\":\"0\"}}"
+    },
+    {
+      "name": "field-level doc-skip still ≥54×44 @1280",
+      "ok": true,
+      "detail": "{\"w\":73.2,\"h\":44,\"minW\":\"auto\",\"minH\":\"44px\",\"flexShrink\":\"0\"}"
+    }
+  ],
+  "viewports": {
+    "390": {
+      "shot": "/agent/repos/docx-form-web/verify/screenshots/repeater-skip-tap/repeater-skip-390.png",
+      "states": {
+        "default": {
+          "w": 44,
+          "h": 44,
+          "minW": "44px",
+          "minH": "44px",
+          "flexShrink": "0"
+        },
+        "hover": {
+          "w": 44,
+          "h": 44,
+          "minW": "44px",
+          "minH": "44px",
+          "flexShrink": "0"
+        },
+        "focus": {
+          "w": 44,
+          "h": 44,
+          "minW": "44px",
+          "minH": "44px",
+          "flexShrink": "0"
+        },
+        "checked": {
+          "w": 48.4,
+          "h": 44,
+          "minW": "44px",
+          "minH": "44px",
+          "flexShrink": "0"
+        },
+        "fieldLevel": {
+          "w": 302.8,
+          "h": 183.5,
+          "minW": "auto",
+          "minH": "44px",
+          "flexShrink": "0"
+        },
+        "tokens": {
+          "tapMin": "44px"
+        }
+      }
+    },
+    "1280": {
+      "shot": "/agent/repos/docx-form-web/verify/screenshots/repeater-skip-tap/repeater-skip-1280.png",
+      "states": {
+        "default": {
+          "w": 44,
+          "h": 44,
+          "minW": "44px",
+          "minH": "44px",
+          "flexShrink": "0"
+        },
+        "hover": {
+          "w": 57.2,
+          "h": 44,
+          "minW": "44px",
+          "minH": "44px",
+          "flexShrink": "0"
+        },
+        "focus": {
+          "w": 57.2,
+          "h": 44,
+          "minW": "44px",
+          "minH": "44px",
+          "flexShrink": "0"
+        },
+        "checked": {
+          "w": 57.2,
+          "h": 44,
+          "minW": "44px",
+          "minH": "44px",
+          "flexShrink": "0"
+        },
+        "fieldLevel": {
+          "w": 73.2,
+          "h": 44,
+          "minW": "auto",
+          "minH": "44px",
+          "flexShrink": "0"
+        },
+        "tokens": {
+          "tapMin": "44px"
+        }
+      }
+    }
+  }
+}

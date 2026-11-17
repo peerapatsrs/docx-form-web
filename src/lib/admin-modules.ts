@@ -52,8 +52,8 @@ export const ADMIN_MODULES: AdminModule[] = [
   {
     id: "ai",
     href: "/admin/ai",
-    title: "AI / Gemini",
-    description: "โมเดลเริ่มต้นและสถานะคีย์",
+    title: "AI",
+    description: "โมเดลเริ่มต้นและสถานะคีย์เซิร์ฟเวอร์",
     group: "ระบบ",
     status: "live",
   },

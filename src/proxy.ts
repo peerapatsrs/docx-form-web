@@ -1,15 +1,26 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { getSessionCookie } from "better-auth/cookies";
 import {
   documentCacheControl,
   securityHeaders,
 } from "@/lib/security-headers";
-import { isDevAuthEnabled } from "@/lib/dev-auth-flag";
 import {
   buildSafeHttpsRedirectUrl,
   safeAppPathUrl,
 } from "@/lib/public-origin";
+import { isOidcEnabled } from "@/server/oidc-config";
+import {
+  hasSsoBypassQuery,
+  isTopLevelDocumentNavigation,
+  resolveSilentSsoStart,
+  stripSsoBypassParam,
+  safeAppReturnPath,
+  getOidcSsoCooldownSec,
+  parseOidcSsoHubOrigins,
+  OIDC_SSO_COOLDOWN_COOKIE,
+  isProtectedAppPath,
+} from "@/server/oidc-silent";
+import { resolveProxySession } from "@/server/oidc-session-edge";
 import { isLegacyHomeRedirectPath } from "@/lib/legacy-routes";
 
 function applySecurityHeaders(response: NextResponse): NextResponse {
@@ -17,12 +28,17 @@ function applySecurityHeaders(response: NextResponse): NextResponse {
   for (const [key, value] of Object.entries(headers)) {
     response.headers.set(key, value);
   }
-  // Do not advertise the application framework.
   response.headers.delete("x-powered-by");
   return response;
 }
 
-function isDocumentNavigation(request: NextRequest): boolean {
+function applySetCookies(response: NextResponse, cookies: string[]): void {
+  for (const c of cookies) {
+    response.headers.append("Set-Cookie", c);
+  }
+}
+
+function isHtmlishNavigation(request: NextRequest): boolean {
   const accept = request.headers.get("accept") || "";
   if (accept.includes("text/html")) return true;
   const { pathname } = request.nextUrl;
@@ -32,10 +48,6 @@ function isDocumentNavigation(request: NextRequest): boolean {
   return true;
 }
 
-/**
- * Presented host is used only for allowlist checks — never as the redirect
- * target. Prefer X-Forwarded-Host then Host for the check value alone.
- */
 function presentedHostForAllowlist(request: NextRequest): string {
   const raw =
     request.headers.get("x-forwarded-host") ||
@@ -45,12 +57,6 @@ function presentedHostForAllowlist(request: NextRequest): string {
   return raw.split(",")[0].trim();
 }
 
-/**
- * Behind Render (and similar), TLS terminates at the proxy. Honor
- * x-forwarded-proto so cleartext hops redirect to HTTPS instead of erroring.
- * Redirect target comes from APP_BASE_URL (etc.), not from Host headers.
- * Skip loopback / missing proto so container health checks stay on HTTP.
- */
 function maybeRedirectToHttps(request: NextRequest): NextResponse | null {
   const proto = (
     request.headers.get("x-forwarded-proto") ||
@@ -73,15 +79,16 @@ function maybeRedirectToHttps(request: NextRequest): NextResponse | null {
 }
 
 /**
- * Network boundary: HTTPS redirect, security headers, auth gates, and
- * production blocking of development-only auth paths.
- * Real auth/role checks still live in server layouts + /api/*.
+ * Network boundary: HTTPS redirect, security headers, auth gates, silent SSO.
+ * Silent/protected decisions use @mw-shared/auth rules via oidc-silent wrappers;
+ * session presence stays Better Auth HMAC (+ optional DB check).
  */
-export function proxy(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const httpsRedirect = maybeRedirectToHttps(request);
   if (httpsRedirect) return httpsRedirect;
 
   const { pathname } = request.nextUrl;
+  const search = request.nextUrl.search;
 
   if (isLegacyHomeRedirectPath(pathname)) {
     const home = new URL(safeAppPathUrl("/"));
@@ -89,35 +96,104 @@ export function proxy(request: NextRequest) {
     return applySecurityHeaders(NextResponse.redirect(home, 308));
   }
 
-  // Development-only Better Auth plugin paths — unavailable when disabled.
-  if (pathname.startsWith("/api/auth/dev")) {
-    if (!isDevAuthEnabled()) {
-      return applySecurityHeaders(new NextResponse(null, { status: 403 }));
-    }
+  if (
+    pathname.startsWith("/api/auth/dev") ||
+    pathname.startsWith("/api/dev/") ||
+    pathname === "/api/auth/passkey" ||
+    pathname.startsWith("/api/auth/passkey/")
+  ) {
+    return applySecurityHeaders(new NextResponse(null, { status: 404 }));
   }
 
-  const needsAuth =
-    pathname === "/account" ||
-    pathname.startsWith("/account/") ||
-    pathname === "/admin" ||
-    pathname.startsWith("/admin/");
+  const htmlish = isHtmlishNavigation(request);
+  const topLevelDoc = isTopLevelDocumentNavigation({
+    accept: request.headers.get("accept"),
+    secFetchDest: request.headers.get("sec-fetch-dest"),
+    secFetchMode: request.headers.get("sec-fetch-mode"),
+    rscHeader: request.headers.get("rsc"),
+    nextRouterPrefetch: request.headers.get("next-router-prefetch"),
+    purpose: request.headers.get("purpose"),
+    pathname,
+    search,
+  });
 
-  if (needsAuth) {
-    const token = getSessionCookie(request);
-    if (!token) {
-      // Build from configured public origin — do not trust request.url host.
-      const login = new URL(safeAppPathUrl("/login"));
-      login.searchParams.set("next", pathname);
-      const redirect = applySecurityHeaders(NextResponse.redirect(login, 307));
-      // Do not let shared caches store auth redirects for private surfaces.
+  // HMAC always; DB/session-API validation only on real top-level page loads.
+  const session = await resolveProxySession({
+    request,
+    validateInDb: topLevelDoc,
+  });
+  const hasSession = session.hasSession;
+
+  const decision = resolveSilentSsoStart({
+    pathname,
+    search,
+    hasSession,
+    cooldownCookie: request.cookies.get(OIDC_SSO_COOLDOWN_COOKIE)?.value,
+    cooldownSec: getOidcSsoCooldownSec(),
+    hubOrigins: parseOidcSsoHubOrigins(),
+    referer: request.headers.get("referer"),
+    oidcEnabled: isOidcEnabled(),
+    isDocumentNavigation: topLevelDoc,
+  });
+
+  if (decision.start) {
+    const returnTo = stripSsoBypassParam(safeAppReturnPath(pathname, search));
+    const silent = new URL(safeAppPathUrl("/api/auth/oidc/silent"));
+    silent.searchParams.set("next", returnTo);
+    if (decision.viaBypass) {
+      silent.searchParams.set("bypass", "1");
+    }
+    const redirect = applySecurityHeaders(NextResponse.redirect(silent, 307));
+    redirect.headers.set("Referrer-Policy", "no-referrer");
+    applySetCookies(redirect, session.clearCookies);
+    if (htmlish) {
       redirect.headers.set("Cache-Control", documentCacheControl(pathname));
+    }
+    return redirect;
+  }
+
+  // Refused or unused ?sso=1 — strip once so it does not stick in the address bar.
+  if (
+    topLevelDoc &&
+    (decision.stripSsoParam || hasSsoBypassQuery(search))
+  ) {
+    const current = safeAppReturnPath(pathname, search);
+    const stripped = stripSsoBypassParam(current);
+    if (stripped !== current) {
+      const redirect = applySecurityHeaders(
+        NextResponse.redirect(new URL(safeAppPathUrl(stripped)), 307),
+      );
+      applySetCookies(redirect, session.clearCookies);
+      if (htmlish) {
+        redirect.headers.set("Cache-Control", documentCacheControl(pathname));
+      }
       return redirect;
     }
   }
 
+  if (isProtectedAppPath(pathname) && !hasSession) {
+    const login = new URL(safeAppPathUrl("/login"));
+    login.searchParams.set(
+      "next",
+      stripSsoBypassParam(safeAppReturnPath(pathname, search)),
+    );
+    const redirect = applySecurityHeaders(NextResponse.redirect(login, 307));
+    applySetCookies(redirect, session.clearCookies);
+    redirect.headers.set("Cache-Control", documentCacheControl(pathname));
+    return redirect;
+  }
+
   const response = NextResponse.next();
   applySecurityHeaders(response);
-  if (isDocumentNavigation(request)) {
+  // Land hop must not leak Referer (module sets no-referrer; proxy must not override).
+  if (
+    pathname === "/api/auth/oidc/silent/land" ||
+    pathname.startsWith("/api/auth/oidc/silent/land/")
+  ) {
+    response.headers.set("Referrer-Policy", "no-referrer");
+  }
+  applySetCookies(response, session.clearCookies);
+  if (htmlish) {
     response.headers.set("Cache-Control", documentCacheControl(pathname));
   }
   return response;
@@ -125,10 +201,6 @@ export function proxy(request: NextRequest) {
 
 export const config = {
   matcher: [
-    /*
-     * Apply to all paths except Next internals and common static file extensions
-     * that are covered by long-lived asset caching in next.config.
-     */
     "/((?!_next/static|_next/image|.*\\.(?:ico|png|jpg|jpeg|gif|webp|svg|txt|xml|map)$).*)",
   ],
 };

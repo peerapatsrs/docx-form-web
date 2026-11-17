@@ -1,0 +1,4 @@
+# Historical unit-test JWT-shaped fixtures (not real secrets). Cannot rewrite
+# branch history (no force-push); fingerprints ignore those commits only.
+5da687b735cb12114457143ef0f5296494695012:scripts/oidc-only-login-unit-test.mjs:generic-api-key:288
+2484827847d6fb23a64bc7877a2ac5324dfb3b6f:scripts/oidc-sso-unit-test.mjs:generic-api-key:574

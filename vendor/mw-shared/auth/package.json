@@ -1,0 +1,69 @@
+{
+  "name": "@mw-shared/auth",
+  "version": "0.1.0",
+  "description": "Framework-agnostic Keycloak OIDC auth module for mw-shared consumers",
+  "type": "module",
+  "license": "UNLICENSED",
+  "private": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./adapters/nextjs": {
+      "types": "./dist/adapters/nextjs/index.d.ts",
+      "import": "./dist/adapters/nextjs/index.js"
+    },
+    "./adapters/sveltekit": {
+      "types": "./dist/adapters/sveltekit/index.d.ts",
+      "import": "./dist/adapters/sveltekit/index.js"
+    },
+    "./adapters/node-api": {
+      "types": "./dist/adapters/node-api/index.d.ts",
+      "import": "./dist/adapters/node-api/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "import": "./dist/testing/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:workerd": "vitest run --config vitest.workerd.config.ts",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "jose": "^6.2.17"
+  },
+  "peerDependencies": {
+    "better-auth": ">=1.0.0",
+    "next": ">=14.0.0"
+  },
+  "peerDependenciesMeta": {
+    "better-auth": {
+      "optional": true
+    },
+    "next": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251105.0",
+    "@types/node": "^22.19.0",
+    "miniflare": "^4.20251105.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "sideEffects": false
+}

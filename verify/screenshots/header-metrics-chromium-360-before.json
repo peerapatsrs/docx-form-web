@@ -1,0 +1,51 @@
+{
+  "scrollWidth": 360,
+  "clientWidth": 360,
+  "overflow": false,
+  "topbar": {
+    "x": 0,
+    "y": 0,
+    "width": 360,
+    "height": 48,
+    "text": "docx-formv0.1.0\n          \n            P\n            Peerapat Surasing\n            จ่ายแล้ว\n          \n          Admin\n          ออกจากระบบ\n        AI ยังไม่พร้อม · ยังไม่มีคีย์"
+  },
+  "brand": {
+    "x": 12,
+    "y": 8.65625,
+    "width": 57.296875,
+    "height": 29.671875,
+    "text": "docx-formv0.1.0"
+  },
+  "brandText": {
+    "x": 47.1875,
+    "y": 8.65625,
+    "width": 78.03125,
+    "height": 16.921875,
+    "text": "docx-form"
+  },
+  "brandVer": {
+    "x": 47.1875,
+    "y": 26.375,
+    "width": 78.03125,
+    "height": 11.953125,
+    "text": "v0.1.0"
+  },
+  "avatar": {
+    "x": -49.578125,
+    "y": 9.5,
+    "width": 28,
+    "height": 28,
+    "text": "P"
+  },
+  "name": {
+    "x": -17.578125,
+    "y": 14.5,
+    "width": 108,
+    "height": 17,
+    "text": "Peerapat Surasing"
+  },
+  "nameDecoration": "none",
+  "nameColor": "rgb(20, 36, 40)",
+  "userDecoration": "underline",
+  "menuOpen": false
+}

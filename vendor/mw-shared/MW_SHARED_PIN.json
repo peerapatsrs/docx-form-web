@@ -1,10 +1,10 @@
 {
   "repo": "https://github.com/peerapatsrs/mw-shared",
-  "commit": "426c398ea3db7735724905010890f4d7ba9c6274",
+  "commit": "674b58bd4b8573da737d2a095d70ca26d1997b73",
   "paths": [
     "auth/"
   ],
-  "snapshotted_at": "2026-11-17T23:22:54.324Z",
+  "snapshotted_at": "2026-11-17T23:53:33.140Z",
   "files": {
     "README.md": {
       "gitBlobSha": "vendored",
@@ -28,7 +28,7 @@
     },
     "auth/src/adapters/nextjs/index.ts": {
       "gitBlobSha": "vendored",
-      "sha256": "5cde11ac2f6de15a3823e552678c869aaa2fae34cb86946cfd1821feb011038a"
+      "sha256": "a2cebe6af3fd55c7e6ecd5c50f402e72391a10d0ac00b4d5d71aed73f97f3627"
     },
     "auth/src/adapters/node-api/index.ts": {
       "gitBlobSha": "vendored",
@@ -36,7 +36,7 @@
     },
     "auth/src/adapters/sveltekit/index.ts": {
       "gitBlobSha": "vendored",
-      "sha256": "da1406a04f33134181a774359a604729aa51c8e988b5ad22c89a718b5520eeb0"
+      "sha256": "c3433f7aef52d6992721172ba8d3c05d5515bb868c0ac25ce575b2785b6cb9a0"
     },
     "auth/src/core/authorize.ts": {
       "gitBlobSha": "vendored",
@@ -48,11 +48,11 @@
     },
     "auth/src/core/config.ts": {
       "gitBlobSha": "vendored",
-      "sha256": "5acfee8cf19376523f2ca004e21a07d7142c3f3ef6235edab96a22d2e9cbdf00"
+      "sha256": "3df46b624209bd2abe23dcbc1169219a0ddf39f8808cf6be1d11937a26d560dc"
     },
     "auth/src/core/cookies.ts": {
       "gitBlobSha": "vendored",
-      "sha256": "3994b14c0a114dbeaf9cea508ad28f3798d3ea37f6b3e9d8473a8919e2a633a2"
+      "sha256": "88400cdfcfa814f40d58e5d74199a4ec9d89a7acea21180dccf858b55f1c55b9"
     },
     "auth/src/core/crypto.ts": {
       "gitBlobSha": "vendored",
@@ -72,7 +72,7 @@
     },
     "auth/src/core/index.ts": {
       "gitBlobSha": "vendored",
-      "sha256": "cb26a2deae897988bf11da942f5a94f70fa54dafb060fc9e9b92d40b3dec3d6b"
+      "sha256": "e6b24a29dba1d6e5aa36ed166a63fdfe04b1cfb6314c85b167adbaaf90de961d"
     },
     "auth/src/core/interfaces.ts": {
       "gitBlobSha": "vendored",
@@ -136,7 +136,7 @@
     },
     "auth/tests/adapters.test.ts": {
       "gitBlobSha": "vendored",
-      "sha256": "4dd71ae771a60260978d65e8a12567f0c7c7644bcd29e062d6db25d1d88d561e"
+      "sha256": "1433172f338a845c06f6c972d01dd031a503f2ab361a4cd1bacf87b04796382e"
     },
     "auth/tests/backchannel.test.ts": {
       "gitBlobSha": "vendored",
@@ -148,7 +148,11 @@
     },
     "auth/tests/config.test.ts": {
       "gitBlobSha": "vendored",
-      "sha256": "11edcd59e6f2747cdb88c94eeb0c39772ef3f2cb5a4430291d0db2f0db6dfc0a"
+      "sha256": "bae2ec7081bdf7a1abad8c9573048973d45423f938313b7081246207911133e6"
+    },
+    "auth/tests/cookies.test.ts": {
+      "gitBlobSha": "vendored",
+      "sha256": "b54752d91a9ea6ea6474ef073ba5262b77db11789135a5c3c853a0d90e6967cf"
     },
     "auth/tests/helpers.ts": {
       "gitBlobSha": "vendored",

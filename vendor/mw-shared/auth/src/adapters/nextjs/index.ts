@@ -8,7 +8,7 @@
  */
 import type { MwAuthClient } from "../../core/client.js";
 import { toWebResponse, readFormOrJson } from "../../core/http.js";
-import { readCookie } from "../../core/cookies.js";
+import { readCookie, withClearCookies } from "../../core/cookies.js";
 import {
   hasSsoBypassQuery,
   safeReturnTo,
@@ -205,19 +205,21 @@ export async function handleNextAuthProxy(
       Location: `${silentUrl.pathname}${silentUrl.search}`,
       "Referrer-Policy": "no-referrer",
     });
-    for (const c of session.clearCookies) {
-      // clearCookies applied by caller via toWebResponse when needed
-      void c;
-    }
-    return new Response(null, { status: 307, headers });
+    return withClearCookies(
+      new Response(null, { status: 307, headers }),
+      session.clearCookies,
+    );
   }
 
   if (decision.stripSsoParam && hasSsoBypassQuery(url.search)) {
     const stripped = stripSsoBypassParam(`${url.pathname}${url.search}`);
-    return new Response(null, {
-      status: 307,
-      headers: { Location: stripped },
-    });
+    return withClearCookies(
+      new Response(null, {
+        status: 307,
+        headers: { Location: stripped },
+      }),
+      session.clearCookies,
+    );
   }
 
   if (
@@ -229,12 +231,15 @@ export async function handleNextAuthProxy(
       "/",
       client.config.publicOrigin,
     );
-    return new Response(null, {
-      status: 307,
-      headers: {
-        Location: `${loginPath}?next=${encodeURIComponent(next)}`,
-      },
-    });
+    return withClearCookies(
+      new Response(null, {
+        status: 307,
+        headers: {
+          Location: `${loginPath}?next=${encodeURIComponent(next)}`,
+        },
+      }),
+      session.clearCookies,
+    );
   }
 
   return null;

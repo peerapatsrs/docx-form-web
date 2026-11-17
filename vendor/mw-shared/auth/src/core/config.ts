@@ -55,16 +55,28 @@ function joinOriginPath(origin: string, path: string): string {
   return `${base}${p}`;
 }
 
+/**
+ * Normalize hub origin allowlist entries.
+ * Accept only absolute http(s) origins; skip `javascript:`, `data:`, and other
+ * schemes whose URL.origin is the string "null".
+ */
 export function normalizeHubOrigins(raw: string[] | undefined): string[] {
   if (!raw || raw.length === 0) return [];
   const out: string[] = [];
+  const seen = new Set<string>();
   for (const item of raw) {
     const trimmed = String(item || "")
       .trim()
       .replace(/\/$/, "");
     if (!trimmed) continue;
     try {
-      out.push(new URL(trimmed).origin);
+      const u = new URL(trimmed);
+      if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+      const origin = u.origin;
+      if (!origin || origin === "null") continue;
+      if (seen.has(origin)) continue;
+      seen.add(origin);
+      out.push(origin);
     } catch {
       // skip invalid
     }

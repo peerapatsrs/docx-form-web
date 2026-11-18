@@ -264,8 +264,8 @@ export function stripJunkNumericSuffix(name: string): string {
 }
 
 /**
- * Reject OCR/garbled identifiers with short repeated syllables
- * with almost no unique content.
+ * Reject OCR/garbled identifiers: short repeated syllables, duplicated tokens,
+ * or a token repeated inside a part (near-duplication).
  */
 export function looksLikeGarbledName(name: string): boolean {
   const s = String(name || "").normalize("NFC").trim();
@@ -280,7 +280,67 @@ export function looksLikeGarbledName(name: string): boolean {
     const uniq = new Set([...joined]);
     if (uniq.size <= 2) return true;
   }
+  // Exact or near-duplicate tokens across parts (e.g. foo_foo, ที่_ทัที่).
+  for (let i = 0; i < parts.length; i += 1) {
+    const a = parts[i]!;
+    for (let j = i + 1; j < parts.length; j += 1) {
+      const b = parts[j]!;
+      if (a === b && a.length >= 2) return true;
+      if (a.length >= 3 && b.length >= 3) {
+        if (a.includes(b) || b.includes(a)) return true;
+      }
+    }
+    // Repeated chunk inside one token (bounded — no catastrophic backtracking).
+    if (a.length >= 4 && a.length <= 48) {
+      for (let n = 2; n <= Math.min(8, Math.floor(a.length / 2)); n += 1) {
+        const chunk = a.slice(0, n);
+        if (chunk && a.slice(n, n + n) === chunk) return true;
+      }
+    }
+  }
   return false;
+}
+
+/** True when a candidate variable name equals the source cell/value text. */
+export function nameEqualsSourceValue(name: string, sourceValue: string): boolean {
+  const n = String(name || "").normalize("NFC").trim();
+  const v = String(sourceValue || "").normalize("NFC").trim();
+  if (!n || !v) return false;
+  if (n === v) return true;
+  const nv = sanitizeName(v);
+  const na = sanitizeNameAscii(v);
+  return (!!nv && n === nv) || (!!na && n === na);
+}
+
+/** Fill-in values (amounts, names, ids) vs short captions used as demoted fields. */
+export function looksLikeFillValue(plain: string): boolean {
+  const t = String(plain || "").normalize("NFC").trim();
+  if (!t) return false;
+  if (t.length >= 16) return true;
+  if (/\d/.test(t)) return true;
+  if (/@/.test(t)) return true;
+  if (/\s/.test(t) && t.length >= 8) return true;
+  // CamelCase / mixed Latin sample tokens (e.g. AlphaWidget).
+  if (/[A-Za-z]{3,}/.test(t) && /[a-z]/.test(t) && /[A-Z]/.test(t)) return true;
+  return false;
+}
+
+/**
+ * Name from header/label only — never from cell/sample content.
+ * Returns null when nothing usable remains.
+ */
+export function nameFromHeaderOrLabel(
+  header: string | null | undefined,
+  label: string | null | undefined,
+  lang: AiTagNameLanguage,
+  sourceValue?: string | null,
+): string | null {
+  const raw = String(header || "").trim() || String(label || "").trim();
+  if (!raw) return null;
+  const n = resolveVarName(raw, lang);
+  if (!n || looksLikeGarbledName(n)) return null;
+  if (sourceValue && nameEqualsSourceValue(n, sourceValue)) return null;
+  return n;
 }
 
 /**
@@ -1274,7 +1334,7 @@ function pickOccurrenceOrder(
 /**
  * Field replace may nest fully inside a soft wrap span; anything else colliding is unsafe.
  * Reject fields that consume the entire wrap span — that fights the list prototype
- * (e.g. tagging the whole 「จำเลยที่ 1 …」block as one scalar instead of {{#list}}).
+ * (e.g. tagging a whole numbered party block as one scalar instead of {{#list}}).
  */
 function fieldSpanAllowed(
   start: number,
@@ -1502,7 +1562,11 @@ function inferSampleFieldKind(
   return "text";
 }
 
-/** Prefer a readable list name from prototype column headers / sample cells. */
+/**
+ * Prefer a readable list name from column headers only (never sample cell text).
+ * Skip the first header when multiple exist — it is often an ordinal / typo that
+ * would collide with an inner field name.
+ */
 function inventListTableName(
   samples: TableSampleCellHint[],
   empties: TableEmptyCellHint[],
@@ -1510,37 +1574,32 @@ function inventListTableName(
   lang: AiTagNameLanguage,
 ): string {
   const headers = [...samples, ...empties]
-    .map((h) => h.header)
+    .map((h) => String(h.header || "").trim())
     .filter((h) => !!h);
-  if (lang === "en") {
-    const fromHeaders = headers
-      .map((h) => resolveVarName(h, "en"))
-      .filter((h) => h && h.length >= 2)
-      .slice(0, 2);
-    if (fromHeaders.length) {
-      return sanitizeNameAscii(fromHeaders.join("_")).slice(0, 40) || `loop_${tableIndex + 1}`;
-    }
-    const cell = resolveVarName(String(samples[0]?.cellText || "").slice(0, 24), "en");
-    if (cell) return sanitizeNameAscii(`rows_${cell}`).slice(0, 40);
-    return `loop_${tableIndex + 1}`;
+  const unique: string[] = [];
+  for (const h of headers) {
+    if (!unique.includes(h)) unique.push(h);
   }
-  const fromHeaders = headers
-    .map((h) => resolveVarName(h, "th"))
-    .filter((h) => h && h.length >= 2)
+  // Prefer headers after the first when several columns exist.
+  const stemSrc = unique.length > 1 ? unique.slice(1) : unique;
+  const fromHeaders = stemSrc
+    .map((h) => resolveVarName(h, lang))
+    .filter((h) => h && h.length >= 2 && !looksLikeGarbledName(h))
     .slice(0, 2);
+  if (lang === "en") {
+    if (fromHeaders.length) {
+      const joined = sanitizeNameAscii(fromHeaders.join("_")).slice(0, 40);
+      if (joined && !looksLikeGarbledName(joined)) return joined;
+    }
+    return "rows";
+  }
   if (fromHeaders.length) {
     const joined = sanitizeName(fromHeaders.join("_")).slice(0, 40);
-    if (joined) {
-      return joined.startsWith("รายการ")
-        ? joined
-        : sanitizeName(`รายการ_${joined}`).slice(0, 40);
-    }
+    if (joined && !looksLikeGarbledName(joined)) return joined;
   }
-  const cellRaw = String(samples[0]?.cellText || "").trim();
-  const cell = resolveVarName(cellRaw.slice(0, 24), "th");
-  if (cell && !/^\d+$/.test(cell)) return sanitizeName(`รายการ_${cell}`).slice(0, 40);
-  // Last resort structural index only when no header/cell context exists.
-  return `loop_${tableIndex + 1}`;
+  // Structural fallback only — no cell content, no numbered suffixes.
+  void tableIndex;
+  return "รายการ";
 }
 
 /** True when [start,end) lies fully inside a first-data/prototype table row. */
@@ -1618,8 +1677,6 @@ function valueAppearsInPrototypeRows(
 /**
  * Structural cell-shape for a table row (empty / short-int / amount / bool / text).
  * Used to tell sample clones from distinct fixed rows without keyword lists.
- * Text cells encode leading-ordinal + remaining digit-run count + length bucket
- * so a single-cell sample ("1…1200…") does not collide with a totals line.
  */
 export function tableRowShapeSignature(
   cells: ReadonlyArray<{ text: string }>,
@@ -1654,9 +1711,96 @@ export function tableRowsSameSampleShape(
   return /[NBATS]/.test(sa);
 }
 
+export function countFilledCells(
+  cells: ReadonlyArray<{ text: string }>,
+): number {
+  return cells.filter((c) => String(c.text ?? "").trim().length > 0).length;
+}
+
 /**
- * Distinct non-prototype rows (different shape) may host unique fill values
- * (totals, fixed labels). Keyword-free: shape mismatch vs prototype.
+ * Summary-like row: fewer filled cells and a spanning/merged label, at table end.
+ * Keyword-free structural test (no totals word lists).
+ */
+export function isSummaryLikeRow(
+  proto: ReadonlyArray<{ text: string }>,
+  row: ReadonlyArray<{ text: string }>,
+  opts: { isAtTableEnd: boolean },
+): boolean {
+  if (!opts.isAtTableEnd) return false;
+  const pf = countFilledCells(proto);
+  const rf = countFilledCells(row);
+  if (!(rf > 0 && rf < pf) && !(row.length > 0 && row.length < proto.length)) {
+    return false;
+  }
+  const filled = row.filter((c) => String(c.text ?? "").trim());
+  // Merged/spanning label: one dominant label cell, or label + amount only.
+  return (
+    filled.length === 1 ||
+    (filled.length <= 2 && rf <= Math.max(1, pf - 1))
+  );
+}
+
+/**
+ * True when a later row still looks like a sample clone (shared values, continuing
+ * ordinals, or similar fill density with digits) — even if the coarse shape differs.
+ */
+export function rowHasSampleLikeValues(
+  proto: ReadonlyArray<{ text: string }>,
+  row: ReadonlyArray<{ text: string }>,
+): boolean {
+  const protoVals = new Set(
+    proto.map((c) => String(c.text ?? "").trim()).filter((t) => t.length > 0),
+  );
+  let digitLike = 0;
+  for (const c of row) {
+    const t = String(c.text ?? "").trim();
+    if (!t) continue;
+    if (protoVals.has(t)) return true;
+    if (
+      /^\d{1,4}$/.test(t) ||
+      /^\d{1,3}([.,]\d{3})+([.,]\d+)?$/.test(t) ||
+      /^\d{4,}$/.test(t)
+    ) {
+      digitLike += 1;
+    }
+  }
+  const protoDig = proto.find((c) => /^\d{1,4}$/.test(String(c.text ?? "").trim()));
+  const rowDig = row.find((c) => /^\d{1,4}$/.test(String(c.text ?? "").trim()));
+  if (protoDig && rowDig) {
+    const a = Number(String(protoDig.text).trim());
+    const b = Number(String(rowDig.text).trim());
+    if (Number.isFinite(a) && Number.isFinite(b) && a !== b) return true;
+  }
+  if (
+    countFilledCells(row) >= Math.max(2, countFilledCells(proto) - 1) &&
+    digitLike >= 1
+  ) {
+    return true;
+  }
+  return tableRowsSameSampleShape(proto, row);
+}
+
+/**
+ * Delete every later data row except summary-like rows, and except distinct fixed
+ * rows that carry no sample-like values.
+ */
+export function shouldDeleteLaterSampleRow(
+  proto: ReadonlyArray<{ text: string }>,
+  row: ReadonlyArray<{ text: string }>,
+  opts: { isAtTableEnd: boolean },
+): boolean {
+  if (isSummaryLikeRow(proto, row, opts)) return false;
+  if (
+    !rowHasSampleLikeValues(proto, row) &&
+    !tableRowsSameSampleShape(proto, row)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Kept later rows (summary / distinct fixed) may host unique fill values.
  */
 function isDistinctNonSampleTableField(
   xml: string,
@@ -1681,7 +1825,12 @@ function isDistinctNonSampleTableField(
       r.rowIndexInTable === proto.rowIndexInTable,
   );
   if (!protoRow) return false;
-  return !tableRowsSameSampleShape(protoRow.cells, hit.cells);
+  const tableRows = allDataRows.filter((r) => r.tableIndex === hit.tableIndex);
+  const maxRi = Math.max(...tableRows.map((r) => r.rowIndexInTable));
+  // Tagable when we would KEEP the row (not delete it).
+  return !shouldDeleteLaterSampleRow(protoRow.cells, hit.cells, {
+    isAtTableEnd: hit.rowIndexInTable === maxRi,
+  });
 }
 
 /**
@@ -1799,7 +1948,7 @@ export function validateAiTagSuggestions(
     }
   }
 
-  // Seed paragraph-list wraps for consecutive numbered prose blocks (จำเลยที่ 1/2/3).
+  // Seed paragraph-list wraps for consecutive numbered prose blocks.
   // Prepend so first-unit seeds win over over-wide model wraps (stable sort keeps
   // earlier equal-rank wraps). Soft-occupy prototype + hard-occupy later units.
   if (xml && paraListHints.length) {
@@ -1898,7 +2047,21 @@ export function validateAiTagSuggestions(
       anchorLabel,
       [headerHintEarly].filter(Boolean),
     );
-    const baseName = resolveVarName(nameSource || anchorLabel, lang);
+    // Prefer contextual model/label names; never keep a name that equals the
+    // fill-in VALUE (use header/label instead). Short captions may equal name.
+    let baseName = resolveVarName(nameSource || anchorLabel || headerHintEarly, lang);
+    if (!baseName || looksLikeGarbledName(baseName)) {
+      baseName =
+        nameFromHeaderOrLabel(headerHintEarly, anchorLabel, lang, plain) || "";
+    }
+    if (!isListKind(kind) && looksLikeFillValue(plain)) {
+      if (baseName && nameEqualsSourceValue(baseName, plain)) {
+        baseName =
+          nameFromHeaderOrLabel(headerHintEarly, anchorLabel, lang, plain) || "";
+      }
+      if (!baseName || nameEqualsSourceValue(baseName, plain)) continue;
+    }
+    if (!baseName || looksLikeGarbledName(baseName)) continue;
     const name = uniqueName(
       baseName,
       usedNames,
@@ -1906,6 +2069,13 @@ export function validateAiTagSuggestions(
       lang,
     );
     if (!name) continue;
+    if (
+      !isListKind(kind) &&
+      looksLikeFillValue(plain) &&
+      nameEqualsSourceValue(name, plain)
+    ) {
+      continue;
+    }
 
     const boolArms =
       kind === "bool"
@@ -2236,10 +2406,9 @@ export function validateAiTagSuggestions(
       const parent = findParentWrap(softWraps, hint.plainStart, hint.plainEnd);
       if (!parent) continue;
       const baseName =
-        resolveVarName(hint.header, lang) ||
-        (lang === "en"
-          ? `col_${hint.cellIndex}`
-          : `คอลัมน์_${hint.cellIndex + 1}`);
+        nameFromHeaderOrLabel(hint.header, null, lang, null) ||
+        (parent.name ? (lang === "en" ? "value" : "ค่า") : null);
+      if (!baseName) continue;
       const name = uniqueName(
         baseName,
         usedNames,
@@ -2296,18 +2465,16 @@ export function validateAiTagSuggestions(
         isRunColumn: isRunCol(hint.tableIndex, hint.cellIndex),
       });
       const baseName =
-        resolveVarName(hint.header, lang) ||
-        resolveVarName(hint.cellText, lang) ||
-        (lang === "en"
-          ? `col_${hint.cellIndex}`
-          : `คอลัมน์_${hint.cellIndex + 1}`);
+        nameFromHeaderOrLabel(hint.header, null, lang, hint.cellText) ||
+        (parent.name ? (lang === "en" ? "value" : "ค่า") : null);
+      if (!baseName) continue;
       const name = uniqueName(
         baseName,
         usedNames,
         [hint.header, parent.name].filter(Boolean),
         lang,
       );
-      if (!name) continue;
+      if (!name || nameEqualsSourceValue(name, hint.cellText)) continue;
       const boolArms =
         fieldKind === "bool"
           ? normalizeBoolArms(hint.cellText || DEFAULT_BOOL_TRUE_TEXT, "")
@@ -2390,16 +2557,16 @@ export function validateAiTagSuggestions(
             })
           : "text";
         const baseName =
-          resolveVarName(hint.header, lang) ||
-          resolveVarName(sampleText, lang) ||
-          (lang === "en" ? `col_${hint.cellIndex}` : `คอลัมน์_${hint.cellIndex + 1}`);
+          nameFromHeaderOrLabel(hint.header, null, lang, sampleText || null) ||
+          (parent.name ? (lang === "en" ? "value" : "ค่า") : null);
+        if (!baseName) continue;
         const name = uniqueName(
           baseName,
           usedNames,
           [hint.header, parent.name].filter(Boolean),
           lang,
         );
-        if (!name) continue;
+        if (!name || (sampleText && nameEqualsSourceValue(name, sampleText))) continue;
         const boolArms =
           fieldKind === "bool"
             ? normalizeBoolArms(sampleText || DEFAULT_BOOL_TRUE_TEXT, "")
@@ -2460,9 +2627,8 @@ export function validateAiTagSuggestions(
     }
   }
 
-  // After list-table wraps: delete leftover SAMPLE rows (same structural shape
-  // as the prototype). Distinct-shape rows (totals / fixed labels) are kept and
-  // may be tagged below.
+  // After list-table wraps: delete every later row except summary-like / distinct
+  // fixed rows with no sample-like values (a91af7a behavior, structural).
   if (xml && usedPrototypeTables.size) {
     const protoRowByTable = new Map(
       prototypes.map((pr) => [pr.tableIndex, pr.rowIndexInTable]),
@@ -2477,8 +2643,15 @@ export function validateAiTagSuggestions(
           r.tableIndex === row.tableIndex && r.rowIndexInTable === protoRi,
       );
       if (!protoRow) continue;
-      // Different shape → fixed/total row — do not delete.
-      if (!tableRowsSameSampleShape(protoRow.cells, row.cells)) continue;
+      const tableRows = allDataRows.filter((r) => r.tableIndex === row.tableIndex);
+      const maxRi = Math.max(...tableRows.map((r) => r.rowIndexInTable));
+      if (
+        !shouldDeleteLaterSampleRow(protoRow.cells, row.cells, {
+          isAtTableEnd: row.rowIndexInTable === maxRi,
+        })
+      ) {
+        continue;
+      }
       const rowText = plainText.slice(row.plainStart, row.plainEnd);
       out.push({
         plainText: row.rowAnchor || rowText.slice(0, 80) || `row_${row.rowIndexInTable}`,
@@ -2494,21 +2667,34 @@ export function validateAiTagSuggestions(
     }
   }
 
-  // Tag unique amounts / fill values on distinct-shape (non-sample) table rows.
-  // Uses XML prototypes even when the model omitted/rejected the wrap so totals
-  // and baht-text on fixed rows still get coverage.
+  // Tag unique amounts / fill values on kept later rows (summary / distinct fixed).
   if (xml && prototypes.length && out.length < MAX_SUGGESTIONS + CONTACT_ENRICH_SLACK) {
     const protoRowByTable = new Map(
       prototypes.map((pr) => [pr.tableIndex, pr.rowIndexInTable]),
     );
+    const deletedKeys = new Set(
+      out
+        .filter((s) => s.mode === "delete-tr")
+        .map((s) => `${s.tableIndex}:${s.rowIndexInTable}`),
+    );
     for (const row of allDataRows) {
       const protoRi = protoRowByTable.get(row.tableIndex);
       if (typeof protoRi !== "number" || row.rowIndexInTable <= protoRi) continue;
+      if (deletedKeys.has(`${row.tableIndex}:${row.rowIndexInTable}`)) continue;
       const protoRow = allDataRows.find(
         (r) =>
           r.tableIndex === row.tableIndex && r.rowIndexInTable === protoRi,
       );
-      if (!protoRow || tableRowsSameSampleShape(protoRow.cells, row.cells)) continue;
+      if (!protoRow) continue;
+      const tableRows = allDataRows.filter((r) => r.tableIndex === row.tableIndex);
+      const maxRi = Math.max(...tableRows.map((r) => r.rowIndexInTable));
+      if (
+        shouldDeleteLaterSampleRow(protoRow.cells, row.cells, {
+          isAtTableEnd: row.rowIndexInTable === maxRi,
+        })
+      ) {
+        continue;
+      }
       for (let ci = 0; ci < row.cells.length; ci += 1) {
         if (out.length >= MAX_SUGGESTIONS + CONTACT_ENRICH_SLACK) break;
         const cellText = String(row.cells[ci]?.text || "").trim();
@@ -2522,12 +2708,31 @@ export function validateAiTagSuggestions(
         );
         if (!loc || !fieldSpanAllowed(loc.start, loc.end, occupied)) continue;
         const header = row.headers[ci] || "";
-        const baseName =
-          resolveVarName(header, lang) ||
-          resolveVarName(cellText.slice(0, 24), lang) ||
-          (lang === "en" ? `extra_${ci}` : `เพิ่มเติม_${ci + 1}`);
-        const name = uniqueName(baseName, usedNames, [header].filter(Boolean), lang);
-        if (!name) continue;
+        // Prefer this column header; if empty, a non-empty sibling header on the row.
+        const labelFallback =
+          row.headers.find((h) => String(h || "").trim()) || "";
+        let baseName = nameFromHeaderOrLabel(header, labelFallback, lang, cellText);
+        // Structural disambiguation when two cells share one header: digits vs letters.
+        if (baseName && /^\d[\d,.\s]*$/.test(cellText)) {
+          /* keep header name for amount */
+        } else if (baseName && !/\d/.test(cellText) && cellText.length >= 8) {
+          const alt = uniqueName(
+            lang === "en" ? `${baseName}_text` : `${baseName}_ข้อความ`,
+            usedNames,
+            [header, labelFallback].filter(Boolean),
+            lang,
+          );
+          if (alt && !nameEqualsSourceValue(alt, cellText)) baseName = alt;
+        }
+        if (!baseName) continue;
+        if (nameEqualsSourceValue(baseName, cellText)) continue;
+        const name = uniqueName(
+          baseName,
+          usedNames,
+          [header, labelFallback].filter(Boolean),
+          lang,
+        );
+        if (!name || nameEqualsSourceValue(name, cellText)) continue;
         const tag = buildTag("text", name, "", "");
         if (validateTag(tag)) continue;
         usedNames.add(name);
@@ -2554,6 +2759,9 @@ export function validateAiTagSuggestions(
   // Structural label→value pairs (tabs / multi-space), incl. letterhead addresses.
   enrichLabelFollowedValuesFromPlain(plainText, out, occupied, usedNames, lang);
 
+  // One checkbox glyph pair per document.
+  unifyDocumentBoolArms(out);
+
   out.sort((a, b) => {
     // Apply deletes after wraps/fields at the same locus; stable by plainStart.
     if (a.plainStart !== b.plainStart) return a.plainStart - b.plainStart;
@@ -2566,6 +2774,18 @@ export function validateAiTagSuggestions(
     return ac - bc;
   });
   return out;
+}
+
+/** Force every bool suggestion to share one true/false glyph pair. */
+export function unifyDocumentBoolArms(suggestions: AiTagSuggestion[]): void {
+  const bools = suggestions.filter((s) => s.kind === "bool");
+  if (!bools.length) return;
+  const pair = normalizeBoolArms(bools[0]!.trueText, bools[0]!.falseText);
+  for (const s of bools) {
+    s.trueText = pair.trueText;
+    s.falseText = pair.falseText;
+    s.tag = buildTag("bool", s.name, pair.trueText, pair.falseText);
+  }
 }
 
 /**
@@ -2677,11 +2897,18 @@ function enrichLabelFollowedValuesFromPlain(
 ): void {
   if (!plainText) return;
   const softMax = MAX_SUGGESTIONS + CONTACT_ENRICH_SLACK;
+  // Bounded classes — avoid nested unbounded quantifiers / catastrophic backtracking.
   const re =
-    /(^|[\n\r])([^\t\n\r]{2,28})([\t \u00A0]{2,}|\t+)([^\t\n\r]{3,96})/gu;
+    /(^|[\n\r])([^\t\n\r]{2,28})([\t \u00A0]{2,8}|\t+)([^\t\n\r]{3,96})/gu;
   let m: RegExpExecArray | null;
+  let guard = 0;
+  const maxHits = 400;
   while ((m = re.exec(plainText)) !== null) {
+    guard += 1;
+    if (guard > maxHits) break;
     if (out.length >= softMax) break;
+    // Advance lastIndex defensively if the engine stalled.
+    if (m.index === re.lastIndex) re.lastIndex += 1;
     const label = String(m[2] || "").trim();
     const value = String(m[4] || "").trim();
     if (!label || !value) continue;
@@ -2699,12 +2926,10 @@ function enrichLabelFollowedValuesFromPlain(
     if (!fieldSpanAllowed(start, end, occupied)) continue;
     if (!plainDigitMatchAllowed(plainText, start, value)) continue;
     if (!plainValueTailOk(plainText, start, value)) continue;
-    const base =
-      resolveVarName(label, lang) ||
-      resolveVarName(value.slice(0, 24), lang) ||
-      (lang === "en" ? "field" : "ฟิลด์");
+    const base = nameFromHeaderOrLabel(label, null, lang, value);
+    if (!base) continue;
     const name = uniqueName(base, usedNames, [label], lang);
-    if (!name) continue;
+    if (!name || nameEqualsSourceValue(name, value)) continue;
     const tag = buildTag("text", name, "", "");
     if (validateTag(tag)) continue;
     const allStarts = findOccurrenceStarts(plainText, value);
@@ -2724,9 +2949,30 @@ function enrichLabelFollowedValuesFromPlain(
   }
 }
 
-/** 0 disables chunking. Default ~120k chars of TAGGER_PLAIN per provider call. */
+/** Count label-followed fillable static runs (whole-document coverage). */
+export function countLabelFollowedFillables(plainText: string): number {
+  if (!plainText) return 0;
+  const re =
+    /(^|[\n\r])([^\t\n\r]{2,28})([\t \u00A0]{2,8}|\t+)([^\t\n\r]{3,96})/gu;
+  let n = 0;
+  let m: RegExpExecArray | null;
+  let guard = 0;
+  while ((m = re.exec(plainText)) !== null && guard < 500) {
+    guard += 1;
+    if (m.index === re.lastIndex) re.lastIndex += 1;
+    const label = String(m[2] || "").trim();
+    const value = String(m[4] || "").trim();
+    if (!label || !value || value.length <= label.length) continue;
+    if (/^[✓√✔☑☐□☒×✖.\-–—]+$/u.test(value)) continue;
+    n += 1;
+  }
+  return n;
+}
+
+/** 0 disables chunking. Smaller default cuts 90s timeouts on large docs. */
 export const AI_SUGGEST_CHUNK_CHARS_ENV = "DOCX_FORM_AI_SUGGEST_CHUNK_CHARS";
-export const DEFAULT_AI_SUGGEST_CHUNK_CHARS = 120_000;
+export const DEFAULT_AI_SUGGEST_CHUNK_CHARS = 40_000;
+export const AI_SUGGEST_CHUNK_CONCURRENCY = 2;
 
 export function getAiSuggestChunkChars(): number {
   const raw = String(process.env[AI_SUGGEST_CHUNK_CHARS_ENV] || "").trim();
@@ -2849,6 +3095,7 @@ export function estimateSuggestCoverage(
   const emptyHints = xml ? listEmptyTableCellHints(xml) : [];
   const paraHints = xml ? listParagraphListHints(xml) : [];
   const prototypes = xml ? listPrototypeTableRowSpans(xml) : [];
+  // Whole document: tables + paragraph lists + label-followed static runs + contacts.
   let expected =
     sampleHints.length + emptyHints.length + prototypes.length + paraHints.length;
   for (const h of paraHints) {
@@ -2860,12 +3107,8 @@ export function estimateSuggestCoverage(
     /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g,
   );
   if (emailHits) expected += Math.min(4, emailHits.length);
-  // Label-followed blanks (tabs / multi-space) — letterhead, case nos, addresses.
-  const labelFollowHits = String(plainText || "").match(
-    /(^|[\n\r])[^\t\n\r]{2,28}([\t \u00A0]{2,}|\t+)[^\t\n\r]{3,96}/gu,
-  );
-  if (labelFollowHits) expected += Math.min(12, labelFollowHits.length);
-  // Distinct-shape amount cells (non-sample rows) — at least one per such row.
+  expected += Math.min(16, countLabelFollowedFillables(plainText));
+  // Kept later rows (summary / distinct fixed) — at least one fill per such row.
   if (xml) {
     const allRows = listAllDataTableRows(xml);
     for (const p of prototypes) {
@@ -2873,20 +3116,47 @@ export function estimateSuggestCoverage(
         (r) => r.tableIndex === p.tableIndex && r.rowIndexInTable === p.rowIndexInTable,
       );
       if (!proto) continue;
-      for (const row of allRows) {
-        if (row.tableIndex !== p.tableIndex) continue;
+      const tableRows = allRows.filter((r) => r.tableIndex === p.tableIndex);
+      const maxRi = Math.max(...tableRows.map((r) => r.rowIndexInTable));
+      for (const row of tableRows) {
         if (row.rowIndexInTable <= p.rowIndexInTable) continue;
-        if (tableRowsSameSampleShape(proto.cells, row.cells)) continue;
-        expected += 1;
+        if (
+          shouldDeleteLaterSampleRow(proto.cells, row.cells, {
+            isAtTableEnd: row.rowIndexInTable === maxRi,
+          })
+        ) {
+          continue;
+        }
+        expected += Math.max(1, countFilledCells(row.cells));
       }
     }
   }
   const actual = suggestions.filter((s) => s.mode !== "delete-tr").length;
   const score = expected > 0 ? actual / Math.max(1, expected) : 1;
-  // Small fixtures and short letters can still be "thin" once a few structural
-  // expectations exist; refuse success below ~half coverage.
-  const thin = expected >= 4 && score < 0.45;
+  // Refuse thin success: below ~55% of whole-doc expectations.
+  const thin = expected >= 4 && score < 0.55;
   return { score, expected, actual, thin };
+}
+
+/** Merge raw AI suggestion rows by plainStart/plainText position (union). */
+export function mergeSuggestionRowsByPosition(
+  ...batches: Record<string, unknown>[][]
+): Record<string, unknown>[] {
+  const seen = new Set<string>();
+  const out: Record<string, unknown>[] = [];
+  for (const batch of batches) {
+    for (const row of batch) {
+      const plain = String(row.plainText ?? row.text ?? "").trim();
+      const occ = Number(row.occurrence ?? row.occ ?? 0) || 0;
+      const kind = String(row.kind ?? "text");
+      const key = `${kind}|${plain}|${occ}|${String(row.cellIndex ?? "")}`;
+      if (!plain || seen.has(key)) continue;
+      seen.add(key);
+      out.push(row);
+      if (out.length >= MAX_SUGGESTIONS) return out;
+    }
+  }
+  return out;
 }
 
 export async function suggestTemplateTags(
@@ -2966,35 +3236,43 @@ export async function suggestTemplateTags(
   const runChunked = async (): Promise<SuggestCallResult> => {
     const chunkChars = getAiSuggestChunkChars() || DEFAULT_AI_SUGGEST_CHUNK_CHARS;
     const chunks = splitPlainTextChunks(plainText, chunkChars);
-    const merged: Record<string, unknown>[] = [];
-    const rawParts: string[] = [];
+    const rawParts: string[] = new Array(chunks.length).fill("");
+    const batchRows: Record<string, unknown>[][] = new Array(chunks.length)
+      .fill(null)
+      .map(() => []);
     let lastParsed: Record<string, unknown> | null = null;
     const { isAiTimeoutError, isRetryableAiError } = await import("./ai-request");
-    for (let i = 0; i < chunks.length; i += 1) {
-      if (opts?.signal?.aborted) break;
-      const chunk = chunks[i]!;
-      try {
-        const part = await callSuggestProvider(
-          buildPromptForPlain(chunk, chunk.length >= chunkChars),
-          xml,
-          buffer,
-          {
-            ...callOpts,
-            // Attach full .docx only on the first chunk (Gemini) to limit payload.
-            attachDocx: attachDocx && i === 0,
-          },
-        );
-        rawParts.push(part.rawText || "");
-        lastParsed = part.parsed;
-        merged.push(...normalizeRawSuggestions(part.parsed));
-      } catch (err) {
-        if (!isRetryableAiError(err) && !isAiTimeoutError(err)) throw err;
-        // Skip failed chunk; keep partial coverage rather than failing the whole doc.
-        rawParts.push(`/* chunk_${i + 1}_skipped */`);
+    let next = 0;
+    const worker = async () => {
+      while (true) {
+        if (opts?.signal?.aborted) return;
+        const i = next;
+        next += 1;
+        if (i >= chunks.length) return;
+        const chunk = chunks[i]!;
+        try {
+          const part = await callSuggestProvider(
+            buildPromptForPlain(chunk, chunk.length >= chunkChars),
+            xml,
+            buffer,
+            {
+              ...callOpts,
+              attachDocx: attachDocx && i === 0,
+            },
+          );
+          rawParts[i] = part.rawText || "";
+          lastParsed = part.parsed;
+          batchRows[i] = normalizeRawSuggestions(part.parsed);
+        } catch (err) {
+          if (!isRetryableAiError(err) && !isAiTimeoutError(err)) throw err;
+          rawParts[i] = `/* chunk_${i + 1}_skipped */`;
+        }
       }
-    }
+    };
+    const pool = Math.min(AI_SUGGEST_CHUNK_CONCURRENCY, Math.max(1, chunks.length));
+    await Promise.all(Array.from({ length: pool }, () => worker()));
+    const merged = mergeSuggestionRowsByPosition(...batchRows);
     return {
-      // Keep merged suggestions — do not let lastParsed.suggestions overwrite.
       parsed: { ...(lastParsed || {}), suggestions: merged },
       rawText: rawParts.filter(Boolean).join("\n\n"),
     };
@@ -3004,18 +3282,48 @@ export async function suggestTemplateTags(
   const preferChunkFirst =
     chunkChars > 0 && plainText.length > chunkChars * 1.25;
 
-  let callResult: SuggestCallResult;
+  let callResult: SuggestCallResult | null = null;
   if (preferChunkFirst) {
     callResult = await runChunked();
+  } else if (provider.apiFamily === "cursor") {
+    // Cursor has no temperature API — stability from dual-pass union + validate.
+    const passes: SuggestCallResult[] = [];
+    try {
+      passes.push(await runFull());
+    } catch (err) {
+      const { isAiTimeoutError, isRetryableAiError } = await import("./ai-request");
+      if (
+        chunkChars > 0 &&
+        plainText.length >= Math.min(20_000, chunkChars) &&
+        (isAiTimeoutError(err) || isRetryableAiError(err))
+      ) {
+        callResult = await runChunked();
+      } else {
+        throw err;
+      }
+    }
+    if (!callResult && passes.length) {
+      try {
+        if (!opts?.signal?.aborted) passes.push(await runFull());
+      } catch {
+        /* keep first pass */
+      }
+      const merged = mergeSuggestionRowsByPosition(
+        ...passes.map((p) => normalizeRawSuggestions(p.parsed)),
+      );
+      callResult = {
+        parsed: { ...(passes[passes.length - 1]?.parsed || {}), suggestions: merged },
+        rawText: passes.map((p) => p.rawText || "").filter(Boolean).join("\n\n"),
+      };
+    }
   } else {
     try {
       callResult = await runFull();
     } catch (err) {
       const { isAiTimeoutError, isRetryableAiError } = await import("./ai-request");
-      // Graceful degrade: on timeout / transient errors for larger docs, chunk.
       if (
         chunkChars > 0 &&
-        plainText.length >= Math.min(40_000, chunkChars) &&
+        plainText.length >= Math.min(20_000, chunkChars) &&
         (isAiTimeoutError(err) || isRetryableAiError(err))
       ) {
         callResult = await runChunked();
@@ -3024,6 +3332,7 @@ export async function suggestTemplateTags(
       }
     }
   }
+  if (!callResult) throw new Error("AI suggest produced no provider response");
 
   const finalize = (parsed: Record<string, unknown> | null, rawText: string) => {
     const suggestions = validateAiTagSuggestions(
@@ -3039,7 +3348,7 @@ export async function suggestTemplateTags(
   let { parsed, rawText } = callResult;
   let finalized = finalize(parsed, rawText);
 
-  // Thin output is never silent success: one deterministic repair-oriented retry.
+  // Thin: real retry, then deterministic validate/enrich already applied in finalize.
   if (finalized.coverage.thin && !opts?.signal?.aborted) {
     try {
       const repairPrompt =
@@ -3048,17 +3357,32 @@ export async function suggestTemplateTags(
         "(letterhead, numbers, parties, all prototype table cells, distinct-row totals, " +
         "label-followed blanks). Same determinism rules. Return full JSON suggestions array.";
       const retry = await callSuggestProvider(repairPrompt, xml, buffer, callOpts);
-      const retried = finalize(retry.parsed, retry.rawText || rawText);
-      // Prefer the richer of the two validated sets.
-      if (retried.suggestions.length >= finalized.suggestions.length) {
+      const mergedRaw = mergeSuggestionRowsByPosition(
+        normalizeRawSuggestions(parsed),
+        normalizeRawSuggestions(retry.parsed),
+      );
+      const retried = finalize(
+        { ...(retry.parsed || {}), suggestions: mergedRaw },
+        [rawText, retry.rawText || ""].filter(Boolean).join("\n\n"),
+      );
+      if (
+        retried.suggestions.length >= finalized.suggestions.length ||
+        retried.coverage.score >= finalized.coverage.score
+      ) {
         finalized = retried;
-        parsed = retry.parsed;
-        rawText = retry.rawText || rawText;
+        parsed = retried.parsed;
+        rawText = retried.rawText;
       }
     } catch {
       // Keep first pass; surface thin warning below.
     }
   }
+
+  // Re-measure after deterministic enrich (finalize already ran validate).
+  finalized = {
+    ...finalized,
+    coverage: estimateSuggestCoverage(finalized.suggestions, plainText, xml),
+  };
 
   const warning = finalized.coverage.thin
     ? `AI tag coverage still thin (${finalized.coverage.actual}/${finalized.coverage.expected}) — review letterhead, parties, tables, and totals`

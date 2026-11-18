@@ -83,7 +83,7 @@
     ],
     "expected": {
       "firstDigit": "1",
-      "listNamePattern": "จำเล|รายการ",
+      "listNamePattern": "เขต|อำเภอ|สำนักงาน|รายการ|rows",
       "headerRejectPattern": "สืบตามเขต"
     }
   },

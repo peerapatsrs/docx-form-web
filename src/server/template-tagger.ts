@@ -1362,17 +1362,20 @@ function findOrphanLoopOpenBefore(
 }
 
 /**
- * Prefer a loop name from the first usable header-row cell, else first prototype
- * cell text. Falls back to `loop_${ti+1}` when nothing sanitizes cleanly.
+ * Prefer a loop name from header-row cells after the first column (ordinal/typo
+ * columns often collide with inner fields). Never invent names from prototype
+ * sample cell values. Falls back to `loop_${ti+1}` only when no header works.
  */
 function inventTableLoopNameFromRows(
   rowXmls: string[],
   tmplIdx: number,
   ti: number,
 ): string {
-  const tryCell = (trXml: string): string | null => {
+  const tryCells = (trXml: string, skipFirst: boolean): string | null => {
     const tcs = findTopLevelTcSpans(trXml);
-    for (const span of tcs) {
+    for (let i = 0; i < tcs.length; i += 1) {
+      if (skipFirst && i === 0 && tcs.length > 1) continue;
+      const span = tcs[i]!;
       const text = normalizeTcPlain(trPlainText(trXml.slice(span.start, span.end)));
       if (!text) continue;
       if (/\{\{[^{}]+\}\}/.test(text)) continue;
@@ -1384,13 +1387,15 @@ function inventTableLoopNameFromRows(
     return null;
   };
   for (let ri = 0; ri < tmplIdx && ri < rowXmls.length; ri += 1) {
-    const fromHeader = tryCell(rowXmls[ri]);
+    const fromHeader = tryCells(rowXmls[ri]!, true);
     if (fromHeader) return fromHeader;
   }
-  if (tmplIdx >= 0 && tmplIdx < rowXmls.length) {
-    const fromProto = tryCell(rowXmls[tmplIdx]);
-    if (fromProto) return fromProto;
+  // Last resort: first usable header including col0 — still never sample values.
+  for (let ri = 0; ri < tmplIdx && ri < rowXmls.length; ri += 1) {
+    const fromHeader = tryCells(rowXmls[ri]!, false);
+    if (fromHeader) return fromHeader;
   }
+  void tmplIdx;
   return `loop_${ti + 1}`;
 }
 

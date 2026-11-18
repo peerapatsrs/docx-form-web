@@ -58,6 +58,8 @@ export {
   parseCookieHeader,
   readCookie,
   serializeCookie,
+  assertValidCookieField,
+  withClearCookies,
   expireCookie,
   applySetCookies,
 } from "./cookies.js";

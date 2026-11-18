@@ -2,14 +2,29 @@
   "base": "http://127.0.0.1:3000",
   "checks": [
     {
+      "name": "brand wordmark not truncated @360",
+      "ok": true,
+      "detail": "{\"sw\":78,\"cw\":78,\"text\":\"docx-form\"}"
+    },
+    {
+      "name": "status pill ellipsis (long AI) @360",
+      "ok": true,
+      "detail": "{\"sw\":153,\"cw\":73,\"text\":\"คีย์เซิร์ฟเวอร์ · OpenAI · gpt-4o\"}"
+    },
+    {
+      "name": "status pill title and aria-label @360",
+      "ok": true,
+      "detail": "{\"title\":\"คีย์เซิร์ฟเวอร์ · OpenAI · gpt-4o — จัดการคีย์ AI\",\"aria\":\"คีย์เซิร์ฟเวอร์ · OpenAI · gpt-4o — จัดการคีย์ AI\"}"
+    },
+    {
       "name": "no pill/auth overlap @360",
       "ok": true,
-      "detail": "{\"pill\":{\"x\":256.40625,\"y\":7.1875,\"width\":91.59375,\"height\":44},\"user\":{\"x\":0,\"y\":0,\"width\":0,\"height\":0},\"desktopVisible\":false}"
+      "detail": "{\"pill\":{\"x\":247.203125,\"y\":7.1875,\"width\":100.796875,\"height\":44},\"user\":{\"x\":0,\"y\":0,\"width\":0,\"height\":0},\"desktopVisible\":false}"
     },
     {
       "name": "avatar menu opener @360 ≥44px",
       "ok": true,
-      "detail": "{\"w\":44,\"h\":44,\"ok\":true,\"topTag\":\"SPAN\",\"topClass\":\"auth-bar-avatar auth-bar-avatar-fallback\",\"topId\":\"\",\"x\":228.8125,\"y\":29.1875}"
+      "detail": "{\"w\":44,\"h\":44,\"ok\":true,\"topTag\":\"SPAN\",\"topClass\":\"auth-bar-avatar auth-bar-avatar-fallback\",\"topId\":\"\",\"x\":219.609375,\"y\":29.1875}"
     },
     {
       "name": "account link hit-test @360",
@@ -27,14 +42,29 @@
       "detail": "{\"w\":247.6,\"h\":44,\"ok\":true,\"topTag\":\"BUTTON\",\"topClass\":\"auth-bar-menu-item auth-bar-menu-logout\",\"topId\":\"\",\"x\":216,\"y\":196.28125}"
     },
     {
+      "name": "brand wordmark not truncated @390",
+      "ok": true,
+      "detail": "{\"sw\":78,\"cw\":78,\"text\":\"docx-form\"}"
+    },
+    {
+      "name": "status pill ellipsis (long AI) @390",
+      "ok": true,
+      "detail": "{\"sw\":153,\"cw\":76,\"text\":\"คีย์เซิร์ฟเวอร์ · OpenAI · gpt-4o\"}"
+    },
+    {
+      "name": "status pill title and aria-label @390",
+      "ok": true,
+      "detail": "{\"title\":\"คีย์เซิร์ฟเวอร์ · OpenAI · gpt-4o — จัดการคีย์ AI\",\"aria\":\"คีย์เซิร์ฟเวอร์ · OpenAI · gpt-4o — จัดการคีย์ AI\"}"
+    },
+    {
       "name": "no pill/auth overlap @390",
       "ok": true,
-      "detail": "{\"pill\":{\"x\":286.40625,\"y\":7.1875,\"width\":91.59375,\"height\":44},\"user\":{\"x\":0,\"y\":0,\"width\":0,\"height\":0},\"desktopVisible\":false}"
+      "detail": "{\"pill\":{\"x\":274,\"y\":7.1875,\"width\":104,\"height\":44},\"user\":{\"x\":0,\"y\":0,\"width\":0,\"height\":0},\"desktopVisible\":false}"
     },
     {
       "name": "avatar menu opener @390 ≥44px",
       "ok": true,
-      "detail": "{\"w\":44,\"h\":44,\"ok\":true,\"topTag\":\"SPAN\",\"topClass\":\"auth-bar-avatar auth-bar-avatar-fallback\",\"topId\":\"\",\"x\":258.8125,\"y\":29.1875}"
+      "detail": "{\"w\":44,\"h\":44,\"ok\":true,\"topTag\":\"SPAN\",\"topClass\":\"auth-bar-avatar auth-bar-avatar-fallback\",\"topId\":\"\",\"x\":246.40625,\"y\":29.1875}"
     },
     {
       "name": "account link hit-test @390",
@@ -52,14 +82,29 @@
       "detail": "{\"w\":247.6,\"h\":44,\"ok\":true,\"topTag\":\"BUTTON\",\"topClass\":\"auth-bar-menu-item auth-bar-menu-logout\",\"topId\":\"\",\"x\":246,\"y\":196.28125}"
     },
     {
+      "name": "brand wordmark not truncated @768",
+      "ok": true,
+      "detail": "{\"sw\":88,\"cw\":88,\"text\":\"docx-form\"}"
+    },
+    {
+      "name": "status pill ellipsis (long AI) @768",
+      "ok": true,
+      "detail": "{\"sw\":153,\"cw\":111,\"text\":\"คีย์เซิร์ฟเวอร์ · OpenAI · gpt-4o\"}"
+    },
+    {
+      "name": "status pill title and aria-label @768",
+      "ok": true,
+      "detail": "{\"title\":\"คีย์เซิร์ฟเวอร์ · OpenAI · gpt-4o — จัดการคีย์ AI\",\"aria\":\"คีย์เซิร์ฟเวอร์ · OpenAI · gpt-4o — จัดการคีย์ AI\"}"
+    },
+    {
       "name": "no pill/auth overlap @768",
       "ok": true,
-      "detail": "{\"pill\":{\"x\":664.40625,\"y\":7.1875,\"width\":91.59375,\"height\":44},\"user\":{\"x\":0,\"y\":0,\"width\":0,\"height\":0},\"desktopVisible\":false}"
+      "detail": "{\"pill\":{\"x\":616,\"y\":7.1875,\"width\":140,\"height\":44},\"user\":{\"x\":0,\"y\":0,\"width\":0,\"height\":0},\"desktopVisible\":false}"
     },
     {
       "name": "avatar menu opener @768 ≥44px",
       "ok": true,
-      "detail": "{\"w\":44,\"h\":44,\"ok\":true,\"topTag\":\"SPAN\",\"topClass\":\"auth-bar-avatar auth-bar-avatar-fallback\",\"topId\":\"\",\"x\":636.8125,\"y\":29.1875}"
+      "detail": "{\"w\":44,\"h\":44,\"ok\":true,\"topTag\":\"SPAN\",\"topClass\":\"auth-bar-avatar auth-bar-avatar-fallback\",\"topId\":\"\",\"x\":588.40625,\"y\":29.1875}"
     },
     {
       "name": "account link hit-test @768",
@@ -77,14 +122,29 @@
       "detail": "{\"w\":247.6,\"h\":44,\"ok\":true,\"topTag\":\"BUTTON\",\"topClass\":\"auth-bar-menu-item auth-bar-menu-logout\",\"topId\":\"\",\"x\":624,\"y\":200.171875}"
     },
     {
+      "name": "brand wordmark not truncated @1024",
+      "ok": true,
+      "detail": "{\"sw\":88,\"cw\":88,\"text\":\"docx-form\"}"
+    },
+    {
+      "name": "status pill ellipsis (long AI) @1024",
+      "ok": true,
+      "detail": "{\"sw\":153,\"cw\":111,\"text\":\"คีย์เซิร์ฟเวอร์ · OpenAI · gpt-4o\"}"
+    },
+    {
+      "name": "status pill title and aria-label @1024",
+      "ok": true,
+      "detail": "{\"title\":\"คีย์เซิร์ฟเวอร์ · OpenAI · gpt-4o — จัดการคีย์ AI\",\"aria\":\"คีย์เซิร์ฟเวอร์ · OpenAI · gpt-4o — จัดการคีย์ AI\"}"
+    },
+    {
       "name": "no pill/auth overlap @1024",
       "ok": true,
-      "detail": "{\"pill\":{\"x\":920.40625,\"y\":7.1875,\"width\":91.59375,\"height\":44},\"user\":{\"x\":0,\"y\":0,\"width\":0,\"height\":0},\"desktopVisible\":false}"
+      "detail": "{\"pill\":{\"x\":872,\"y\":7.1875,\"width\":140,\"height\":44},\"user\":{\"x\":0,\"y\":0,\"width\":0,\"height\":0},\"desktopVisible\":false}"
     },
     {
       "name": "avatar menu opener @1024 ≥44px",
       "ok": true,
-      "detail": "{\"w\":44,\"h\":44,\"ok\":true,\"topTag\":\"SPAN\",\"topClass\":\"auth-bar-avatar auth-bar-avatar-fallback\",\"topId\":\"\",\"x\":892.8125,\"y\":29.1875}"
+      "detail": "{\"w\":44,\"h\":44,\"ok\":true,\"topTag\":\"SPAN\",\"topClass\":\"auth-bar-avatar auth-bar-avatar-fallback\",\"topId\":\"\",\"x\":844.40625,\"y\":29.1875}"
     },
     {
       "name": "account link hit-test @1024",
@@ -100,6 +160,11 @@
       "name": "logout hit-test @1024",
       "ok": true,
       "detail": "{\"w\":247.6,\"h\":44,\"ok\":true,\"topTag\":\"BUTTON\",\"topClass\":\"auth-bar-menu-item auth-bar-menu-logout\",\"topId\":\"\",\"x\":880,\"y\":200.171875}"
+    },
+    {
+      "name": "desktop plan badge is-pro @1280",
+      "ok": true,
+      "detail": "{\"ok\":true,\"color\":\"rgb(6, 90, 78)\",\"text\":\"จ่ายแล้ว\"}"
     },
     {
       "name": "no pill/auth overlap @1280",

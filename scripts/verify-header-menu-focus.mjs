@@ -94,7 +94,15 @@ async function focusState(page) {
       avatarFocused: active === avatar,
       activeTag: active?.tagName || "",
       activeClass: String(active?.className || ""),
+      activeRole: active?.getAttribute?.("role") || "",
     };
+  });
+}
+
+async function activeMenuItemClass(page) {
+  return page.evaluate(() => {
+    const active = document.activeElement;
+    return String(active?.className || "");
   });
 }
 
@@ -107,9 +115,8 @@ async function runWidth(browser, width) {
     await page.waitForTimeout(80);
 
     const itemCount = await page.locator(
-      ".auth-bar-menu a[role='menuitem'], .auth-bar-menu button.auth-bar-menu-logout",
+      ".auth-bar-menu a[role='menuitem'], .auth-bar-menu button[role='menuitem']",
     ).count();
-    // Focus starts on first item; one Tab per item advances; Tab from last closes menu.
     const tabs = Math.max(itemCount, 3);
     for (let i = 0; i < tabs; i++) {
       await page.keyboard.press("Tab");
@@ -128,10 +135,60 @@ async function runWidth(browser, width) {
       JSON.stringify(afterTab),
     );
 
-    // Escape path
     await avatar.click();
     await page.waitForSelector(".auth-bar-menu", { timeout: 5000 });
-    await page.waitForTimeout(120);
+    await page.waitForTimeout(80);
+
+    const logoutRole = await page.evaluate(() =>
+      document
+        .querySelector(".auth-bar-menu button.auth-bar-menu-logout")
+        ?.getAttribute("role"),
+    );
+    check(`logout menuitem role @${width}`, logoutRole === "menuitem", String(logoutRole));
+
+    await page.keyboard.press("ArrowDown");
+    await page.waitForTimeout(40);
+    const afterDown = await activeMenuItemClass(page);
+    check(
+      `arrow down moves focus @${width}`,
+      afterDown.includes("auth-bar-menu-item") && !afterDown.includes("auth-bar-menu-profile"),
+      afterDown,
+    );
+
+    await page.keyboard.press("Home");
+    await page.waitForTimeout(40);
+    const afterHome = await activeMenuItemClass(page);
+    check(
+      `home focuses first item @${width}`,
+      afterHome.includes("auth-bar-menu-profile"),
+      afterHome,
+    );
+
+    await page.keyboard.press("End");
+    await page.waitForTimeout(40);
+    const afterEnd = await activeMenuItemClass(page);
+    check(
+      `end focuses last item @${width}`,
+      afterEnd.includes("auth-bar-menu-logout"),
+      afterEnd,
+    );
+
+    await page.keyboard.press("ArrowUp");
+    await page.waitForTimeout(40);
+    const afterUp = await activeMenuItemClass(page);
+    check(
+      `arrow up wraps @${width}`,
+      afterUp.includes("auth-bar-menu-item"),
+      afterUp,
+    );
+
+    // Escape path (menu may still be open after arrow-key checks)
+    const menuOpen = await page.locator(".auth-bar-menu").count();
+    if (!menuOpen) {
+      await avatar.click();
+      await page.waitForSelector(".auth-bar-menu", { timeout: 5000 });
+      await page.waitForTimeout(80);
+    }
     await page.keyboard.press("Escape");
     await page.waitForTimeout(120);
     const afterEsc = await focusState(page);

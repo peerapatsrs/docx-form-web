@@ -69,15 +69,18 @@ function displayName(user: SessionUser): string {
 function LogoutButton({
   className,
   children,
+  menuItem = false,
 }: {
   className: string;
   children: ReactNode;
+  menuItem?: boolean;
 }) {
   return (
     <form
       method="POST"
       action={SSO_LOGOUT_PATH}
       className="auth-bar-logout-form"
+      role={menuItem ? "none" : undefined}
       onSubmit={(e) => {
         if (
           !window.confirm(
@@ -89,7 +92,11 @@ function LogoutButton({
       }}
     >
       {/* Top-level document POST — never fetch; server returns HTML continue → Keycloak end_session. */}
-      <button type="submit" className={className}>
+      <button
+        type="submit"
+        className={className}
+        role={menuItem ? "menuitem" : undefined}
+      >
         {children}
       </button>
     </form>
@@ -181,10 +188,34 @@ export function AuthBar() {
       }
 
       const active = document.activeElement;
-      if (!(active instanceof Node) || !menu.contains(active)) return;
-      if (e.key !== "Tab") return;
+      if (!(active instanceof HTMLElement) || !menu.contains(active)) return;
+
       const items = menuFocusables();
       if (!items.length) return;
+      const idx = items.indexOf(active);
+
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const delta = e.key === "ArrowDown" ? 1 : -1;
+        const next =
+          idx >= 0
+            ? items[(idx + delta + items.length) % items.length]
+            : items[0];
+        next?.focus();
+        return;
+      }
+      if (e.key === "Home") {
+        e.preventDefault();
+        items[0]?.focus();
+        return;
+      }
+      if (e.key === "End") {
+        e.preventDefault();
+        items[items.length - 1]?.focus();
+        return;
+      }
+
+      if (e.key !== "Tab") return;
       const first = items[0];
       const last = items[items.length - 1];
       if (e.shiftKey && active === first) {
@@ -255,7 +286,11 @@ export function AuthBar() {
             size={28}
           />
           <span className="auth-bar-name">{name}</span>
-          <span className="auth-bar-plan">{plan}</span>
+          <span
+            className={`auth-bar-plan${isPaidSessionUser(user) ? " is-pro" : ""}`}
+          >
+            {plan}
+          </span>
         </Link>
         {admin ? (
           <Link className="auth-bar-btn auth-bar-ghost" href="/admin">
@@ -316,7 +351,10 @@ export function AuthBar() {
                 Admin
               </Link>
             ) : null}
-            <LogoutButton className="auth-bar-menu-item auth-bar-menu-logout">
+            <LogoutButton
+              className="auth-bar-menu-item auth-bar-menu-logout"
+              menuItem
+            >
               ออกจากระบบ
             </LogoutButton>
           </div>

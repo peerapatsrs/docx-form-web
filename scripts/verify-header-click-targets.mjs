@@ -14,6 +14,8 @@ const outDir = join(root, "verify", "screenshots");
 const baseUrl = (process.env.BASE_URL || "http://127.0.0.1:3000").replace(/\/$/, "");
 const WIDTHS = [360, 390, 768, 1024, 1280];
 const TAP_MIN = 44;
+const LONG_AI_STATUS = "คีย์เซิร์ฟเวอร์ · OpenAI · gpt-4o";
+const MANAGE_KEYS_ACTION = "จัดการคีย์ AI";
 const MOCK_USER = {
   name: "Peerapat Surasing",
   email: "peerapat.srs@gmail.com",
@@ -85,6 +87,47 @@ async function waitAuthBar(page) {
   await page.waitForSelector('[data-auth-bar="signed-in"]', { timeout: 45000 });
 }
 
+async function applyLongHeaderStatus(page) {
+  await page.evaluate(
+    ({ line, action }) => {
+      const el = document.getElementById("statusText");
+      const pill = document.getElementById("status");
+      if (!el || !pill) return;
+      el.textContent = line;
+      const label = `${line} — ${action}`;
+      pill.title = label;
+      pill.setAttribute("aria-label", label);
+    },
+    { line: LONG_AI_STATUS, action: MANAGE_KEYS_ACTION },
+  );
+  await page.waitForTimeout(100);
+}
+
+async function measureBrandAndPill(page) {
+  return page.evaluate(() => {
+    const brand = document.querySelector(".brand-text");
+    const st = document.getElementById("statusText");
+    const pill = document.getElementById("status");
+    const brandOk =
+      !!brand &&
+      brand.textContent?.trim() === "docx-form" &&
+      brand.scrollWidth <= brand.clientWidth + 1;
+    const ellipsed = !!st && st.scrollWidth > st.clientWidth + 1;
+    return {
+      brandOk,
+      ellipsed,
+      brand: brand
+        ? { sw: brand.scrollWidth, cw: brand.clientWidth, text: brand.textContent?.trim() }
+        : null,
+      status: st
+        ? { sw: st.scrollWidth, cw: st.clientWidth, text: st.textContent?.trim() }
+        : null,
+      pillTitle: pill?.title || "",
+      pillAria: pill?.getAttribute("aria-label") || "",
+    };
+  });
+}
+
 async function setupContext(browser) {
   const context = await browser.newContext({
     locale: "th-TH",
@@ -143,6 +186,44 @@ async function runWidth(browser, width) {
   try {
     await page.setViewportSize({ width, height: 800 });
     await page.waitForTimeout(400);
+
+    if (width < 1280) {
+      await applyLongHeaderStatus(page);
+      const headerText = await measureBrandAndPill(page);
+      check(
+        `brand wordmark not truncated @${width}`,
+        headerText.brandOk,
+        JSON.stringify(headerText.brand),
+      );
+      check(
+        `status pill ellipsis (long AI) @${width}`,
+        headerText.ellipsed,
+        JSON.stringify(headerText.status),
+      );
+      const expectLabel = `${LONG_AI_STATUS} — ${MANAGE_KEYS_ACTION}`;
+      check(
+        `status pill title and aria-label @${width}`,
+        headerText.pillTitle === expectLabel && headerText.pillAria === expectLabel,
+        JSON.stringify({
+          title: headerText.pillTitle,
+          aria: headerText.pillAria,
+        }),
+      );
+    }
+
+    if (width >= 1280) {
+      const proBadge = await page.evaluate(() => {
+        const el = document.querySelector(".auth-bar-desktop .auth-bar-plan.is-pro");
+        if (!el) return { ok: false, reason: "missing is-pro on desktop plan" };
+        const color = getComputedStyle(el).color;
+        return { ok: true, color, text: el.textContent?.trim() };
+      });
+      check(
+        `desktop plan badge is-pro @${width}`,
+        proBadge.ok && proBadge.text === "จ่ายแล้ว",
+        JSON.stringify(proBadge),
+      );
+    }
 
     const layout = await page.evaluate(() => {
       const box = (sel) => {

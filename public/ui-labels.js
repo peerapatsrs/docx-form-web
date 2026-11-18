@@ -114,6 +114,7 @@ export const UI_LABELS = Object.freeze({
   aiReadyFallback: "พร้อม",
   aiConnectedPrefix: "คีย์ AI · ",
   aiStatusNoKey: "ยังไม่มีคีย์ AI",
+  aiStatusManageKeys: "จัดการคีย์ AI",
   aiStatusReady: (provider) => `พร้อมใช้ AI · ${provider}`,
   aiStatusNoFile: "ยังไม่มีไฟล์",
   aiStatusEmptyCount: (n) => `ยังว่าง ${n} ช่อง`,

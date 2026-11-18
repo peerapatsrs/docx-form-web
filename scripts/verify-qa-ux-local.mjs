@@ -73,9 +73,9 @@ async function measureHome(page, width) {
     };
   });
   check(
-    `home status no ellipsis @${width}`,
+    `home status short text not clipped @${width}`,
     status &&
-      status.textOverflow !== "ellipsis" &&
+      status.scrollW <= status.clientW + 1 &&
       !/\u2026|\.\.\.$/.test(status.text) &&
       !/AI ยังไม่พร้อม ·/.test(status.text),
     JSON.stringify(status),
@@ -372,6 +372,10 @@ async function main() {
   const css = readFileSync(join(root, "public/style.css"), "utf8");
   check("source --tap-min", /--tap-min:\s*44px/.test(css));
   check("source --accent-ink", /--accent-ink:/.test(css));
+  check(
+    "source pro plan uses accent-ink",
+    /\.auth-bar-plan\.is-pro[\s\S]{0,120}color:\s*var\(--accent-ink\)/.test(css),
+  );
   check(
     "source skip tip mobile in-flow",
     /position:\s*static/.test(css) &&

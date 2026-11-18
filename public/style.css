@@ -4105,7 +4105,7 @@ button.danger:hover {
 .auth-bar-plan.is-pro {
   border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .auth-bar-btn {
@@ -5187,8 +5187,9 @@ button.danger:hover {
   .brand-text {
     font-size: 0.92rem;
     white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    overflow: visible;
+    text-overflow: unset;
+    flex-shrink: 0;
   }
 
   .brand-ver {
@@ -5201,14 +5202,6 @@ button.danger:hover {
   .brand-logo {
     width: 24px;
     height: 24px;
-  }
-
-  .status-pill {
-    max-width: min(12rem, 52vw);
-    padding: 0.28rem 0.55rem 0.28rem 0.4rem;
-    font-size: 0.72rem;
-    height: auto;
-    min-height: var(--tap-min);
   }
 
   .auth-bar-name {
@@ -5235,7 +5228,12 @@ button.danger:hover {
   .brand {
     flex: 1 1 auto;
     min-width: 0;
-    max-width: calc(100% - 9.5rem);
+    max-width: calc(100% - 6.75rem);
+    overflow: visible;
+  }
+
+  .brand-copy {
+    overflow: visible;
   }
 
   .topbar-end {
@@ -5246,11 +5244,12 @@ button.danger:hover {
   }
 
   .status-pill {
-    max-width: min(9.5rem, 42vw);
+    max-width: min(8.75rem, 38vw);
     padding: 0.28rem 0.5rem 0.28rem 0.35rem;
     font-size: 0.7rem;
     height: auto;
     min-height: var(--tap-min);
+    flex-shrink: 1;
   }
 
   .status-pill #statusText {
@@ -5259,6 +5258,19 @@ button.danger:hover {
     white-space: nowrap;
     display: block;
     min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  @media (max-width: 560px) {
+    .status-pill {
+      max-width: min(7.25rem, 32vw);
+    }
+  }
+
+  @media (max-width: 400px) {
+    .status-pill {
+      max-width: min(6.5rem, 28vw);
+    }
   }
 
   .auth-bar-desktop {
@@ -6439,18 +6451,6 @@ button.danger:hover {
   .banner.is-validation {
     margin-left: 0.65rem;
     margin-right: 0.65rem;
-  }
-
-  .status-pill {
-    max-width: min(12rem, 58vw);
-    height: auto;
-    min-height: var(--tap-min);
-  }
-
-  .status-pill #statusText {
-    overflow: visible;
-    text-overflow: unset;
-    white-space: normal;
   }
 
   .tagger-entry-chip .file-meta {

@@ -59,16 +59,21 @@ await check("session index persists idToken for RP logout hint", async () => {
 
 await check("logout route converts cross-origin end_session to HTML continue", async () => {
   process.env.APP_BASE_URL = "https://docx-form-dev.tps18.space";
+  process.env.OIDC_ISSUER = "https://auth.tps18.space/realms/tps18-dev";
+  process.env.OIDC_CLIENT_ID = "docx-form-web";
+  process.env.OIDC_CLIENT_SECRET = "test-secret";
   const id = `../src/server/mw-auth-route.ts?t=${Date.now()}-${Math.random()}`;
   const {
     buildEndSessionContinueHtml,
     maybeContinueToEndSession,
+    resolveSafeEndSessionContinueHref,
     escapeHtmlAttr,
   } = await import(id);
 
+  const allowed = { allowedEndSessionOrigin: "https://auth.tps18.space" };
   const endSession =
     "https://auth.tps18.space/realms/tps18-dev/protocol/openid-connect/logout?client_id=docx&post_logout_redirect_uri=https%3A%2F%2Fdocx-form-dev.tps18.space%2Flogged-out&id_token_hint=abc.def.ghi";
-  const html = buildEndSessionContinueHtml(endSession);
+  const html = buildEndSessionContinueHtml(endSession, allowed);
   assert.match(html, /meta http-equiv="refresh"/);
   assert.match(html, /oidc-end-session-continue/);
   assert.match(html, /location\.replace\(a\.href\)/);
@@ -80,15 +85,16 @@ await check("logout route converts cross-origin end_session to HTML continue", a
   // DEF-BE-END-SESSION-CONTINUE-SCRIPT-BREAKOUT (QA repro)
   const breakout =
     "https://auth.tps18.space/x?</script><script>alert(1)</script>";
-  const breakoutHtml = buildEndSessionContinueHtml(breakout);
+  const breakoutHtml = buildEndSessionContinueHtml(breakout, allowed);
   assert.match(breakoutHtml, /meta http-equiv="refresh"/);
+  // URL() percent-encodes <>; HTML attr escape is also fine — never raw </script>.
   assert.match(
     breakoutHtml,
-    /href="https:\/\/auth\.tps18\.space\/x\?&lt;\/script&gt;&lt;script&gt;alert\(1\)&lt;\/script&gt;"/,
+    /href="https:\/\/auth\.tps18\.space\/x\?(?:%3C|&lt;)\/script(?:%3E|&gt;)(?:%3C|&lt;)script(?:%3E|&gt;)alert\(1\)(?:%3C|&lt;)\/script(?:%3E|&gt;)"/,
   );
   assert.match(
     breakoutHtml,
-    /content="0;url=https:\/\/auth\.tps18\.space\/x\?&lt;\/script&gt;&lt;script&gt;alert\(1\)&lt;\/script&gt;"/,
+    /content="0;url=https:\/\/auth\.tps18\.space\/x\?(?:%3C|&lt;)\/script(?:%3E|&gt;)/,
   );
   // Unescaped </script><script>alert must not appear (would close/open scripts).
   assert.doesNotMatch(
@@ -128,6 +134,65 @@ await check("logout route converts cross-origin end_session to HTML continue", a
   assert.equal(
     kept.headers.get("location"),
     "https://docx-form-dev.tps18.space/logged-out",
+  );
+
+  // Sanity: resolver keeps legitimate end_session.
+  assert.equal(
+    resolveSafeEndSessionContinueHref(endSession, allowed),
+    new URL(endSession).toString(),
+  );
+});
+
+await check("DEF-BE-END-SESSION-JAVASCRIPT-HREF rejects dangerous continue URLs", async () => {
+  process.env.APP_BASE_URL = "https://docx-form-dev.tps18.space";
+  process.env.OIDC_ISSUER = "https://auth.tps18.space/realms/tps18-dev";
+  process.env.OIDC_CLIENT_ID = "docx-form-web";
+  process.env.OIDC_CLIENT_SECRET = "test-secret";
+  const id = `../src/server/mw-auth-route.ts?t=${Date.now()}-${Math.random()}`;
+  const {
+    buildEndSessionContinueHtml,
+    resolveSafeEndSessionContinueHref,
+  } = await import(id);
+
+  const allowed = { allowedEndSessionOrigin: "https://auth.tps18.space" };
+  const cases = [
+    "javascript:alert(1)",
+    "JAVASCRIPT:alert(1)",
+    "javascript:void(window.__qa_xss=1)",
+    "data:text/html,hi",
+    " data:text/html,hi",
+    "\tjavascript:alert(1)",
+    "\u0000javascript:alert(1)",
+    "https://evil.example/logout",
+    "http://auth.tps18.space/logout", // http rejected when issuer is https
+  ];
+
+  for (const bad of cases) {
+    assert.equal(
+      resolveSafeEndSessionContinueHref(bad, allowed),
+      "/logged-out",
+      bad,
+    );
+    const html = buildEndSessionContinueHtml(bad, allowed);
+    assert.doesNotMatch(html, /javascript:/i, bad);
+    assert.doesNotMatch(html, /data:/i, bad);
+    assert.doesNotMatch(html, /evil\.example/, bad);
+    assert.match(html, /href="\/logged-out"/, bad);
+    assert.match(html, /content="0;url=\/logged-out"/, bad);
+  }
+
+  // http: allowed only when configured end_session/issuer origin is http.
+  assert.equal(
+    resolveSafeEndSessionContinueHref("http://localhost:8080/realms/dev/logout", {
+      allowedEndSessionOrigin: "http://localhost:8080",
+    }),
+    "http://localhost:8080/realms/dev/logout",
+  );
+  assert.equal(
+    resolveSafeEndSessionContinueHref("https://localhost:8080/logout", {
+      allowedEndSessionOrigin: "http://localhost:8080",
+    }),
+    "/logged-out",
   );
 });
 

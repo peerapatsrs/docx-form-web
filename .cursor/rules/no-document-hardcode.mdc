@@ -1,0 +1,46 @@
+---
+description: Never hardcode test/sample document content into product logic
+alwaysApply: true
+---
+
+# No test-document content in code
+
+Product code must work for **any** `.docx` template. Do not bake in labels, values, company names, case numbers, or tick glyphs from the file currently open in preview / QA fixtures.
+
+## Forbidden in production code (`src/`, `public/app.js`, server prompts)
+
+- Field names or values copied from a sample/test doc
+- Glyph allowlists (`✓` `√` `✔` …) to decide bool vs text
+- Stem/keyword lists from a sample letter (`โทร`, `แฟกซ์`, field captions, company names)
+- Manual cache-bust tokens like `?v=web83` — use content hash (`publicAssetUrl`)
+- Defaulting bool `trueText` to a fixed mark — use the cell sample or the model instead
+
+```ts
+// ❌ BAD
+if (/^(fieldA|fieldB)$/.test(header)) …
+if (/^[✓√✔☑]$/u.test(cell)) return "bool";
+trueText = "√";
+```
+
+## Prefer
+
+- Structure from **this** file: column headers, tabs, prototype row, numbered-list stems found in XML
+- Shape classes: `isSymbolOnlyCell` / `\p{P}` `\p{S}`, digits → auto
+- Prompts that describe patterns, not one template’s words
+
+```ts
+// ✅ GOOD
+const name = resolveVarName(columnHeader, lang);
+if (isSymbolOnlyCell(cellText)) return "bool"; // trueText = cellText
+```
+
+## OK
+
+- App chrome UI copy (Thai)
+- Smoke/fixture files under `scripts/` with invented sample text
+- Format-only prompt examples (`Label\\tValue`) with fake placeholders
+- OOXML / `{{…}}` syntax
+
+## When unsure
+
+If it only works for the preview doc, do not ship it.

@@ -9,14 +9,29 @@
 export const UI_LABELS = Object.freeze({
   // Shared controls
   skip: "ข้าม",
+  skipFieldAria: "ข้ามฟิลด์นี้ — ไม่ใส่ค่าในเอกสาร",
   skipTitle: "ข้าม — ไม่ใส่ค่าในเอกสารที่สร้าง",
+  a11ySkipToContent: "ข้ามไปยังเนื้อหาหลัก",
   skipFirstUseTip:
     "ข้าม = ไม่ใส่ค่าในเอกสารที่สร้าง (ช่องจะว่างตามเทมเพลต) — ใช้เมื่อฟิลด์นั้นไม่จำเป็นในรอบนี้",
+  skipFirstUseDismiss: "เข้าใจแล้ว",
   skipFirstUseStorageKey: "docx-form-skip-tip-seen-v1",
 
   // Validation banner
-  validationTitle: (count) => `ยังมีช่องที่ยังไม่ได้กรอก (${count})`,
-  validationHint: "กรอกให้ครบ หรือติ๊ก “ข้าม” ก่อนสร้างเอกสาร",
+  validationTitle: (count) =>
+    `ยังมี ${count} ช่องที่ยังไม่กรอก — กดชื่อช่องเพื่อไปที่นั้น หรือติ๊กข้าม`,
+  validationHint: "กรอกให้ครบ หรือติ๊ก “ข้าม” — ช่องที่ข้ามแล้วไม่บังคับ",
+  validationSoftEmpty: (n) => `ยังว่าง ${n} ช่อง (ข้ามได้)`,
+  validationAllSkippedReady: "ติ๊กข้ามแล้ว — พร้อมสร้างได้",
+  statusReady: "พร้อมใช้",
+  statusGenerating: "กำลังสร้าง",
+  statusEmptyFields: (n) => `มีช่องว่าง ${n}`,
+  statusError: "ข้อผิดพลาด",
+  statusNeedsKey: "ต้องใส่คีย์ AI",
+  statusOffline: "เชื่อมต่อไม่ได้",
+  postCreateToast: "ดาวน์โหลดแล้ว — ล้างช่องที่กรอกไหม?",
+  postCreateKeep: "เก็บค่าไว้",
+  postCreateClear: "ล้างช่อง",
   validationListMinRows: "ต้องมีอย่างน้อย 1 แถว",
   /** Banner item when a required table/list has no filled row (seeded empty rows do not count). */
   validationListNeedFilledRow: "กรอกอย่างน้อย 1 แถว",
@@ -28,17 +43,48 @@ export const UI_LABELS = Object.freeze({
     "รูปแบบอีเมลไม่ถูกต้อง — ตรวจอีกครั้ง หรือติ๊ก “ข้าม”",
   fieldErrorPickFileOrSkip: "กรุณาเลือกไฟล์ หรือติ๊ก “ข้าม”",
   fieldErrorAddRowOrSkip: "เพิ่มแถว หรือติ๊ก “ข้าม”",
+  /** Cap long layout-derived labels so validation lists stay scannable. */
+  shortValidationLabel: (label, fallback = "") => {
+    const raw = String(label || "").trim();
+    const fb = String(fallback || "").trim();
+    // Prefer the field key when the layout label looks like a document sentence.
+    const sentenceLike =
+      raw.length > 28 ||
+      (raw.length > 18 && /[\s，。、]/.test(raw)) ||
+      /^(บริษัท|ตามที่|ขอเรียน|ของจำเลย|ดังนี้)/.test(raw);
+    const text = sentenceLike && fb ? fb : raw || fb;
+    if (!text) return "ช่องว่าง";
+    if (text.length <= 42) return text;
+    return `${text.slice(0, 40)}…`;
+  },
 
   // Placeholders
   placeholderExamplePrefix: "เช่น ",
+  /** Prefer short field key over long surrounding prose for "เช่น …". */
+  examplePlaceholderLabel: (displayLabel, fieldName = "") => {
+    const raw = String(displayLabel || "").trim();
+    const name = String(fieldName || "").trim();
+    // Prefer the field key when the surrounding/layout label is prose, not the key.
+    const sentenceLike =
+      (name &&
+        raw &&
+        raw !== name &&
+        (/\s/.test(raw) || raw.length > Math.max(12, name.length + 2))) ||
+      raw.length > 24 ||
+      (raw.length > 14 && /\s/.test(raw) && raw !== name);
+    const pick = sentenceLike && name ? name : raw || name;
+    if (!pick) return "";
+    return `เช่น ${pick}`;
+  },
 
   // List / table
   listBadgeTable: "ตาราง",
   listBadgeFromFile: "ตารางจากไฟล์",
   listBadgeList: "รายการ",
   addRow: "+ เพิ่มแถว",
-  removeRow: "ลบ",
-  removeRowTitle: "ลบแถว",
+  removeRow: "×",
+  removeRowTitle: (n) => (n != null ? `ลบแถว ${n}` : "ลบแถว"),
+  removeRowAria: (n) => (n != null ? `ลบแถว ${n}` : "ลบแถว"),
   emptyRows: "ยังไม่มีแถว",
   emptyRowsHint: "ยังไม่มีแถว — กดเพิ่มแถว หรือติ๊กข้าม",
   seededRowTip: "เริ่มด้วย 1 แถวว่างแล้ว — กรอกหรือกด + เพิ่มแถว",
@@ -57,66 +103,108 @@ export const UI_LABELS = Object.freeze({
 
   // Toolbar
   toolsMenu: "เครื่องมือ",
-  exportJson: "ส่งออก JSON",
-  exportJsonTitle: "ส่งออกค่าที่กรอกเป็น JSON",
-  importJson: "นำเข้า JSON",
-  importJsonTitle: "นำเข้าค่าจากไฟล์ JSON",
-  putAiKey: "ใส่ AI key",
+  toolsMenuHint: "เครื่องมือ · คีย์ AI / แนบไฟล์ / ส่งออก",
+  exportJson: "ส่งออกค่า",
+  exportJsonTitle: "ส่งออกค่าที่กรอกเป็นไฟล์",
+  importJson: "นำเข้าค่า",
+  importJsonTitle: "นำเข้าค่าจากไฟล์ที่บันทึกไว้",
+  putAiKey: "ตั้งค่าคีย์ AI",
+  manageAiKeys: "ตั้งค่าคีย์ AI",
+  aiSuggestTags: "แนะนำแท็กจากเอกสาร",
   aiReadyFallback: "พร้อม",
-  aiConnectedPrefix: "AI · ",
-  attachSource: "แนบเอกสารต้นทาง",
-  attachSourceMulti: "ต้นทาง → ให้ AI กรอก JSON",
+  aiConnectedPrefix: "คีย์ AI · ",
+  aiStatusNoKey: "ยังไม่มีคีย์ AI",
+  aiStatusReady: (provider) => `พร้อมใช้ AI · ${provider}`,
+  aiStatusNoFile: "ยังไม่มีไฟล์",
+  aiStatusEmptyCount: (n) => `ยังว่าง ${n} ช่อง`,
+  aiStatusReadyCreate: "พร้อมสร้าง",
+  aiStatusCreating: "กำลังสร้าง",
+  aiStatusNotReadyCount: (n) => `ยังไม่พร้อม — ว่าง ${n} ช่อง`,
+  attachSource: "แนบไฟล์ให้ AI ช่วยกรอก",
+  attachSourceMulti: "แนบไฟล์ให้ AI ช่วยกรอก (หลายเทมเพลต)",
   attachSourceInputAria: "แนบเอกสารต้นทางสำหรับ AI กรอกค่า",
-  attachSourceNeedKeyBanner: "ต้องใส่ AI API key ของคุณก่อนถึงจะแนบเอกสารได้",
-  attachSourceTitleNeedKey: "ต้องใส่ AI key ของคุณก่อน",
+  attachSourceNeedKeyBanner: "ต้องตั้งค่าคีย์ AI ก่อนถึงจะแนบเอกสารได้",
+  attachSourceTitleNeedKey: "ต้องตั้งค่าคีย์ AI ก่อน",
   attachSourceTitleMulti:
-    "แนบต้นทาง — ส่ง Export JSON ให้ AI กรอกค่า แล้วนำ JSON กลับมาใส่จอ",
-  attachSourceTitleSingle: "แนบ PDF / Word / รูป — ส่งโครง JSON ให้ AI กรอกค่า",
+    "แนบต้นทาง — ให้ AI อ่านแล้วกรอกค่าลงหลายเทมเพลต",
+  attachSourceTitleSingle: "แนบ PDF / Word / รูป — ให้ AI อ่านแล้วกรอกช่อง",
+  attachSourceConfirmTitle: "ส่งไฟล์ให้ AI อ่าน?",
+  attachSourceConfirmBody:
+    "จะส่งไฟล์นี้ให้ AI อ่านเพื่อกรอกช่อง — ดำเนินการต่อไหม?",
+  attachSourceConfirmOk: "ดำเนินการต่อ",
   addTemplateInputAria: "เลือกไฟล์เทมเพลต Word เพิ่ม",
+  addTemplateBtn: "+ เพิ่ม",
+  addTemplateBtnAria: "เพิ่มเทมเพลต",
   homeLink: "← หน้าหลัก",
   homeLinkTitle: "กลับไปหน้าอัปโหลดเทมเพลต",
-  createTemplate: "สร้างเทมเพลต",
-  createTemplateTitle: "สร้างเทมเพลตใหม่จากเอกสารตัวอย่าง",
+  createTemplate: "สร้างเทมเพลตจากเอกสาร",
+  createTemplateTitle: "สร้างเทมเพลตจากเอกสารตัวอย่าง",
   createDoc: "สร้างเอกสาร",
   createDocMulti: "สร้างเอกสาร…",
   saveDraft: "บันทึกดราฟ",
   loadDraft: "โหลดดราฟ",
-  multiMetaHint:
-    " · แนบต้นทาง → ระบบสร้างโครง JSON → AI กรอกค่า → ใส่ลงหน้าจอ",
+  multiMetaHint: " · แนบไฟล์ให้ AI ช่วยกรอกได้จากเมนูเครื่องมือ",
   stickyCtaHint:
-    "จะดาวน์โหลดไฟล์ใหม่ โดยไม่แก้ไฟล์ต้นฉบับ · ช่องว่างต้องติ๊ก “ข้าม” · ส่งออก/นำเข้า JSON ได้ด้านบน · บันทึกดราฟเพื่อกลับมาทำต่อข้ามวัน",
+    "จะได้ไฟล์ใหม่ โดยไม่แก้ไฟล์ต้นฉบับ · ช่องที่ไม่ใช้ให้ติ๊กข้าม · บันทึกดราฟเพื่อทำต่อภายหลัง",
   stickyCtaHintMulti:
-    " · หลายเทมเพลต: แนบต้นทางเพื่อแมป JSON ลงจอ แล้วกดสร้างเลือกไฟล์เดียวหรือทั้งหมด",
+    " · หลายเทมเพลต: แนบไฟล์ให้ AI ช่วยกรอก แล้วกดสร้างเลือกไฟล์เดียวหรือทั้งหมด",
+  uploadInvalidFile:
+    "ไฟล์นี้ใช้ไม่ได้ — เลือกได้เฉพาะไฟล์ Word นามสกุล .docx",
+  connectFailed: "เชื่อมต่อไม่สำเร็จ — ลองใหม่",
+  connectRetry: "ลองอีกครั้ง",
+  draftResumeTitle: "มีงานค้างอยู่ — ทำต่อหรือเริ่มใหม่?",
+  draftResumeBody:
+    "พบงานที่ค้างในเครื่องนี้ — ทำต่อจากเดิม หรือเริ่มใหม่ (ล้างค่าในเครื่อง ไม่ลบไฟล์บนเซิร์ฟเวอร์)",
+  draftResumeContinue: "ทำต่อ",
+  draftResumeFresh: "เริ่มใหม่",
+  recentLocalWork: "งานล่าสุดในเครื่องนี้",
+  generateClearToast: "ดาวน์โหลดแล้ว — ล้างช่องที่กรอกไหม?",
+  generateClearKeep: "เก็บไว้",
+  generateClearWipe: "ล้างช่อง",
+  taggerEntryTitle: "สร้างเทมเพลตจากเอกสารตัวอย่าง",
+  taggerEntrySub:
+    "อัปโหลดไฟล์ Word แล้วลากคลุมข้อความที่อยากให้เป็นช่องกรอก",
+  taggerPickSample: "เลือกไฟล์ตัวอย่าง",
+  taggerExistingBanner: (n) =>
+    `พบช่องกรอกในไฟล์ ${n} ช่อง — คลิกที่ช่องเพื่อเปลี่ยนชื่อ`,
+  taggerExistingBannerNote:
+    "ช่องที่มีในไฟล์อยู่แล้ว ลบในหน้านี้ไม่ได้ หากต้องการลบ ให้แก้ใน Word แล้วอัปโหลดใหม่",
+  taggerMakeField: "ทำให้เป็นช่องกรอก",
+  taggerShowTagCode: "ดูรหัสแท็ก",
+  supportContact: "ติดต่อฝ่ายสนับสนุน",
+  supportEmail: "support@tps18.space",
 
   // Home (mockup 01 / prototype-screens.html)
-  homeHeadline: "docx-form — กรอกแบบฟอร์มเอกสาร Word จากเทมเพลต .docx",
+  homeHeadline: "กรอกเอกสาร Word จากเทมเพลต .docx",
   homeSubhead:
-    "อัปโหลดเทมเพลตที่มีแท็ก {{ชื่อฟิลด์}} แล้วกรอกบนหน้าเว็บ · รองรับหลายเทมเพลต · JSON · AI (BYOK)",
+    "อัปโหลดไฟล์ที่มี {{ตัวแปร}} แล้วกรอกบนหน้าเว็บ — หลายไฟล์ · JSON · AI (BYOK)",
+  homeReadMore: "อ่านเพิ่ม",
   homeAboutSummary: "เกี่ยวกับ docx-form",
   homeAboutBody:
-    "เว็บแอปสร้างเอกสารจากเทมเพลต Microsoft Word (.docx) อ่านตัวแปรแล้วสร้างฟอร์มให้กรอก รองรับดราฟ นำเข้า/ส่งออก JSON และ AI แมปจากไฟล์ต้นทาง",
+    "เว็บแอปสร้างเอกสารจากเทมเพลต Microsoft Word (.docx) อ่านช่องว่างแล้วสร้างฟอร์มให้กรอก รองรับดราฟ และ AI ช่วยกรอกจากไฟล์ต้นทาง (ใช้คีย์ของท่านเอง)",
   dropzoneDrag: "ลากไฟล์ .docx มาวางที่นี่",
-  dropzoneOrPick: "หรือเลือกไฟล์ · ฟรีสูงสุด 2 ไฟล์ต่อครั้ง",
+  // Fallback only — live copy uses getMaxMultiTemplates() / planQuotaLabel() (F02).
+  dropzoneOrPick: "หรือเลือกไฟล์ · สูงสุดตามโควตาแผนของคุณ",
   dropzonePick: "เลือกไฟล์",
-  dropzoneFreeLimit: "ฟรีสูงสุด 2 ไฟล์ต่อครั้ง",
+  dropzoneFreeLimit: "สูงสุดตามโควตาแผนของคุณ",
   dropzoneAriaUploadWord: "อัปโหลดไฟล์ Word",
   dropzoneAriaUploadTemplates: "อัปโหลดไฟล์เทมเพลต Word",
   showFullContentLabel: "แสดงรายละเอียดเนื้อหาในไฟล์ทั้งหมด",
   noTemplateTitle: "ยังไม่มีเทมเพลต?",
-  noTemplateDesc: "ไฮไลต์ข้อความในไฟล์ตัวอย่าง แล้วแทนด้วย {{ตัวแปร}}",
+  noTemplateDesc: "อัปโหลดไฟล์ตัวอย่าง แล้วลากคลุมข้อความที่อยากให้เป็นช่องกรอก",
   createTemplateFromDoc: "สร้างเทมเพลตจากเอกสาร",
-  manualVarsDetails: "วิธีใส่ตัวแปรด้วยมือ",
+  manualVarsDetails: "สำหรับผู้จัดทำเทมเพลต",
   startCreateTemplate: "เริ่มสร้างเทมเพลต",
   loadDraftAria: "โหลดดราฟ",
   loadDraftEmptyLoading: "กำลังโหลดรายการดราฟ…",
   draftListLoadFailed: "อ่านรายการดราฟไม่สำเร็จ",
   loadDraftDialogBody:
-    "เลือกดราฟที่บันทึกไว้ในเบราว์เซอร์นี้ (คงอยู่ข้ามวัน)",
+    "เลือกงานที่บันทึกไว้ในเครื่องนี้ (อยู่ในเบราว์เซอร์นี้เท่านั้น ไม่ใช่บนบัญชี)",
   dialogClose: "ปิด",
   dialogCancel: "ยกเลิก",
   dialogSave: "บันทึก",
   dialogDelete: "ลบ",
-  dialogLoad: "โหลด",
+  dialogLoad: "เปิดดราฟนี้",
 
   // Named drafts (IndexedDB)
   draftFallbackTitle: "ดราฟ",
@@ -124,7 +212,7 @@ export const UI_LABELS = Object.freeze({
   draftSaveNoTemplate: "ยังไม่มีเทมเพลตให้บันทึกดราฟ",
   draftSaveDialogTitle: "บันทึกดราฟ",
   draftSaveDialogBody:
-    "ตั้งชื่อดราฟเพื่อโหลดกลับภายหลัง (ข้ามวัน / สลับงานได้) — เก็บในเบราว์เซอร์นี้ผ่าน IndexedDB",
+    "ตั้งชื่อดราฟเพื่อเปิดกลับภายหลัง (ข้ามวัน / สลับงานได้) — เก็บเฉพาะในเบราว์เซอร์นี้ ไม่ใช่บนบัญชี",
   draftSaveNameLabel: "ชื่อดราฟ (ไม่บังคับ)",
   draftSaveSuccess: (title) => `บันทึกดราฟแล้ว: ${title}`,
   draftSaveFailed: "บันทึกดราฟไม่สำเร็จ",
@@ -145,7 +233,7 @@ export const UI_LABELS = Object.freeze({
   draftDeleteSuccess: "ลบดราฟแล้ว",
   draftDeleteFailed: "ลบดราฟไม่สำเร็จ",
   tipKindText: "ข้อความ",
-  tipKindBool: "ติ๊ก",
+  tipKindBool: "ช่องติ๊กถูก/ไม่ถูก",
   tipKindAuto: "รันเลข",
   tipKindImage: "รูป",
   tipKindListTable: "ลิสต์ / ตาราง",
@@ -155,9 +243,36 @@ export const UI_LABELS = Object.freeze({
   tipCodeImage: "{{logo}}",
   tipCodeList: "{{#รายการ}}…{{/}}",
   tipNoteBoolLead: "หลัง",
-  tipNoteBoolTrail: "คือข้อความเมื่อจริง,เท็จ",
+  tipNoteBoolTrail: "คือข้อความเมื่อถูก / ไม่ถูก (ไม่ใช่ชื่อจริง)",
   tipNoteAuto: "ใช้ได้เฉพาะในลูป {{#…}}…{{/}}",
   tipNoteImage: "วางรูปใน Word แล้วใส่แท็กใน Alt Text",
+  taggerKindBoolLabel: "ช่องติ๊กถูก/ไม่ถูก",
+  taggerKindBoolCode: "{{ชื่อ?ถูก,ไม่ถูก}}",
+  taggerKindBoolTrue: "ข้อความเมื่อถูก",
+  taggerKindBoolFalse: "ข้อความเมื่อไม่ถูก",
+  draftOpenAction: "เปิดดราฟนี้",
+  draftOpenDialogBody:
+    "เลือกงานที่บันทึกไว้ในเครื่องนี้ (อยู่ในเบราว์เซอร์นี้เท่านั้น ไม่ใช่บนบัญชี)",
+  addKeyNeedsUpgrade: "ต้องการหลายคีย์ — อัปเกรด",
+  addKeyUpsellTitle: "แผนฟรีเก็บคีย์ได้ 1 อัน",
+  addKeyUpsellBodyLoggedOut:
+    "บัญชีฟรีเก็บ AI key ได้ 1 อันในเครื่องนี้ หากต้องการหลายคีย์ ให้เข้าสู่ระบบแล้วให้ผู้ดูแลตั้งแผนจ่ายแล้วให้ หรืออัปเกรดที่หน้าบัญชี (ยังไม่มีหน้าชำระเงินอัตโนมัติ)",
+  addKeyUpsellBodyLoggedIn:
+    "บัญชีฟรีเก็บ AI key ได้ 1 อัน หากต้องการหลายคีย์ ให้ผู้ดูแลตั้งแผนจ่ายแล้วให้ที่หน้าบัญชี หรือติดต่อฝ่ายสนับสนุน",
+  addKeyUpsellAccount: "ไปหน้าบัญชี / เข้าสู่ระบบ",
+  taggerDownloadNext:
+    "ดาวน์โหลดเทมเพลตแล้ว — ใช้กรอกต่อได้เลย หรืออัปโหลดไฟล์นี้ภายหลัง",
+  taggerContinueFill: "ใช้กรอกต่อ",
+  outputNameTitle: "ตั้งชื่อไฟล์ที่จะดาวน์โหลด",
+  outputNameLabel: "ชื่อไฟล์ (.docx)",
+  outputNameConfirm: "ดาวน์โหลด",
+  logoutConfirmTitle: "ออกจากระบบ?",
+  logoutConfirmBody: "จะออกจากบัญชีนี้บนเครื่องนี้ — งานในเครื่อง (ดราฟ/คีย์ท้องถิ่น) ยังอยู่",
+  logoutConfirmOk: "ออกจากระบบ",
+  aiCancelNeutral: "ยกเลิกการรอ AI แล้ว",
+  dropzoneOrPickFree: "หรือเลือกไฟล์ · สูงสุดตามโควตาแผนฟรี",
+  dropzoneOrPickPaid: (n) => `หรือเลือกไฟล์ · สูงสุด ${n} ไฟล์ต่อครั้ง (แผนจ่ายแล้ว)`,
+  dropzoneOrPickFreeN: (n) => `หรือเลือกไฟล์ · สูงสุด ${n} ไฟล์ต่อครั้ง (ฟรี)`,
 
   // Doc preview chrome
   docPreviewLabel: "ตัวอย่างเนื้อหาในไฟล์ (กรอกในช่องว่างได้)",
@@ -181,8 +296,9 @@ export function clipValidationItems(items, limit = 12) {
 /**
  * @param {string} fieldLabel
  */
-export function formatInvalidEmailMissing(fieldLabel) {
-  return `${String(fieldLabel || "").trim()} ${UI_LABELS.invalidEmailSuffix}`.trim();
+export function formatInvalidEmailMissing(fieldLabel, fieldName = "") {
+  const label = UI_LABELS.shortValidationLabel(fieldLabel, fieldName);
+  return `${label} ${UI_LABELS.invalidEmailSuffix}`.trim();
 }
 
 /**
@@ -213,18 +329,17 @@ export function fieldDisplayLabel(field, labelMap, fallbackName) {
  * Placeholder for text blanks: "เช่น " + display label (never a raw EN key when label exists).
  * @param {string} displayLabel
  */
-export function formatExamplePlaceholder(displayLabel) {
-  const label = String(displayLabel || "").trim();
-  if (!label) return "";
-  return `${UI_LABELS.placeholderExamplePrefix}${label}`;
+export function formatExamplePlaceholder(displayLabel, fieldName = "") {
+  return UI_LABELS.examplePlaceholderLabel(displayLabel, fieldName);
 }
 
 /**
  * @param {string} displayLabel
  * @param {string} [minRowsNote]
+ * @param {string} [fieldName]
  */
-export function formatMissingFieldLabel(displayLabel, minRowsNote) {
-  const label = String(displayLabel || "").trim();
+export function formatMissingFieldLabel(displayLabel, minRowsNote, fieldName = "") {
+  const label = UI_LABELS.shortValidationLabel(displayLabel, fieldName);
   if (minRowsNote) return `${label} (${minRowsNote})`;
   return label;
 }
@@ -234,7 +349,9 @@ export function formatMissingFieldLabel(displayLabel, minRowsNote) {
  * @param {string[]} displayLabels
  */
 export function formatValidationBannerModel(displayLabels) {
-  const labels = (displayLabels || []).map((s) => String(s).trim()).filter(Boolean);
+  const labels = (displayLabels || [])
+    .map((s) => UI_LABELS.shortValidationLabel(s))
+    .filter(Boolean);
   return {
     title: UI_LABELS.validationTitle(labels.length),
     items: labels,
@@ -306,6 +423,10 @@ export function collectMissingListValidation(opts) {
   const labelMap = opts?.labelMap || null;
   const needRowNote =
     UI_LABELS.validationListNeedFilledRow || UI_LABELS.validationListMinRows;
+
+  if (opts?.listSkipped) {
+    return { missing: [], mode: "cells" };
+  }
 
   if (!listHasFilledRow(rows, itemFields)) {
     return {
@@ -528,4 +649,61 @@ export function layoutBlocksToPlainText(blocks, fileContent = "") {
  */
 export function listDisplayName(listName, field, labelMap) {
   return fieldDisplayLabel(field || { name: listName }, labelMap, listName);
+}
+
+/**
+ * Count required cells still empty (skipped fields/rows excluded). Pure — for status pill + tests.
+ * @param {{
+ *   fields: LabelField[],
+ *   values: Record<string, unknown>,
+ *   images?: Record<string, unknown>,
+ *   skip?: Record<string, boolean>,
+ *   rowSkip?: Record<string, Record<number, Record<string, boolean>>>,
+ *   labelMap?: Map<string, string> | Record<string, string> | null,
+ *   isEmailField?: (name: string, field: LabelField) => boolean,
+ *   emailInvalid?: (raw: string) => boolean,
+ * }} snap
+ */
+export function countEmptyRequiredFields(snap) {
+  const fields = Array.isArray(snap?.fields) ? snap.fields : [];
+  const values = snap?.values && typeof snap.values === "object" ? snap.values : {};
+  const images = snap?.images && typeof snap.images === "object" ? snap.images : {};
+  const skip = snap?.skip && typeof snap.skip === "object" ? snap.skip : {};
+  const rowSkip = snap?.rowSkip && typeof snap.rowSkip === "object" ? snap.rowSkip : {};
+  const labelMap = snap?.labelMap || null;
+
+  /** @type {string[]} */
+  const missing = [];
+  for (const f of fields) {
+    if (!f || skip[f.name]) continue;
+    const fieldLabel = fieldDisplayLabel(f, labelMap, f.name);
+    if (f.type === "text" || f.type === "email") {
+      const raw = String(values[f.name] ?? "").trim();
+      if (!raw) missing.push(fieldLabel);
+      else if (
+        typeof snap.isEmailField === "function" &&
+        typeof snap.emailInvalid === "function" &&
+        snap.isEmailField(f.name, f) &&
+        snap.emailInvalid(raw)
+      ) {
+        missing.push(fieldLabel);
+      }
+    } else if (f.type === "image") {
+      if (!images[f.name]) missing.push(fieldLabel);
+    } else if (f.type === "list") {
+      const rows = values[f.name];
+      const listResult = collectMissingListValidation({
+        fieldLabel,
+        itemFields: f.itemFields,
+        rows,
+        rowSkip: rowSkip[f.name],
+        labelMap,
+        listSkipped: false,
+        isEmailField: snap.isEmailField,
+        emailInvalid: snap.emailInvalid,
+      });
+      missing.push(...listResult.missing);
+    }
+  }
+  return missing.length;
 }

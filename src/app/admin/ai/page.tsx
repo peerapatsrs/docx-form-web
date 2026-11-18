@@ -2,17 +2,31 @@
 
 import { useEffect, useState } from "react";
 
+type ServerKeySource = {
+  providerId: string;
+  label: string;
+  sourceLabel: string;
+  clearable?: boolean;
+};
+
 type AiStatus = {
   byok?: boolean;
   connected?: boolean;
   model?: string;
+  effectiveModel?: string;
   models?: { id: string; label: string }[];
   adminDefaultModel?: string | null;
-  hasServerEnvKey?: boolean;
+  serverKeySources?: ServerKeySource[];
+  hasClearableServerKey?: boolean;
+  effectiveProvider?: string;
+  effectiveProviderLabel?: string;
+  adminDefaultProvider?: string;
+  defaultModel?: string;
   premiumEnforce?: boolean;
-  maskedKey?: string | null;
-  configPath?: string;
+  premiumEnforceLabel?: string;
+  configStoreLabel?: string;
   studioUrl?: string;
+  keySource?: "user" | "shared" | "none";
 };
 
 export default function AdminAiPage() {
@@ -23,24 +37,28 @@ export default function AdminAiPage() {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
 
+  async function load() {
+    const res = await fetch("/api/admin/ai", { credentials: "include" });
+    const data = (await res.json().catch(() => ({}))) as {
+      settings?: { defaultModel?: string };
+      status?: AiStatus;
+      error?: string;
+    };
+    if (!res.ok) {
+      setError(data.error || "โหลดสถานะ AI ไม่สำเร็จ");
+    } else {
+      setStatus(data.status || null);
+      setDefaultModel(
+        data.settings?.defaultModel ||
+          data.status?.adminDefaultModel ||
+          "gemini-3.8-flash",
+      );
+    }
+  }
+
   useEffect(() => {
     void (async () => {
-      const res = await fetch("/api/admin/ai", { credentials: "include" });
-      const data = (await res.json().catch(() => ({}))) as {
-        settings?: { defaultModel?: string };
-        status?: AiStatus;
-        error?: string;
-      };
-      if (!res.ok) {
-        setError(data.error || "โหลดสถานะ AI ไม่สำเร็จ");
-      } else {
-        setStatus(data.status || null);
-        setDefaultModel(
-          data.settings?.defaultModel ||
-            data.status?.adminDefaultModel ||
-            "gemini-3.8-flash",
-        );
-      }
+      await load();
       setLoading(false);
     })();
   }, []);
@@ -74,6 +92,38 @@ export default function AdminAiPage() {
     }
   }
 
+  async function clearServerFileKey() {
+    if (
+      !window.confirm(
+        "ลบคีย์ที่เก็บบนเซิร์ฟเวอร์ (ฐานข้อมูล)? คีย์ที่ตั้งผ่านระบบจะไม่ถูกลบ",
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setOk("");
+    try {
+      const res = await fetch("/api/admin/ai/server-key", {
+        method: "DELETE",
+        credentials: "include",
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        status?: AiStatus;
+        error?: string;
+      };
+      if (!res.ok) {
+        setError(data.error || "ลบคีย์ไม่สำเร็จ");
+        return;
+      }
+      setStatus(data.status || null);
+      setOk("ลบคีย์บนเซิร์ฟเวอร์แล้ว");
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (loading) {
     return (
       <section className="admin-panel">
@@ -83,44 +133,115 @@ export default function AdminAiPage() {
   }
 
   const models = status?.models || [];
+  const effectiveModel = status?.effectiveModel || status?.model || "—";
+  const effectiveProvider =
+    status?.effectiveProviderLabel || status?.effectiveProvider || "—";
+  const serverKeySources = Array.isArray(status?.serverKeySources)
+    ? status.serverKeySources
+    : [];
+  const canClearServerKey = Boolean(
+    status?.hasClearableServerKey ||
+      serverKeySources.some((s) => s.clearable),
+  );
 
   return (
     <div className="admin-overview">
       <section className="admin-panel">
-        <h2 className="admin-panel-title">สถานะ</h2>
+        <h2 className="admin-panel-title">สถานะ AI</h2>
         <ul className="admin-kv">
           <li>
             <span>โหมดคีย์</span>
-            <strong>{status?.byok ? "BYOK (คีย์อยู่ที่เบราว์เซอร์)" : "เซิร์ฟเวอร์เก็บคีย์ได้"}</strong>
+            <strong>
+              {status?.byok
+                ? "ใช้คีย์ของผู้ใช้ (เก็บในเบราว์เซอร์/บัญชี)"
+                : "เซิร์ฟเวอร์เก็บคีย์ได้"}
+            </strong>
+          </li>
+          {serverKeySources.length === 0 ? (
+            <li>
+              <span>คีย์เซิร์ฟเวอร์</span>
+              <strong>ไม่ได้ตั้งค่าคีย์เซิร์ฟเวอร์</strong>
+            </li>
+          ) : (
+            serverKeySources.map((src) => (
+              <li key={src.providerId}>
+                <span>คีย์เซิร์ฟเวอร์ · {src.label}</span>
+                <strong>{src.sourceLabel || "set via server"}</strong>
+              </li>
+            ))
+          )}
+          <li>
+            <span>บังคับแผนพรีเมียม</span>
+            <strong>
+              {status?.premiumEnforceLabel ||
+                (status?.premiumEnforce ? "บังคับแผนพรีเมียม" : "ไม่บังคับ")}
+            </strong>
           </li>
           <li>
-            <span>คีย์จาก env</span>
-            <strong>{status?.hasServerEnvKey ? "มี" : "ไม่มี"}</strong>
+            <span>แหล่งคีย์ที่ใช้จริง</span>
+            <strong>
+              {status?.keySource === "user"
+                ? "คีย์ผู้ใช้"
+                : status?.keySource === "shared"
+                  ? "คีย์ร่วมของเซิร์ฟเวอร์"
+                  : "ยังไม่มีคีย์"}
+            </strong>
           </li>
           <li>
-            <span>PREMIUM_ENFORCE</span>
-            <strong>{status?.premiumEnforce ? "เปิด" : "ปิด"}</strong>
+            <span>ผู้ให้บริการที่ใช้จริง</span>
+            <strong>{effectiveProvider}</strong>
           </li>
           <li>
-            <span>โมเดลที่ resolve ตอนนี้</span>
-            <strong>{status?.model || "—"}</strong>
+            <span>โมเดลที่ใช้จริง (effective)</span>
+            <strong>{effectiveModel}</strong>
           </li>
           <li>
-            <span>path คอนฟิก</span>
-            <strong>{status?.configPath || "—"}</strong>
+            <span>ค่าเริ่มต้นผู้ให้บริการ (admin)</span>
+            <strong>{status?.adminDefaultProvider || "google"}</strong>
+          </li>
+          <li>
+            <span>โมเดลเริ่มต้นของ provider</span>
+            <strong>{status?.defaultModel || "—"}</strong>
+          </li>
+          <li>
+            <span>ที่เก็บคอนฟิก</span>
+            <strong>{status?.configStoreLabel || "—"}</strong>
           </li>
         </ul>
+        {canClearServerKey ? (
+          <p className="admin-muted" style={{ marginTop: "0.75rem" }}>
+            <button
+              type="button"
+              className="admin-btn admin-btn-danger"
+              disabled={busy}
+              onClick={() => void clearServerFileKey()}
+            >
+              ลบคีย์บนเซิร์ฟเวอร์ (ฐานข้อมูล)
+            </button>
+          </p>
+        ) : null}
+        <p className="admin-muted">
+          คีย์จากเซิร์ฟเวอร์เป็นแบบอ่านอย่างเดียว (set via server) — ลบผ่าน UI ไม่ได้ · ไม่แสดงค่าคีย์
+        </p>
+        <p className="admin-muted">
+          ผู้ให้บริการและโมเดลที่ใช้จริงด้านบนใช้ resolver เดียวกับแถบสถานะ (pill) บนหน้าแรก
+        </p>
         {status?.studioUrl ? (
           <p className="admin-muted">
-            <a href={status.studioUrl} target="_blank" rel="noreferrer">
-              Google AI Studio
+            <a
+              className="admin-link"
+              href={status.studioUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              เอกสารผู้ให้บริการ
             </a>
           </p>
         ) : null}
       </section>
 
       <section className="admin-panel">
-        <h2 className="admin-panel-title">โมเดลเริ่มต้น</h2>
+        <h2 className="admin-panel-title">โมเดลเริ่มต้น (admin)</h2>
         {error ? (
           <p className="auth-error" role="alert">
             {error}
@@ -133,7 +254,7 @@ export default function AdminAiPage() {
         ) : null}
         <form className="admin-form" onSubmit={(e) => void save(e)}>
           <label className="admin-field">
-            <span>defaultModel</span>
+            <span>โมเดลเริ่มต้น</span>
             <select
               className="admin-select"
               value={defaultModel}
@@ -149,6 +270,10 @@ export default function AdminAiPage() {
               ) : null}
             </select>
           </label>
+          <p className="admin-muted">
+            ค่านี้เป็นค่าตั้งต้นของแอดมิน — โมเดลที่ใช้จริงด้านบนอาจต่างออกไปเมื่อมีคีย์ร่วม
+            หรือคีย์ผู้ใช้ (ตรงกับ pill)
+          </p>
           <button type="submit" className="admin-btn admin-btn-primary" disabled={busy}>
             {busy ? "กำลังบันทึก…" : "บันทึก"}
           </button>

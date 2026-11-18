@@ -204,13 +204,20 @@ export function premiumDeniedPayload(feature: PremiumFeatureId) {
 
 export async function requireSuperAdmin(req: Request): Promise<
   | { ok: true; userId: string; email: string | null }
-  | { ok: false; status: 401 | 403; error: string }
+  | { ok: false; status: 401 | 403; error: string; code?: string }
 > {
   try {
     const { auth } = await import("./auth");
     const session = await auth.api.getSession({ headers: req.headers });
     const userId = session?.user?.id;
-    if (!userId) return { ok: false, status: 401, error: "ต้องเข้าสู่ระบบ" };
+    if (!userId) {
+      return {
+        ok: false,
+        status: 401,
+        error: "ต้องเข้าสู่ระบบ",
+        code: "AUTH_REQUIRED",
+      };
+    }
     const live = await loadUserBilling(userId);
     const role =
       live.role ||
@@ -227,7 +234,12 @@ export async function requireSuperAdmin(req: Request): Promise<
       email: live.email || session.user.email || null,
     };
   } catch {
-    return { ok: false, status: 401, error: "ต้องเข้าสู่ระบบ" };
+    return {
+      ok: false,
+      status: 401,
+      error: "ต้องเข้าสู่ระบบ",
+      code: "AUTH_REQUIRED",
+    };
   }
 }
 

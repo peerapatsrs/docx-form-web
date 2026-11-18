@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - feat/oidc-sso
+      - "cursor/**"
+      - "fix/**"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: install-typecheck-test-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify vendored mw-shared pin (before any auth install)
+        run: node scripts/mw-shared-verify.mjs
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Build @mw-shared/auth from vendored tree only
+        run: |
+          set -euo pipefail
+          npm --prefix vendor/mw-shared/auth ci
+          npm --prefix vendor/mw-shared/auth run build
+
+      - name: Install app deps
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Production build
+        env:
+          # Placeholder only — next build imports auth modules; not a real secret.
+          BETTER_AUTH_SECRET: build-time-placeholder-secret-32chars
+          DATABASE_URL: postgres://build:build@127.0.0.1:5432/build
+          NEXT_TELEMETRY_DISABLED: "1"
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: npm run build:prod

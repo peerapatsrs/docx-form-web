@@ -230,6 +230,177 @@ await check("client coerce remaps gemini under cursor (app.js source)", async ()
   assert.match(app, /coerceClientAiModel\(/);
 });
 
+await check("getAiTimeoutMsForPayload scales with document size", async () => {
+  await withEnv(
+    {
+      DOCX_FORM_AI_TIMEOUT_MS: "90000",
+      DOCX_FORM_AI_TIMEOUT_EXTRA_MS_PER_MIB: "8000",
+    },
+    async () => {
+      const {
+        getAiTimeoutMsForPayload,
+        getAiTimeoutMs,
+        AI_TIMEOUT_SCALE_SOFT_BYTES,
+      } = await loadFresh("src/server/ai-request.ts");
+      assert.equal(getAiTimeoutMsForPayload(0), getAiTimeoutMs());
+      assert.equal(
+        getAiTimeoutMsForPayload(AI_TIMEOUT_SCALE_SOFT_BYTES),
+        getAiTimeoutMs(),
+      );
+      const twoMiBOver = AI_TIMEOUT_SCALE_SOFT_BYTES + 2 * 1024 * 1024;
+      const scaled = getAiTimeoutMsForPayload(twoMiBOver);
+      assert.equal(scaled, 90_000 + 16_000);
+    },
+  );
+  await withEnv(
+    {
+      DOCX_FORM_AI_TIMEOUT_MS: "90000",
+      DOCX_FORM_AI_TIMEOUT_EXTRA_MS_PER_MIB: "0",
+    },
+    async () => {
+      const { getAiTimeoutMsForPayload } = await loadFresh(
+        "src/server/ai-request.ts",
+      );
+      assert.equal(
+        getAiTimeoutMsForPayload(5 * 1024 * 1024),
+        90_000,
+        "extra=0 disables scaling",
+      );
+    },
+  );
+});
+
+await check("isRetryableAiError: timeout/transient yes, 401/4xx no", async () => {
+  const {
+    isRetryableAiError,
+    AiTimeoutError,
+  } = await loadFresh("src/server/ai-request.ts");
+  assert.equal(isRetryableAiError(new AiTimeoutError()), true);
+  assert.equal(
+    isRetryableAiError(Object.assign(new Error("rate"), { status: 429 })),
+    true,
+  );
+  assert.equal(
+    isRetryableAiError(Object.assign(new Error("busy"), { status: 503 })),
+    true,
+  );
+  assert.equal(
+    isRetryableAiError(new Error("Google AI: เรียกถี่เกินไป — wait")),
+    true,
+  );
+  assert.equal(
+    isRetryableAiError(Object.assign(new Error("nope"), { status: 401 })),
+    false,
+  );
+  assert.equal(
+    isRetryableAiError(Object.assign(new Error("bad"), { status: 400 })),
+    false,
+  );
+  assert.equal(
+    isRetryableAiError(
+      Object.assign(new Error("auth"), { code: "AI_KEY_INVALID" }),
+    ),
+    false,
+  );
+  assert.equal(
+    isRetryableAiError(new Error("OpenAI: API key หรือสิทธิ์ไม่ถูกต้อง")),
+    false,
+  );
+});
+
+await check("withAiRetry succeeds after mocked timeout then ok", async () => {
+  const { withAiRetry, AiTimeoutError, isAiTimeoutError } = await loadFresh(
+    "src/server/ai-request.ts",
+  );
+  let calls = 0;
+  const t0 = Date.now();
+  const result = await withAiRetry(
+    async (_signal, attempt, timeoutMs) => {
+      calls += 1;
+      assert.ok(timeoutMs > 0);
+      if (attempt < 3) {
+        throw new AiTimeoutError(
+          `AI_TIMEOUT: mock hang attempt ${attempt}`,
+        );
+      }
+      return { ok: true, attempt };
+    },
+    {
+      route: "test.retry.timeout",
+      retryMax: 2,
+      backoffMs: 20,
+      timeoutMs: 200,
+      overallTimeoutMs: 5_000,
+    },
+  );
+  assert.deepEqual(result, { ok: true, attempt: 3 });
+  assert.equal(calls, 3);
+  assert.ok(Date.now() - t0 < 4_000);
+  assert.equal(isAiTimeoutError(new AiTimeoutError()), true);
+});
+
+await check("withAiRetry does not retry 401 / AI_AUTH", async () => {
+  const { withAiRetry } = await loadFresh("src/server/ai-request.ts");
+  let calls = 0;
+  let threw = null;
+  try {
+    await withAiRetry(
+      async () => {
+        calls += 1;
+        const err = new Error("API key หรือสิทธิ์ไม่ถูกต้อง");
+        err.code = "AI_AUTH";
+        err.status = 401;
+        throw err;
+      },
+      {
+        route: "test.retry.401",
+        retryMax: 3,
+        backoffMs: 10,
+        timeoutMs: 500,
+        overallTimeoutMs: 3_000,
+      },
+    );
+  } catch (err) {
+    threw = err;
+  }
+  assert.ok(threw);
+  assert.equal(calls, 1, "must not retry auth failures");
+  assert.match(String(threw.message), /API key/);
+});
+
+await check("withAiRetry retries transient 503 then preserves final timeout code", async () => {
+  const { withAiRetry, AiTimeoutError, isAiTimeoutError } = await loadFresh(
+    "src/server/ai-request.ts",
+  );
+  let calls = 0;
+  let threw = null;
+  try {
+    await withAiRetry(
+      async () => {
+        calls += 1;
+        if (calls === 1) {
+          const err = new Error("เซิร์ฟเวอร์โหลดสูงชั่วคราว");
+          err.status = 503;
+          throw err;
+        }
+        throw new AiTimeoutError("AI_TIMEOUT: still hanging");
+      },
+      {
+        route: "test.retry.503.then.timeout",
+        retryMax: 1,
+        backoffMs: 15,
+        timeoutMs: 200,
+        overallTimeoutMs: 3_000,
+      },
+    );
+  } catch (err) {
+    threw = err;
+  }
+  assert.equal(calls, 2);
+  assert.ok(isAiTimeoutError(threw));
+  assert.equal(threw.code, "AI_TIMEOUT");
+});
+
 if (failed) {
   console.error(`ai-timeout-unit-test: ${failed} failed`);
   process.exit(1);

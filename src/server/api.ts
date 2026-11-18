@@ -2611,6 +2611,8 @@ export function createApi(options: {
       logAiCall,
       aiProviderErrorJsonBody,
       isAiTimeoutError,
+      withAiRetry,
+      getAiTimeoutMsForPayload,
     } = await import("./ai-request");
     const requestId = getOrCreateRequestId(c.req.raw);
     const startedAt = Date.now();
@@ -2728,7 +2730,13 @@ export function createApi(options: {
         staffRaw = false;
       }
 
-      const runSuggest = async (signal?: AbortSignal) => {
+      const payloadBytes = buffer.byteLength;
+      const perAttemptTimeoutMs = getAiTimeoutMsForPayload(payloadBytes);
+
+      const runSuggestOnce = async (
+        signal: AbortSignal,
+        timeoutMs: number,
+      ) => {
         const result = await runWithSavedAiKeyAuthFallback(
           resolved,
           (effective) =>
@@ -2739,6 +2747,7 @@ export function createApi(options: {
               filename: file.name,
               nameLanguage,
               signal,
+              timeoutMs,
             }),
           { allowSharedAuthFallback: choiceSource === "server" },
         );
@@ -2761,6 +2770,21 @@ export function createApi(options: {
           nameLanguage,
         };
       };
+
+      const runSuggest = (outer?: AbortSignal) =>
+        withAiRetry(
+          (signal, _attempt, timeoutMs) =>
+            runSuggestOnce(signal, timeoutMs),
+          {
+            signal: outer,
+            payloadBytes,
+            timeoutMs: perAttemptTimeoutMs,
+            route: "/api/template/suggest-tags",
+            provider: clientProvider,
+            model: clientModel,
+            requestId,
+          },
+        );
 
       const wantAsync =
         c.req.query("async") === "1" ||

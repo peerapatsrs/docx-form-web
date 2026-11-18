@@ -414,6 +414,9 @@ Env:
 - `DOCX_FORM_BYOK_ONLY` — default `1` (personal keys only). Set `0` to enable shared server key for users without a personal key (see above).
 - `DOCX_FORM_CURSOR_API_KEY` — shared Cursor key used when BYOK-only is off (and as vault-auth fallback).
 - `DOCX_FORM_AI_TIMEOUT_MS` — shared AI call budget (also caps key tests ≤ 20s)
+- `DOCX_FORM_AI_TIMEOUT_EXTRA_MS_PER_MIB` — optional size scaling for large docs (default 8000; `0` disables)
+- `DOCX_FORM_AI_RETRY_MAX` / `DOCX_FORM_AI_RETRY_BACKOFF_MS` — bounded retries for timeouts/429/5xx only (not 401/4xx); suggest-tags uses these
+- `DOCX_FORM_AI_OVERALL_TIMEOUT_MS` — optional wall budget across attempts
 - `DOCX_FORM_AI_KEY_TEST_MOCK=ok\|401\|auth\|quota\|429\|hang` — local/CI mock for key probe
 
 ---

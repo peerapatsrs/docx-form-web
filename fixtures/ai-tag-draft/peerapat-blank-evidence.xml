@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>รายการหลักฐานแนบ</w:t></w:r></w:p>
+    <w:tbl>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>ลำดับ</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>รายการ</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>เลขนิติบุคคล</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>เลือก</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>ยืนยัน</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t></w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t></w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t></w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>☐</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>☐</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t></w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t></w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t></w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>☐</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>☐</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t></w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t></w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t></w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>☐</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>☐</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+  </w:body>
+</w:document>

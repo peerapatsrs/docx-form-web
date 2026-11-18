@@ -237,6 +237,120 @@ await check("blank checkbox table: wrap + ordinal + bool, parse→fill", async (
   });
 });
 
+function plainFromXml(xml) {
+  return [...xml.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map((m) => m[1]).join("");
+}
+
+await check("peerapat 18-row amount table: totals in tagged DOCX", async () => {
+  const xml = readFileSync(join(FIX_AI, "peerapat-amount-table.xml"), "utf8");
+  const plain = plainFromXml(xml);
+  const suggestions = validateAiTagSuggestions(plain, [], xml, "th");
+  assert.ok(suggestions.some((s) => s.plainText === "1200"), "1200 tagged");
+  assert.ok(
+    suggestions.some((s) => s.plainText === "หนึ่งพันสองร้อยบาท"),
+    "baht-text tagged",
+  );
+  assert.ok(
+    suggestions.some((s) => s.plainText === "(บาทถ้วน)"),
+    "note tagged",
+  );
+  assert.ok(
+    suggestions.filter((s) => s.mode === "delete-tr").length >= 10,
+    "most sample rows deleted",
+  );
+  assert.ok(
+    !suggestions.some((s) => /_loop$/.test(s.name)),
+    "no _loop loop names",
+  );
+  const tagged = await tagTemplate(
+    await docxFromXml(xml),
+    opsFromSuggestions(suggestions),
+  );
+  const { opens, closes, all, doc } = await readDocTags(tagged.buffer);
+  assert.equal(opens.length, closes.length, `opens/closes ${all.join(" ")}`);
+  assert.match(doc, /\{\{รวมเงิน\}\}/);
+  assert.match(doc, /\{\{[^}]*บาท/);
+  assert.match(doc, /\{\{บาทถ้วน\}\}/);
+  await parseTemplate(tagged.buffer);
+});
+
+await check("peerapat blank evidence: wrap+ordinal+bool in tagged DOCX", async () => {
+  const xml = readFileSync(join(FIX_AI, "peerapat-blank-evidence.xml"), "utf8");
+  const plain = plainFromXml(xml);
+  const suggestions = validateAiTagSuggestions(plain, [], xml, "th");
+  assert.ok(suggestions.some((s) => s.mode === "wrap-row"), "must wrap-row");
+  assert.ok(
+    suggestions.some(
+      (s) =>
+        s.cellIndex === 0 &&
+        (s.kind === "auto" || String(s.tag || "").includes("+")),
+    ),
+    "ordinal {{+…}}",
+  );
+  assert.ok(
+    suggestions.filter((s) => s.kind === "bool").length >= 2,
+    "checkbox bools",
+  );
+  assert.ok(
+    !suggestions.some(
+      (s) => s.kind === "auto" && /เลขนิติบุคคล/.test(String(s.name || "")),
+    ),
+    "no {{+เลขนิติบุคคล}}",
+  );
+  assert.ok(
+    !suggestions.some(
+      (s) =>
+        (s.mode === "wrap-row" || s.mode === "wrap") &&
+        !suggestions.some(
+          (inner) =>
+            inner.wrapTag === s.tag &&
+            (inner.wrapOccurrence ?? 0) === s.occurrence,
+        ),
+    ),
+    "no empty loops",
+  );
+  const tagged = await tagTemplate(
+    await docxFromXml(xml),
+    opsFromSuggestions(suggestions),
+  );
+  const { opens, closes, doc } = await readDocTags(tagged.buffer);
+  assert.equal(opens.length, closes.length);
+  assert.match(doc, /\{\{\+/);
+  assert.match(doc, /\?/);
+  await parseTemplate(tagged.buffer);
+});
+
+await check("peerapat mixed para+table loops: balanced tagged DOCX", async () => {
+  const xml = readFileSync(join(FIX_AI, "peerapat-mixed-loops.xml"), "utf8");
+  const plain = plainFromXml(xml);
+  const suggestions = validateAiTagSuggestions(plain, [], xml, "th");
+  assert.ok(suggestions.some((s) => s.mode === "wrap" && s.name === "จำเลยที่"));
+  assert.ok(
+    suggestions.filter((s) => s.mode === "wrap-row").length >= 2,
+    "both tables wrapped",
+  );
+  assert.ok(suggestions.some((s) => s.plainText === "1200"));
+  assert.ok(suggestions.some((s) => s.plainText === "หนึ่งพันสองร้อยบาท"));
+  assert.ok(
+    !suggestions.some((s) => s.kind === "auto" && s.name === "ชื่อ"),
+    "no {{+ชื่อ}}",
+  );
+  assert.ok(!suggestions.some((s) => /_loop$/.test(s.name)));
+  const tagged = await tagTemplate(
+    await docxFromXml(xml),
+    opsFromSuggestions(suggestions),
+  );
+  const { opens, closes, all, doc } = await readDocTags(tagged.buffer);
+  assert.equal(
+    opens.length,
+    closes.length,
+    `balanced loops; tags=${all.join(" ")}`,
+  );
+  assert.doesNotMatch(doc, /\{\{#[^}]*\+/);
+  assert.doesNotMatch(doc, /\{\{\/ยที่\}\}/);
+  await parseTemplate(tagged.buffer);
+});
+
 await check("fill-empty after wrap-row cannot leave unclosed openers", async () => {
   // Regression: fill-empty-tc used to wipe {{/}} on the last prototype cell.
   const xml = readFileSync(join(FIX_AI, "multi-header.xml"), "utf8");

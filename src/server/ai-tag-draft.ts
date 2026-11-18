@@ -105,9 +105,9 @@ export function parseAiTagNameLanguage(raw: unknown): AiTagNameLanguage {
   return "th";
 }
 
-const MAX_SUGGESTIONS = 80;
+const MAX_SUGGESTIONS = 120;
 /** Extra slots reserved so letterhead phones/emails still enrich when AI fills the cap. */
-const CONTACT_ENRICH_SLACK = 12;
+const CONTACT_ENRICH_SLACK = 40;
 const MAX_FIELD_PLAIN = 200;
 const MAX_LIST_PLAIN = 1200;
 /** Safety caps only — prefer sending the full document so the model decides. */
@@ -306,6 +306,15 @@ export function looksLikeGarbledName(name: string): boolean {
   // Checkbox glyphs alone are never field names. (Do not reject short Latin
   // headers like 「No」/「Yes」 here — those are legitimate column labels.)
   if (/^[✓√✔☑☐□☒×✖]+$/u.test(s)) return true;
+  // Role `_loop` and truncated collision suffixes (เขต_loop, เอกสารสิทธิ์_loo).
+  if (/_loop$/iu.test(s)) return true;
+  if (/_(?:lo|loo|ro|row)$/iu.test(s)) return true;
+  // Noise shards from run-split surgery (FL, มE) — keep real short Thai (พบ).
+  if (/^[A-Z]{2}$/.test(s)) return true;
+  if (/^[A-Za-z]$/.test(s)) return true;
+  if (/^[\u0E00-\u0E7F][A-Za-z0-9]$/u.test(s) || /^[A-Za-z0-9][\u0E00-\u0E7F]$/u.test(s)) {
+    return true;
+  }
   // Stable hash fallback from englishNameFromLabel — not a readable field name.
   if (/^lbl_[a-z0-9]+$/i.test(s)) return true;
   // Structural: single grapheme particle (e.g. "ที่") is never a field id.
@@ -1828,34 +1837,45 @@ function inventListTableName(
         "_",
       );
     })
-    .filter((h) => h && h.length >= 2 && h.length <= 16 && !looksLikeGarbledName(h));
+    .filter((h) => h && h.length >= 2 && h.length <= 40 && !looksLikeGarbledName(h));
   if (cleaned.length) {
     // Prefer the longest header stem that does not collide with a column name
     // (stable across runs; avoids short neighbour-fragment joins like เขต_พบ).
+    // Never chop mid-token (เอกสารสิทธิ์_loo) and never append `_loop`.
     const byLen = [...cleaned].sort((a, b) => b.length - a.length || a.localeCompare(b));
     for (const pick of byLen) {
-      if (pick && !reservedLooksLikeScalarHeader(pick, unique)) return pick;
+      if (pick && !reservedLooksLikeScalarHeader(pick, unique) && !looksLikeGarbledName(pick)) {
+        return pick;
+      }
     }
-    // Every usable stem collides with a column — extend with a structural role
-    // suffix (not a second column fragment) so the loop id stays distinct.
-    const only = byLen[0]!;
-    const extended = (lang === "en" ? sanitizeNameAscii : sanitizeName)(
-      `${only}_${lang === "en" ? "rows" : "loop"}`,
-    )
-      .replace(/\//g, "_")
-      .slice(0, 16);
-    if (
-      extended &&
-      !reservedLooksLikeScalarHeader(extended, unique) &&
-      !looksLikeGarbledName(extended)
-    ) {
-      return extended;
+    // Every stem equals a column header — qualify with a list-role prefix so the
+    // loop id stays distinct without truncating or using `_loop`.
+    const role = lang === "en" ? "list" : "รายการ";
+    for (const pick of byLen) {
+      if (!pick) continue;
+      const extended = (lang === "en" ? sanitizeNameAscii : sanitizeName)(
+        `${role}_${pick}`,
+      )
+        .replace(/\//g, "_")
+        .slice(0, 40);
+      if (
+        extended &&
+        extended.length >= 4 &&
+        !reservedLooksLikeScalarHeader(extended, unique) &&
+        !looksLikeGarbledName(extended)
+      ) {
+        return extended;
+      }
     }
   }
-  // Structural short id when no usable header context exists (no numeric
-  // suffix — stripJunkNumericSuffix would peel `_1` anyway).
-  void tableIndex;
-  return lang === "en" ? "rows" : "loop";
+  // Structural short id when no usable header context exists. Disambiguate
+  // multiple tables without peelable `_1` suffixes.
+  const letters = "abcdefghijklmnopqrstuvwxyz";
+  if (lang === "en") {
+    return tableIndex === 0 ? "rows" : `rows${letters[tableIndex % 26] || "x"}`;
+  }
+  const thaiLetters = "กขคงจฉชซฌญ";
+  return tableIndex === 0 ? "แถว" : `แถว${thaiLetters[tableIndex % thaiLetters.length] || "ก"}`;
 }
 
 /** True when a candidate loop id equals any column header (scalar/loop collision). */
@@ -2028,12 +2048,21 @@ export function isSummaryLikeRow(
   });
   // Sample clones keep a leading ordinal; summary rows usually do not.
   if (hasLeadOrd) return false;
+  // Same column roles as the prototype (runno + label + amount) are sample
+  // clones even when isNearEnd — never treat them as the totals trailer.
+  if (tableRowsSameSampleShape(proto, row)) return false;
+  // Leading 1–3 digit runnos (incl. 10–40) mark sample rows; small amounts in
+  // other columns must not hide that (cellLooksLikeAmount would clear hasLeadOrd).
+  const lead = String(filled[0]?.text ?? "").trim();
+  if (/^\d{1,3}$/.test(lead) && Number(lead) >= 1 && Number(lead) <= 40) {
+    return false;
+  }
   // Merged/spanning label, label + amount, or sparse note row in the trailer.
   return (
     filled.length === 1 ||
     (filled.length <= 2 && rf <= Math.max(1, pf - 1)) ||
     (hasLabel && hasAmount && rf <= 4) ||
-    (hasLabel && rf <= Math.max(2, pf - 1) && !tableRowsSameSampleShape(proto, row))
+    (hasLabel && rf <= Math.max(2, pf - 1))
   );
 }
 
@@ -2607,6 +2636,18 @@ export function validateAiTagSuggestions(
             if (!wrapPlain) continue;
           }
           resolvedKind = "list";
+          // Paragraph loops must not swallow a following table row (boundary
+          // collision yields {{#row}}{{/}} / unclosed จำเลยที่).
+          const tableTouch = allDataRows.find(
+            (r) => occupyStart < r.plainEnd && occupyEnd > r.plainStart,
+          );
+          if (tableTouch) {
+            if (occupyStart >= tableTouch.plainStart) continue;
+            occupyEnd = Math.min(occupyEnd, tableTouch.plainStart);
+            wrapPlain = plainText.slice(occupyStart, occupyEnd);
+            wrapPlainStart = occupyStart;
+            if (!wrapPlain.trim()) continue;
+          }
         }
 
         if (!wrapSpanAllowed(occupyStart, occupyEnd, occupied)) continue;
@@ -2930,7 +2971,17 @@ export function validateAiTagSuggestions(
           rowHeaders,
         );
       if (!baseName) continue;
-      const emptyKind: AiTagDraftKind = hint.cellIndex === 0 ? "auto" : "text";
+      // Ordinal {{+}} only for true run columns — never identity/name/id headers.
+      const emptyKind: AiTagDraftKind =
+        !headerLooksLikeIdentityLabel(hint.header) &&
+        looksLikeRunSequence({
+          header: hint.header,
+          cellIndex: hint.cellIndex,
+          cellText: null,
+          isRunColumn: isRunCol(hint.tableIndex, hint.cellIndex),
+        })
+          ? "auto"
+          : "text";
       let emptyBase = baseName;
       if (
         emptyKind === "auto" &&
@@ -3161,8 +3212,20 @@ export function validateAiTagSuggestions(
             })
           : "text";
         if (isCheckbox) fieldKind = "bool";
-        // Blank / empty first column → ordinal {{+…}} (never on checkbox cols).
-        if (!sampleText && !isCheckbox && hint.cellIndex === 0) fieldKind = "auto";
+        // Blank / empty run column → ordinal {{+…}} (never identity/checkbox cols).
+        if (
+          !sampleText &&
+          !isCheckbox &&
+          !headerLooksLikeIdentityLabel(hint.header) &&
+          looksLikeRunSequence({
+            header: hint.header,
+            cellIndex: hint.cellIndex,
+            cellText: null,
+            isRunColumn: isRunCol(hint.tableIndex, hint.cellIndex),
+          })
+        ) {
+          fieldKind = "auto";
+        }
         if (
           fieldKind === "auto" &&
           headerLooksLikeIdentityLabel(hint.header) &&
@@ -3322,8 +3385,21 @@ export function validateAiTagSuggestions(
               isRunColumn: isRunCol(wrap.tableIndex, ci),
             })
           : "text";
-        // Blank templates: first column is the ordinal run column → {{+…}}.
-        if (blankTemplate && ci === 0 && !checkbox && !cellText) fieldKind = "auto";
+        // Blank templates: first run-sequence column → {{+…}} (not identity headers).
+        if (
+          blankTemplate &&
+          !checkbox &&
+          !cellText &&
+          !headerLooksLikeIdentityLabel(header) &&
+          looksLikeRunSequence({
+            header,
+            cellIndex: ci,
+            cellText: null,
+            isRunColumn: isRunCol(wrap.tableIndex, ci),
+          })
+        ) {
+          fieldKind = "auto";
+        }
         // Checkbox glyphs stay bool — never demote to text/auto.
         if (checkbox) fieldKind = "bool";
         // Identity/name columns must stay text, not {{+…}}.
@@ -3627,10 +3703,26 @@ export function validateAiTagSuggestions(
         if (nameEqualsSourceValue(baseName, cellText) || /\d{3,}/.test(baseName)) {
           continue;
         }
+        // Trailer captions on nearby kept rows (รวมเงิน / Total) disambiguate
+        // when the column header is already claimed by a prototype cell.
+        const trailerCaptions: string[] = [];
+        for (const other of allDataRows) {
+          if (other.tableIndex !== row.tableIndex) continue;
+          if (other.rowIndexInTable <= protoRi) continue;
+          if (deletedKeys.has(`${other.tableIndex}:${other.rowIndexInTable}`)) {
+            continue;
+          }
+          for (const c of other.cells) {
+            const t = String(c.text || "").trim();
+            if (!t || t === cellText) continue;
+            if (cellLooksLikeAmount(t) || looksLikeFillValue(t)) continue;
+            if (t.length >= 2 && t.length <= 24) trailerCaptions.push(t);
+          }
+        }
         let name = uniqueName(
           baseName,
           usedNames,
-          [header, labelFallback, fromParen || ""].filter(
+          [header, labelFallback, fromParen || "", ...trailerCaptions].filter(
             (x) => x && !nameEqualsSourceValue(x, cellText),
           ),
           lang,
@@ -3642,12 +3734,25 @@ export function validateAiTagSuggestions(
           name = uniqueName(
             fromParen,
             usedNames,
-            [header, labelFallback].filter(
+            [header, labelFallback, ...trailerCaptions].filter(
               (x) => x && !nameEqualsSourceValue(x, cellText),
             ),
             lang,
             reservedLoopNames,
           );
+        }
+        if (!name && looksLikeFillValue(cellText) && !cellLooksLikeAmount(cellText)) {
+          // Last resort: qualify the column header with a short trailer caption.
+          const cap = trailerCaptions[0] || labelFallback || header;
+          if (cap) {
+            name = uniqueName(
+              `${baseName}_${cap}`,
+              usedNames,
+              [header, cap].filter(Boolean),
+              lang,
+              reservedLoopNames,
+            );
+          }
         }
         if (!name || reservedLoopNames.has(name)) continue;
         if (nameEqualsSourceValue(name, cellText)) continue;
@@ -3742,33 +3847,22 @@ export function validateAiTagSuggestions(
         const end = start + dm[0].length;
         if (!fieldSpanAllowed(start, end, occupied)) continue;
         const lbl = labelBeforeFirst(dm.index);
-        // Prefer a short shared label that is NOT the loop name itself.
+        // Run index inside a paragraph list: name from the loop stem only —
+        // never from a neighbouring content label (ชื่อ / ที่อยู่ → {{+ชื่อ}}).
         let base =
-          (lbl && lbl !== parent.name && lbl !== hint.stem
-            ? nameFromHeaderOrLabel(lbl, null, lang, dm[0])
-            : null) ||
-          parentNameStem(parent.name, lang);
-        if (!base || looksLikeGarbledName(base) || reservedLoopNames.has(base)) {
-          // Fall back to any other shared label in the unit.
-          base = null;
-          for (const s of shared) {
-            if (s === hint.stem || s === parent.name) continue;
-            const n = nameFromHeaderOrLabel(s, null, lang, dm[0]);
-            if (n && !looksLikeGarbledName(n) && !reservedLoopNames.has(n)) {
-              base = n;
-              break;
-            }
-          }
-        }
-        if (!base) continue;
+          nameFromHeaderOrLabel(hint.stem, null, lang, dm[0]) ||
+          parentNameStem(parent.name, lang) ||
+          nameFromHeaderOrLabel(lbl, hint.stem, lang, dm[0]);
+        if (!base || looksLikeGarbledName(base)) continue;
+        // {{+stem}} may share the loop's identifier (different tag disposition).
         const name = uniqueName(
           base,
           usedNames,
-          [lbl, hint.stem, parent.name].filter(Boolean) as string[],
+          [hint.stem, parent.name].filter(Boolean) as string[],
           lang,
-          reservedLoopNames,
+          new Set(),
         );
-        if (!name || reservedLoopNames.has(name)) continue;
+        if (!name) continue;
         const tag = buildTag("auto", name, "", "");
         if (validateTag(tag)) continue;
         const allStarts = findOccurrenceStarts(plainText, dm[0]);

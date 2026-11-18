@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 import { extractDocumentLayout } from "./docx-layout";
 import { extractDocumentText } from "./docx-engine";
+import { mergeSplitTemplateTagsInXml } from "./docx-merge-tags";
 import {
   normalizeVarName,
   validateVarName as sharedValidateVarName,
@@ -326,6 +327,56 @@ function replaceWtContent(node: WtNode, newText: string): XmlEdit {
  * clears text from subsequent overlapping runs, and preserves prefixes/suffixes.
  * Empty range (start===end) inserts tag at that point.
  */
+/** Plain spans of complete {{…}} tags (for replace/insert safety). */
+function listPlainTagSpans(plain: string): { start: number; end: number }[] {
+  const spans: { start: number; end: number }[] = [];
+  let i = 0;
+  while (i < plain.length) {
+    const open = plain.indexOf("{{", i);
+    if (open < 0) break;
+    const close = plain.indexOf("}}", open + 2);
+    if (close < 0) break;
+    spans.push({ start: open, end: close + 2 });
+    i = close + 2;
+  }
+  return spans;
+}
+
+/**
+ * Snap a replace/insert range so it never partially overlaps an existing tag
+ * (avoids fragments like {{/ยที่}} or {{#จำเลยที่+ชื่อ}}).
+ */
+function snapRangeClearOfTags(
+  plain: string,
+  rangeStart: number,
+  rangeEnd: number,
+): { start: number; end: number } | null {
+  const tags = listPlainTagSpans(plain);
+  if (rangeStart === rangeEnd) {
+    // Zero-width insert: snap out of the interior of any tag.
+    for (const t of tags) {
+      if (rangeStart > t.start && rangeStart < t.end) {
+        // Prefer inserting after the tag (keeps {{/}}{{#…}} order at boundaries).
+        return { start: t.end, end: t.end };
+      }
+    }
+    return { start: rangeStart, end: rangeEnd };
+  }
+  for (const t of tags) {
+    const overlaps = rangeStart < t.end && rangeEnd > t.start;
+    if (!overlaps) continue;
+    const fullyContains = rangeStart <= t.start && rangeEnd >= t.end;
+    if (fullyContains) continue;
+    // Partial overlap — expand to cover the whole tag so we replace cleanly,
+    // or reject if the tag extends outside a tiny shard (prefer expand).
+    return {
+      start: Math.min(rangeStart, t.start),
+      end: Math.max(rangeEnd, t.end),
+    };
+  }
+  return { start: rangeStart, end: rangeEnd };
+}
+
 function applyRangeReplace(
   xml: string,
   nodes: WtNode[],
@@ -334,6 +385,12 @@ function applyRangeReplace(
   tag: string,
   insertPreferEnd = false,
 ): string {
+  const { plainText: livePlain } = collectWtNodes(xml);
+  const snapped = snapRangeClearOfTags(livePlain, rangeStart, rangeEnd);
+  if (!snapped) return xml;
+  rangeStart = snapped.start;
+  rangeEnd = snapped.end;
+
   const hit =
     rangeStart === rangeEnd
       ? nodesAtPoint(nodes, rangeStart, insertPreferEnd)
@@ -868,18 +925,26 @@ function scanDataRowsWithHeaders(
       if (!looksLikeData) continue;
       if (firstOnly && emittedDataRow) continue;
 
+      // Freeze headers from the last label band before the first strong body
+      // row — never inherit trailer captions (รวมเงิน) or sample cells as
+      // column headers for later rows.
+      const firstBodyRi = rows.findIndex((r) =>
+        r.cells.some((c) => looksLikeStrongSampleCell(String(c.text || ""))),
+      );
+      const headerLimit = firstBodyRi >= 0 ? firstBodyRi : ri;
       const headers = row.cells.map((_, ci) => {
-        // Nearest prior non-noise, non-strong-sample cell — sub-header bands
-        // (「เขต / อำเภอ」) beat distant title rows. After a digit/checkbox
-        // body row has appeared, skip fill-like cells (baht-text / notes).
+        for (let hj = headerLimit - 1; hj >= 0; hj -= 1) {
+          const ht = rows[hj]!.cells[ci]?.text || "";
+          if (!ht || isNoiseHeaderLabel(ht)) continue;
+          if (looksLikeStrongSampleCell(ht)) continue;
+          return ht;
+        }
+        // No pre-body header band (headerless tables): nearest non-strong cell.
         for (let hj = ri - 1; hj >= 0; hj -= 1) {
           const ht = rows[hj]!.cells[ci]?.text || "";
           if (!ht || isNoiseHeaderLabel(ht)) continue;
           if (looksLikeStrongSampleCell(ht)) continue;
-          const bodyAbove = rows.slice(0, hj).some((r) =>
-            r.cells.some((c) => looksLikeStrongSampleCell(String(c.text || ""))),
-          );
-          if (bodyAbove && looksLikeSampleOrFillCell(ht)) continue;
+          if (looksLikeSampleOrFillCell(ht)) continue;
           return ht;
         }
         return "";
@@ -1479,9 +1544,41 @@ function inventTableLoopNameFromRows(
 }
 
 /**
- * List tables that only have {{/}} (no {{#…}} on the same table) look "headless"
- * in Word. Move a nearby orphan {{#name}} onto the template row (or invent one),
- * and mark rows above as tblHeader.
+ * Strip a {{/}} or {{/name}} occurrence from the last <w:t> of a table row.
+ * Used when a table has a closer with no opener — never steal a paragraph
+ * {{#…}} (that left จำเลยที่ unclosed / orphan {{/}} elsewhere).
+ */
+function stripLoopCloseFromRow(
+  xml: string,
+  rowAbsStart: number,
+  rowAbsEnd: number,
+): string {
+  const slice = xml.slice(rowAbsStart, rowAbsEnd);
+  const wtMatches = [...slice.matchAll(/<w:t(\s[^>]*)?>([^<]*)<\/w:t>/g)];
+  for (let i = wtMatches.length - 1; i >= 0; i -= 1) {
+    const last = wtMatches[i]!;
+    if (last.index == null) continue;
+    const body = decodeXmlEntities(last[2] || "");
+    const nextBody = body.replace(/\{\{\/[^{}]*\}\}/g, "");
+    if (nextBody === body) continue;
+    const absWt = rowAbsStart + last.index;
+    const attrs = last[1] || "";
+    const open = buildOpenTag(attrs, nextBody);
+    return (
+      xml.slice(0, absWt) +
+      `${open}${encodeXmlEntities(nextBody)}</w:t>` +
+      xml.slice(absWt + last[0].length)
+    );
+  }
+  return xml;
+}
+
+/**
+ * Tables that only have {{/}} (no {{#…}} on the same table) usually absorbed a
+ * paragraph-loop closer. Strip the stray closer — do NOT move/invent a {{#…}}
+ * from a nearby paragraph (that uncloses จำเลยที่ and creates orphan closes).
+ * When the table already has field tags but no open/close pair, leave as-is
+ * (wrap-row should have supplied both).
  */
 function ensureTableLoopOpenTags(xml: string): string {
   const tables: { start: number; end: number }[] = [];
@@ -1492,17 +1589,17 @@ function ensureTableLoopOpenTags(xml: string): string {
   }
   let out = xml;
   for (let ti = tables.length - 1; ti >= 0; ti--) {
-    let start = tables[ti].start;
-    let end = tables[ti].end;
+    const start = tables[ti]!.start;
+    const end = tables[ti]!.end;
     const tblXml = out.slice(start, end);
-    if (/\{\{#[^{}]*\}\}/.test(trPlainText(tblXml))) continue;
+    const tblPlain = trPlainText(tblXml);
+    if (/\{\{#[^{}]*\}\}/.test(tblPlain)) continue;
 
     const trRe = /<w:tr[\s>][\s\S]*?<\/w:tr>/g;
     const rows: {
       localStart: number;
       localEnd: number;
       plain: string;
-      xml: string;
     }[] = [];
     let tr: RegExpExecArray | null;
     while ((tr = trRe.exec(tblXml)) !== null) {
@@ -1510,55 +1607,20 @@ function ensureTableLoopOpenTags(xml: string): string {
         localStart: tr.index,
         localEnd: tr.index + tr[0].length,
         plain: trPlainText(tr[0]),
-        xml: tr[0],
       });
     }
-    const closeIdx = rows.findIndex(
-      (r) => /\{\{\/\}/.test(r.plain) || /\{\{\/[^}]*\}\}/.test(r.plain),
-    );
-    if (closeIdx < 0) continue;
-    let tmplIdx = rows.findIndex(
-      (r, i) => i <= closeIdx && /\{\{[^{#/][^{}]*\}\}/.test(r.plain),
-    );
-    if (tmplIdx < 0) tmplIdx = closeIdx;
-
-    const orphan = findOrphanLoopOpenBefore(out, start);
-    let openTag: string;
-    if (orphan) {
-      openTag = `{{#${orphan.name}}}`;
-      out = out.slice(0, orphan.absStart) + out.slice(orphan.absEnd);
-      const delta = orphan.absEnd - orphan.absStart;
-      start -= delta;
-      end -= delta;
-    } else {
-      // Prefer header/prototype cell text; only then structural loop_${ti+1}.
-      const loopName = inventTableLoopNameFromRows(
-        rows.map((r) => r.xml),
-        tmplIdx,
-        ti,
-      );
-      openTag = `{{#${loopName}}}`;
-    }
-
-    const row = rows[tmplIdx];
-    const absRowStart = start + row.localStart;
-    const absRowEnd = start + row.localEnd;
-    let next = prependToFirstWt(out, absRowStart, absRowEnd, openTag);
-
-    const headerCount = tmplIdx;
-    if (headerCount > 0) {
-      const tblAt = next.indexOf("<w:tbl", start);
-      const tblClose = next.indexOf("</w:tbl>", tblAt);
-      if (tblAt >= 0 && tblClose > tblAt) {
-        const fresh = next.slice(tblAt, tblClose + "</w:tbl>".length);
-        const marked = markLeadingRowsAsTblHeader(fresh, headerCount);
-        next =
-          next.slice(0, tblAt) +
-          marked +
-          next.slice(tblClose + "</w:tbl>".length);
+    // Strip every closer that has no matching open in this table.
+    for (let ri = rows.length - 1; ri >= 0; ri -= 1) {
+      const row = rows[ri]!;
+      if (!/\{\{\/\}/.test(row.plain) && !/\{\{\/[^}]*\}\}/.test(row.plain)) {
+        continue;
       }
+      out = stripLoopCloseFromRow(
+        out,
+        start + row.localStart,
+        start + row.localEnd,
+      );
     }
-    out = next;
   }
   return out;
 }
@@ -1588,8 +1650,10 @@ function appendToLastWt(
 }
 
 /**
- * Append {{/}} to any table template row that has {{#…}} but no closer.
+ * Append {{/}} to any table template row that has {{#…}} but no closer
+ * on that same row (wrap-row puts both on the prototype row).
  * Defends against fill/replace paths that still strip the wrap-row close tag.
+ * Does not add a closer when another row already has one (avoids orphan {{/}}).
  */
 function ensureTableLoopCloseTags(xml: string): string {
   const tables: { start: number; end: number }[] = [];
@@ -1614,17 +1678,99 @@ function ensureTableLoopCloseTags(xml: string): string {
     }
     const openIdx = rows.findIndex((r) => /\{\{#[^{}]*\}\}/.test(r.plain));
     if (openIdx < 0) continue;
-    const hasClose = rows.some(
-      (r) => /\{\{\/\}/.test(r.plain) || /\{\{\/[^}]*\}\}/.test(r.plain),
+    const openRow = rows[openIdx]!;
+    if (/\{\{\/\}/.test(openRow.plain) || /\{\{\/[^}]*\}\}/.test(openRow.plain)) {
+      continue;
+    }
+    const hasCloseElsewhere = rows.some(
+      (r, i) =>
+        i !== openIdx &&
+        (/\{\{\/\}/.test(r.plain) || /\{\{\/[^}]*\}\}/.test(r.plain)),
     );
-    if (hasClose) continue;
-    const row = rows[openIdx]!;
+    if (hasCloseElsewhere) continue;
     out = appendToLastWt(
       out,
-      start + row.localStart,
-      start + row.localEnd,
+      start + openRow.localStart,
+      start + openRow.localEnd,
       "{{/}}",
     );
+  }
+  return out;
+}
+
+type LoopHit = {
+  kind: "open" | "close";
+  text: string;
+  start: number;
+  end: number;
+};
+
+function listLoopHits(plain: string): LoopHit[] {
+  const hits: LoopHit[] = [];
+  const re = /\{\{#[^{}]*\}\}|\{\{\/[^{}]*\}\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(plain)) !== null) {
+    hits.push({
+      kind: m[0].startsWith("{{#") ? "open" : "close",
+      text: m[0],
+      start: m.index,
+      end: m.index + m[0].length,
+    });
+  }
+  return hits;
+}
+
+/**
+ * Final plain-text stack repair: drop orphan closers / junk opens and append
+ * {{/}} for unclosed opens so /api/parse never sees unbalanced loops.
+ * Never put `+` inside an opener.
+ */
+function repairUnbalancedLoopTagsInXml(xml: string): string {
+  let out = xml;
+  for (let guard = 0; guard < 48; guard += 1) {
+    const { plainText } = collectWtNodes(out);
+    const hits = listLoopHits(plainText);
+    const stack: LoopHit[] = [];
+    let junk: LoopHit | null = null;
+    for (const h of hits) {
+      if (h.kind === "open") {
+        const inner = h.text.slice(3, -2);
+        if (inner.includes("+")) {
+          junk = h;
+          break;
+        }
+        stack.push(h);
+      } else if (!stack.length) {
+        junk = h;
+        break;
+      } else {
+        stack.pop();
+      }
+    }
+    if (!junk) break;
+    try {
+      const { nodes } = collectWtNodes(out);
+      out = applyRangeReplace(out, nodes, junk.start, junk.end, "", false);
+    } catch {
+      break;
+    }
+  }
+  for (let guard = 0; guard < 48; guard += 1) {
+    const { plainText } = collectWtNodes(out);
+    const hits = listLoopHits(plainText);
+    const stack: LoopHit[] = [];
+    for (const h of hits) {
+      if (h.kind === "open") stack.push(h);
+      else if (stack.length) stack.pop();
+    }
+    if (!stack.length) break;
+    const open = stack[stack.length - 1]!;
+    try {
+      const { nodes } = collectWtNodes(out);
+      out = applyRangeReplace(out, nodes, open.end, open.end, "{{/}}", true);
+    } catch {
+      break;
+    }
   }
   return out;
 }
@@ -2356,7 +2502,15 @@ export async function tagTemplate(
         preferEnd: false,
       });
     }
-    wrapAtomics.sort((a, b) => b.pos - a.pos || b.end - a.end);
+    // Reverse apply (high→low). At a shared boundary (para close + table open),
+    // process opens first so the final text is {{/}}{{#…}} not {{#…}}{{/}}.
+    wrapAtomics.sort((a, b) => {
+      if (b.pos !== a.pos) return b.pos - a.pos;
+      if (b.end !== a.end) return b.end - a.end;
+      const aOpen = a.text.startsWith("{{#") ? 1 : 0;
+      const bOpen = b.text.startsWith("{{#") ? 1 : 0;
+      return bOpen - aOpen;
+    });
     for (const op of wrapAtomics) {
       const { nodes: currentNodes } = collectWtNodes(xml);
       xml = applyRangeReplace(
@@ -2370,12 +2524,14 @@ export async function tagTemplate(
     }
   }
 
-  // Tables that got {{/}} without a {{#…}} on the same table (open left in a
-  // paragraph above) look headless in Word — repair even when there are no new
-  // replacements (re-download of an already-tagged file).
+  // Tables that absorbed a paragraph {{/}} (no {{#…}} on the table) — strip
+  // the stray closer. Never steal a paragraph open onto the table.
   xml = ensureTableLoopOpenTags(xml);
   xml = ensureTableLoopCloseTags(xml);
   xml = ensureTableListHeaders(xml);
+  // Collapse tags split across <w:t> runs before balance check / return.
+  xml = mergeSplitTemplateTagsInXml(xml);
+  xml = repairUnbalancedLoopTagsInXml(xml);
   zip.file("word/document.xml", xml);
 
   const outBuf = Buffer.from(

@@ -1,0 +1,17 @@
+---
+description: Use one shared BrandLogo asset everywhere — never reinvent the mark in CSS
+globs: src/app/**/*.{tsx,ts},src/components/**/*.{tsx,ts},public/brand/**
+alwaysApply: true
+---
+
+# Brand logo
+
+Single mark file: `public/brand/logo-mark.png` · import via `@/components/BrandLogo` (`BrandLogo` / `BrandLockup` / `BRAND_LOGO_SRC`).
+
+## Rules
+
+- Header, login, account, admin rail, favicon/apple icon — same PNG (or sizes derived from it).
+- Do not recreate the mark with CSS gradients / `::after` document shapes.
+- Do not drop a different SVG/PNG logo in one page only.
+- To change the logo: replace `public/brand/logo-mark.png` (+ keep `public/brand/logo-mark.svg` in sync), then regenerate `src/app/favicon.ico`, `public/favicon.ico`, `src/app/icon.png`, `src/app/apple-icon.png`, `public/favicon-32.png`, `public/favicon-48.png`, `public/icon-192.png`, `public/apple-touch-icon.png` from that file.
+- Cursor Recents for `localhost` often shows a generic globe and ignores site favicons — verify the real browser tab after hard refresh, not Recents alone.

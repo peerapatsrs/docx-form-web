@@ -1,15 +1,22 @@
 import { getMigrations } from "better-auth/db/migration";
 import { ensureAdminSchema } from "./admin-store";
 import { auth } from "./auth";
-import { seedQaUser } from "./auth-seed-qa";
 import { ensureSuperAdmins } from "./auth-superadmin";
+import { ensureOidcIdentitiesSchema } from "./oidc-identities";
+import { isOidcEnabled, logOidcNotConfigured } from "./oidc-config";
 
 let ran = false;
 
-/** Apply Better Auth schema (idempotent), bootstrap superadmins, seed QA login-as user. */
+/** Apply Better Auth schema (idempotent), OIDC identities, bootstrap superadmins. */
 export async function migrateAuth(): Promise<void> {
   if (ran) return;
   await ensureAdminSchema();
+  await ensureOidcIdentitiesSchema();
+  if (isOidcEnabled()) {
+    console.info("[auth] OIDC SSO enabled (identities table ready)");
+  } else {
+    logOidcNotConfigured("migrate");
+  }
   const { toBeCreated, toBeAdded, toBeAddedIndexes, runMigrations } =
     await getMigrations(auth.options);
   const pending =
@@ -23,10 +30,6 @@ export async function migrateAuth(): Promise<void> {
   const updated = await ensureSuperAdmins();
   if (updated > 0) {
     console.info(`[auth] promoted ${updated} user(s) to superadmin`);
-  }
-  const seeded = await seedQaUser();
-  if (seeded.status === "created") {
-    console.info("[auth] seeded QA login-as user");
   }
   ran = true;
 }

@@ -15,8 +15,13 @@ export function AdminShell({ children }: { children: ReactNode }) {
   const pathname = usePathname() || "/admin";
   const current = findAdminModule(pathname);
   const groups = adminModulesByGroup();
-  const liveCount = ADMIN_MODULES.filter((m) => m.status === "live").length;
-  const plannedCount = ADMIN_MODULES.filter((m) => m.status === "planned").length;
+  // Overview ("ภาพรวม") is navigation, not a feature module — exclude from the count (F03).
+  const liveCount = ADMIN_MODULES.filter(
+    (m) => m.status === "live" && m.id !== "",
+  ).length;
+  const plannedCount = ADMIN_MODULES.filter(
+    (m) => m.status === "planned" && m.id !== "",
+  ).length;
 
   return (
     <div className="admin-console">

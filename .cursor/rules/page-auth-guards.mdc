@@ -1,0 +1,57 @@
+---
+description: Every protected page and API must hard-block direct URL access — proxy + server layout + API gate
+globs: src/app/**/*.{ts,tsx},src/proxy.ts,src/lib/server-auth.ts,src/server/api.ts,src/components/admin/**
+alwaysApply: true
+---
+
+# Page & API auth guards
+
+Never ship a protected route that only hides UI on the client. Direct URL entry must fail closed.
+
+## Layers (all required for protected areas)
+
+1. **`src/proxy.ts`** — optimistic cookie check (`getSessionCookie`). Redirect to `/login?next=…` if missing. No DB here.
+2. **Server layout / page** — `requireServerUser` or `requireServerSuperAdmin` from `@/lib/server-auth` (Better Auth session + DB role). This is the real page gate.
+3. **API** — same rule on every mutating/sensitive endpoint (`requireSuperAdmin`, `requireSessionUserId`, entitlement checks). UI gates never replace API gates.
+
+## Route map
+
+| Path | Gate |
+|------|------|
+| `/` | public |
+| `/login` | public; server layout redirects if already signed in |
+| `/account/**` | proxy + `requireServerUser` |
+| `/admin/**` | proxy + `requireServerSuperAdmin` (superadmin only) |
+| `/api/admin/**` | `requireSuperAdmin` |
+| `/api/ai/keys/**`, `/api/me` | authenticated session |
+
+## When adding a page
+
+```tsx
+// src/app/secret/layout.tsx
+import { requireServerUser } from "@/lib/server-auth";
+
+export default async function Layout({ children }) {
+  await requireServerUser("/secret");
+  return children;
+}
+```
+
+Also extend `src/proxy.ts` `matcher` + `needsAuth` for that path.
+
+## Anti-patterns
+
+```tsx
+// ❌ BAD — client-only; HTML/JS still loads on direct URL
+useEffect(() => {
+  authClient.getSession().then(/* setDenied */);
+}, []);
+
+// ✅ GOOD — server layout blocks render + redirect
+await requireServerSuperAdmin("/admin");
+```
+
+- Do not rely on `AdminGate` / AuthBar visibility alone.
+- Do not put DB session lookups in `proxy.ts` (keep optimistic).
+- Role `admin` ≠ console access; console is `superadmin` only unless product changes both UI and `requireSuperAdmin`.
+- Guest ↔ `/login` must use **hard** `<a href>` (not Next `<Link>`). Soft nav leaves the home `app.js` shell half-mounted (missing topbar/status / stale portals).

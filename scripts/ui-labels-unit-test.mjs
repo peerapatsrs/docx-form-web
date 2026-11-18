@@ -13,6 +13,7 @@ import {
   isListRowEmpty,
   listHasFilledRow,
   collectMissingListValidation,
+  countEmptyRequiredFields,
   clipValidationItems,
   formatInvalidEmailMissing,
   shouldShowSkipFirstUseTip,
@@ -23,30 +24,51 @@ import {
 
 console.log("ui-labels-unit-test");
 
-assert.equal(UI_LABELS.exportJson, "ส่งออก JSON");
-assert.equal(UI_LABELS.importJson, "นำเข้า JSON");
+assert.equal(UI_LABELS.exportJson, "ส่งออกค่า");
+assert.equal(UI_LABELS.importJson, "นำเข้าค่า");
 assert.equal(UI_LABELS.toolsMenu, "เครื่องมือ");
-assert.equal(UI_LABELS.homeHeadline.startsWith("docx-form"), true);
+assert.ok(UI_LABELS.homeHeadline.length > 0);
+assert.equal(UI_LABELS.homeReadMore, "อ่านเพิ่ม");
+assert.ok(UI_LABELS.homeHeadline.includes("กรอกเอกสาร Word"));
 assert.equal(UI_LABELS.homeAboutSummary, "เกี่ยวกับ docx-form");
-assert.ok(UI_LABELS.dropzoneOrPick.includes("ฟรีสูงสุด 2"));
+// F02: static label is plan-agnostic; live UI uses getMaxMultiTemplates().
+assert.ok(UI_LABELS.dropzoneOrPick.includes("โควตาแผน") || UI_LABELS.dropzoneOrPick.includes("เลือกไฟล์"));
+assert.ok(!UI_LABELS.dropzoneOrPick.includes("ฟรีสูงสุด 2"));
 assert.equal(UI_LABELS.placeholderExamplePrefix, "เช่น ");
 assert.equal(UI_LABELS.seededRowTip.includes("1 แถว"), true);
 assert.equal(UI_LABELS.skip, "ข้าม");
+assert.equal(UI_LABELS.putAiKey, "ตั้งค่าคีย์ AI");
+assert.ok(UI_LABELS.stickyCtaHint.includes("จะได้ไฟล์ใหม่"));
+assert.equal(UI_LABELS.uploadInvalidFile.includes(".docx"), true);
+assert.equal(UI_LABELS.removeRow, "×");
+assert.equal(UI_LABELS.removeRowTitle(2), "ลบแถว 2");
+assert.equal(UI_LABELS.removeRowAria(2), "ลบแถว 2");
+assert.equal(UI_LABELS.addTemplateBtn, "+ เพิ่ม");
+assert.equal(UI_LABELS.addTemplateBtnAria, "เพิ่มเทมเพลต");
+assert.equal(UI_LABELS.aiStatusNoKey, "ยังไม่มีคีย์ AI");
+assert.equal(
+  UI_LABELS.shortValidationLabel("ก".repeat(50)).endsWith("…"),
+  true,
+);
 assert.equal(UI_LABELS.draftListLoadFailed, "อ่านรายการดราฟไม่สำเร็จ");
 assert.ok(
-  UI_LABELS.loadDraftDialogBody.includes("IndexedDB") ||
-    UI_LABELS.loadDraftDialogBody.includes("เบราว์เซอร์"),
+  UI_LABELS.loadDraftDialogBody.includes("เบราว์เซอร์") ||
+    UI_LABELS.draftOpenDialogBody.includes("เบราว์เซอร์"),
 );
 assert.equal(UI_LABELS.dialogClose, "ปิด");
 assert.equal(UI_LABELS.dialogCancel, "ยกเลิก");
 assert.equal(UI_LABELS.dialogSave, "บันทึก");
 assert.equal(UI_LABELS.dialogDelete, "ลบ");
-assert.equal(UI_LABELS.dialogLoad, "โหลด");
+assert.equal(UI_LABELS.dialogLoad, "เปิดดราฟนี้");
+assert.equal(UI_LABELS.draftOpenAction, "เปิดดราฟนี้");
 assert.equal(UI_LABELS.draftFallbackTitle, "ดราฟ");
 assert.equal(UI_LABELS.draftUntitled, "ไม่มีชื่อ");
 assert.equal(UI_LABELS.draftSaveNoTemplate, "ยังไม่มีเทมเพลตให้บันทึกดราฟ");
 assert.equal(UI_LABELS.draftSaveDialogTitle, "บันทึกดราฟ");
-assert.ok(UI_LABELS.draftSaveDialogBody.includes("IndexedDB"));
+assert.ok(
+  UI_LABELS.draftSaveDialogBody.includes("เบราว์เซอร์") &&
+    !UI_LABELS.draftSaveDialogBody.includes("IndexedDB"),
+);
 assert.equal(UI_LABELS.draftSaveNameLabel, "ชื่อดราฟ (ไม่บังคับ)");
 assert.equal(UI_LABELS.draftSaveSuccess("ใบเสนอราคา"), "บันทึกดราฟแล้ว: ใบเสนอราคา");
 assert.equal(UI_LABELS.draftSaveFailed, "บันทึกดราฟไม่สำเร็จ");
@@ -94,15 +116,34 @@ console.log("✓ fieldDisplayLabel");
 assert.equal(formatExamplePlaceholder("ลูกค้า"), "เช่น ลูกค้า");
 assert.equal(formatExamplePlaceholder(""), "");
 assert.equal(
+  formatExamplePlaceholder("ประเภทหนี้ กู้ เงินกู้ยืม", "ยืม"),
+  "เช่น ยืม",
+);
+assert.equal(
+  formatMissingFieldLabel(
+    "บริษัทฯ ขอเรียนว่าได้ดำเนินการตรวจกรรมสิทธิ์ที่ดิน สำนักงานที่ดิน เมื่อวันที่",
+    undefined,
+    "วันที่ตรวจ",
+  ),
+  "วันที่ตรวจ",
+);
+assert.equal(
   formatMissingFieldLabel("รายการสินค้า", UI_LABELS.validationListMinRows),
   "รายการสินค้า (ต้องมีอย่างน้อย 1 แถว)",
 );
+assert.ok(UI_LABELS.tipKindBool.includes("ติ๊ก"));
+assert.ok(UI_LABELS.addKeyNeedsUpgrade.includes("อัปเกรด"));
+assert.ok(UI_LABELS.aiCancelNeutral.includes("ยกเลิก"));
 console.log("✓ placeholder + missing label");
 
 const banner = formatValidationBannerModel(["ลูกค้า", "วันที่", "โลโก้"]);
-assert.equal(banner.title, "ยังมีช่องที่ยังไม่ได้กรอก (3)");
+assert.equal(banner.title, UI_LABELS.validationTitle(3));
+assert.ok(banner.title.includes("3"));
 assert.deepEqual(banner.items, ["ลูกค้า", "วันที่", "โลโก้"]);
 assert.equal(banner.hint, UI_LABELS.validationHint);
+const longBanner = formatValidationBannerModel(["ก".repeat(80)]);
+assert.ok(longBanner.items[0].endsWith("…"));
+assert.ok(longBanner.items[0].length <= 43);
 console.log("✓ validation banner model");
 
 assert.deepEqual(seedListRowsIfEmpty(undefined), [{}]);
@@ -212,5 +253,27 @@ assert.match(plainFromBlocks, /customer_name/);
 assert.match(plainFromBlocks, /\{\{logo\}\}/);
 assert.match(plainFromBlocks, /\{\{#items\}\}/);
 console.log("✓ layoutBlocksToPlainText");
+
+const listSkipped = collectMissingListValidation({
+  fieldLabel: "รายการ",
+  itemFields: [{ name: "name", type: "text" }],
+  rows: [{}],
+  listSkipped: true,
+});
+assert.equal(listSkipped.missing.length, 0);
+
+const emptyCount = countEmptyRequiredFields({
+  fields: [
+    { name: "a", type: "text" },
+    { name: "b", type: "text" },
+  ],
+  values: { a: "ok", b: "" },
+  skip: { b: true },
+});
+assert.equal(emptyCount, 0);
+console.log("✓ list skip + empty count");
+
+assert.equal(UI_LABELS.createTemplate, UI_LABELS.createTemplateFromDoc);
+console.log("✓ create template wording");
 
 console.log("\nAll ui-labels unit tests passed");

@@ -151,17 +151,25 @@ console.log("✓ field-names");
     join(__dirname, "..", "src", "app", "page.tsx"),
     "utf8",
   );
-  assert.match(pageSrc, /field-names\.js/);
-  assert.match(pageSrc, /\/app\.js\?v=/);
+  const homeSrc = readFileSync(
+    join(__dirname, "..", "src", "app", "home-client.tsx"),
+    "utf8",
+  );
+  // Server page wires content-hashed URLs; client shell owns load order.
+  assert.match(pageSrc, /publicAssetUrl\(\s*["']app\.js["']\s*\)/);
+  assert.match(pageSrc, /publicAssetUrl\(\s*["']field-names\.js["']\s*\)/);
+  assert.match(homeSrc, /fieldNamesSrc/);
+  assert.match(homeSrc, /appJsSrc/);
   // Runtime order: create field-names → onload → loadAppAfterFieldNames → append app.js.
   assert.match(
-    pageSrc,
+    homeSrc,
     /names\.onload\s*=\s*\(\)\s*=>\s*loadAppAfterFieldNames\(\)/,
   );
   assert.match(
-    pageSrc,
+    homeSrc,
     /function loadAppAfterFieldNames|const loadAppAfterFieldNames/,
   );
+  assert.match(homeSrc, /s\.type\s*=\s*["']module["']/);
   const minifySrc = readFileSync(
     join(__dirname, "..", "scripts", "minify-public.mjs"),
     "utf8",
@@ -172,7 +180,7 @@ console.log("✓ field-names");
     minifyNames >= 0 && minifyApp > minifyNames,
     "minify-public lists field-names.js before app.js",
   );
-  console.log("✓ field-names.js load order (page.tsx + minify-public)");
+  console.log("✓ field-names.js load order (home-client + minify-public)");
 }
 
 // Legacy NFKC keys (ํ+า) must resolve onto current NFC field names.
@@ -454,7 +462,7 @@ assert.ok(UNKNOWN_CLIENT_IP === "0.0.0.0"); // valid IP for Better Auth headers
 // POST body path: rebuild keeps method and does not throw
 {
   const req = withResolvedClientIpHeaders(
-    new Request("http://localhost/api/auth/dev/login-as", {
+    new Request("http://localhost/api/auth/oidc/login", {
       method: "POST",
       headers: {
         "content-type": "application/json",

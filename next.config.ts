@@ -3,10 +3,15 @@ import {
   HTML_CACHE_CONTROL,
   PRIVATE_NO_STORE_CACHE_CONTROL,
   VERSIONED_ASSET_CACHE_CONTROL,
-  securityHeaders,
+  staticSecurityHeaders,
 } from "./src/lib/security-headers";
+import { LEGACY_HOME_REDIRECT_PATHS } from "./src/lib/legacy-routes";
+import { MAX_UPLOAD_BODY_BYTES } from "./src/lib/upload-limits";
 
-const security = Object.entries(securityHeaders()).map(([key, value]) => ({
+// CSP (incl. form-action + OIDC issuer) is applied at runtime by src/proxy.ts
+// so OIDC_ISSUER is available. Build-time headers omit CSP to avoid baking
+// form-action 'self' alone, which would block Keycloak end_session redirects.
+const security = Object.entries(staticSecurityHeaders()).map(([key, value]) => ({
   key,
   value,
 }));
@@ -17,6 +22,11 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   // Dev: allow both localhost and 127.0.0.1 (HMR was blocking 127.0.0.1 → blank page)
   allowedDevOrigins: ["127.0.0.1", "localhost"],
+  // Default proxy body buffer is 10MB — raise to file cap + multipart margin
+  // so /api/parse|/fill|/template/tag|/batch-fill accept advertised 25MB uploads.
+  experimental: {
+    proxyClientMaxBodySize: MAX_UPLOAD_BODY_BYTES,
+  },
   serverExternalPackages: [
     "pdfjs-dist",
     "tesseract.js",
@@ -24,9 +34,19 @@ const nextConfig: NextConfig = {
     "easy-template-x",
     "pg",
     "better-auth",
-    "@better-auth/passkey",
     "@cursor/sdk",
   ],
+  async redirects() {
+    const legacy = LEGACY_HOME_REDIRECT_PATHS.flatMap((path) => [
+      { source: path, destination: "/", permanent: false },
+      { source: `${path}/`, destination: "/", permanent: false },
+    ]);
+    return [
+      ...legacy,
+      { source: "/settings", destination: "/account", permanent: false },
+      { source: "/keys", destination: "/account", permanent: false },
+    ];
+  },
   async headers() {
     return [
       {

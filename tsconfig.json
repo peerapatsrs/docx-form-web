@@ -19,7 +19,11 @@
       }
     ],
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@mw-shared/auth": ["./vendor/mw-shared/auth/dist/index.js"],
+      "@mw-shared/auth/adapters/nextjs": [
+        "./vendor/mw-shared/auth/dist/adapters/nextjs/index.js"
+      ]
     }
   },
   "include": [
@@ -30,5 +34,10 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts"
   ],
-  "exclude": ["node_modules"]
+  "exclude": [
+    "node_modules",
+    "vendor/mw-shared/auth/node_modules",
+    "vendor/mw-shared/auth/tests",
+    "vendor/mw-shared/auth/src"
+  ]
 }

@@ -760,16 +760,43 @@ function scanDataRowsWithHeaders(
       });
     }
 
+    const rowIsNoiseOnly = (cells: { text: string }[]) =>
+      cells.length > 0 &&
+      cells.every((c) => !c.text || isNoiseHeaderLabel(c.text));
+    const rowLooksLikeHeaderLabels = (r: RowInfo) => {
+      if (r.isTblHeader) return true;
+      const filled = r.cells.map((c) => c.text).filter(Boolean);
+      if (!filled.length) return false;
+      const hasSample = filled.some(
+        (t) => /\d/.test(t) || /^[✓√✔☑✖×xX]$/u.test(t),
+      );
+      if (hasSample) return false;
+      // Caption/header row: every filled cell is a short label (not a blank clone).
+      return filled.every((t) => t.length > 0 && t.length <= 80 && !isNoiseHeaderLabel(t));
+    };
+
     let emittedDataRow = false;
     for (let ri = 0; ri < rows.length; ri += 1) {
       const row = rows[ri];
-      if (row.plainStart < 0 || !(row.plainEnd > row.plainStart)) continue;
       // Word repeating header rows are never the list-table prototype.
       if (row.isTblHeader) continue;
       const nonEmpty = row.cells
         .map((c, i) => ({ text: c.text, i }))
         .filter((c) => !!c.text);
-      if (!nonEmpty.length) continue;
+      // Blank template body: empty / noise-placeholder cells under a prior header
+      // row (3.1-blank). Still need a plain span for wrap anchors — empty <w:t>
+      // rows without nodes are skipped below.
+      const priorHeader = rows.slice(0, ri).some((r) => rowLooksLikeHeaderLabels(r));
+      const blankTemplateBody =
+        priorHeader &&
+        rowIsNoiseOnly(row.cells) &&
+        // Prefer the first blank body; later blank clones stay as delete targets.
+        !emittedDataRow;
+      if (!nonEmpty.length && !blankTemplateBody) continue;
+      if (row.plainStart < 0 || !(row.plainEnd > row.plainStart)) {
+        // Truly empty XML rows (no <w:t> nodes) cannot be plain-anchored.
+        if (!blankTemplateBody || !nonEmpty.length) continue;
+      }
       // Skip pure header-like rows (no digit/checkbox/sample token).
       // Short label-only rows (「ลำดับ」「ชื่อ」「เขต / อำเภอ」) are headers even
       // without w:tblHeader — don't treat them as the list-table prototype.
@@ -780,7 +807,7 @@ function scanDataRowsWithHeaders(
           /\d/.test(c.text) ||
           /^[✓√✔☑✖×xX]$/u.test(c.text),
       );
-      if (!hasSampleToken) {
+      if (!hasSampleToken && !blankTemplateBody) {
         const laterHasSample = rows.slice(ri + 1).some((later) =>
           later.cells.some(
             (c) =>
@@ -792,10 +819,14 @@ function scanDataRowsWithHeaders(
       }
       const looksLikeLabelOnly =
         !hasSampleToken &&
+        !blankTemplateBody &&
+        nonEmpty.length > 0 &&
         nonEmpty.every((c) => c.text.length > 0 && c.text.length <= 80);
       if (looksLikeLabelOnly) continue;
       const looksLikeData =
-        hasSampleToken || nonEmpty.some((c) => c.text.length >= 2);
+        blankTemplateBody ||
+        hasSampleToken ||
+        nonEmpty.some((c) => c.text.length >= 2);
       if (!looksLikeData) continue;
       if (firstOnly && emittedDataRow) continue;
 
@@ -1883,19 +1914,25 @@ export async function tagTemplate(
       const closeTag = String(raw?.closeTag || "{{/}}").trim();
 
       const tableIndex =
-        mode === "delete-tr" && Number.isFinite(Number(raw?.tableIndex))
+        (mode === "delete-tr" || mode === "wrap-row") &&
+        Number.isFinite(Number(raw?.tableIndex))
           ? Number(raw.tableIndex)
           : undefined;
       const rowIndexInTableEarly =
-        mode === "delete-tr" && Number.isFinite(Number(raw?.rowIndexInTable))
+        (mode === "delete-tr" || mode === "wrap-row") &&
+        Number.isFinite(Number(raw?.rowIndexInTable))
           ? Number(raw.rowIndexInTable)
           : undefined;
       const pinnedDelete =
         mode === "delete-tr" &&
         typeof tableIndex === "number" &&
         typeof rowIndexInTableEarly === "number";
+      const pinnedWrapRow =
+        mode === "wrap-row" &&
+        typeof tableIndex === "number" &&
+        typeof rowIndexInTableEarly === "number";
 
-      if (!plain && !pinnedDelete) {
+      if (!plain && !pinnedDelete && !pinnedWrapRow) {
         throw new Error(`รายการ ${id}: ข้อความว่างไม่ได้`);
       }
 
@@ -1938,7 +1975,8 @@ export async function tagTemplate(
             ? Number(raw.rowOffset)
             : 0;
         const rowIndexInTable =
-          mode === "delete-tr" && Number.isFinite(Number(raw?.rowIndexInTable))
+          (mode === "delete-tr" || mode === "wrap-row") &&
+          Number.isFinite(Number(raw?.rowIndexInTable))
             ? Number(raw.rowIndexInTable)
             : undefined;
         const expanded = expandToTableRow(

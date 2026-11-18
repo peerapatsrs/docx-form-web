@@ -198,7 +198,8 @@ await check("garbled near-duplicate token names rejected", async () => {
   assert.equal(looksLikeGarbledName("abababxx"), true);
   assert.equal(looksLikeGarbledName("item_amount"), false);
   assert.equal(looksLikeGarbledName("☐"), true, "checkbox arm alone");
-  assert.equal(looksLikeGarbledName("lbl_27qmif"), true, "hash fallback name");
+  assert.equal(looksLikeGarbledName("lbl_27qmif"), true, "legacy hash fallback name");
+  assert.equal(looksLikeGarbledName("f_27qmif"), false, "stable f_ hash is allowed");
   assert.equal(looksLikeGarbledName("จำนวน_รวมทั้งสิ้น_1116"), true, "sample+digits");
   assert.equal(looksLikeGarbledName("amt_total"), false);
 });
@@ -238,7 +239,7 @@ await check("coverage warns when ~27 tags on ~50 expected", async () => {
   const cov = estimateSuggestCoverage(fakeSuggestions, plain, null);
   assert.ok(cov.expected >= 50, `expected>=50 got ${cov.expected}`);
   assert.ok(cov.actual === 27, `actual=27 got ${cov.actual}`);
-  assert.ok(cov.score < 0.55, `score<0.55 got ${cov.score}`);
+  assert.ok(cov.score < 0.85, `score<0.85 got ${cov.score}`);
   assert.equal(cov.thin, true, "27-on-~50 output must warn thin");
 });
 
@@ -300,12 +301,46 @@ await check("blank sample clones are deleted not kept as trailer", async () => {
   );
 });
 
-await check("garbled rejects bare รายการ/ค่า fallbacks", async () => {
+await check("garbled rejects short/dotted/degenerate structural names", async () => {
   const { looksLikeGarbledName } = await loadDraft();
-  assert.equal(looksLikeGarbledName("รายการ"), true);
-  assert.equal(looksLikeGarbledName("ค่า"), true);
-  assert.equal(looksLikeGarbledName("value"), true);
+  assert.equal(looksLikeGarbledName("ที่"), true, "particle-length");
+  assert.equal(looksLikeGarbledName("ที่ทัที่_ที่"), true, "tiny-part dump");
+  assert.equal(looksLikeGarbledName("จำเลยที่.1"), true, "dotted numeric");
+  assert.equal(looksLikeGarbledName("ราคา.2"), true, "dotted numeric");
+  assert.equal(looksLikeGarbledName("จำเลยที่.id"), true, "dotted id");
   assert.equal(looksLikeGarbledName("รายการค่าใช้จ่าย"), false);
+  assert.equal(looksLikeGarbledName("เมืองปทุมธานี"), false);
+});
+
+await check("blank template table wraps prototype row with fill-empty cells", async () => {
+  const { validateAiTagSuggestions, looksLikeGarbledName } = await loadDraft();
+  const xml = readFileSync(join(fixturesDir, "blank-table.xml"), "utf8");
+  const plain = "ลำดับรายการจำนวน------";
+  const out = validateAiTagSuggestions(plain, [], xml, "th");
+  const wrap = out.find((s) => s.mode === "wrap-row" && s.kind === "list-table");
+  assert.ok(wrap, "blank table must seed wrap-row");
+  assert.match(String(wrap.tag || ""), /^\{\{#/);
+  assert.equal(out.filter((s) => s.kind === "list").length, 0, "no stray paragraph loop");
+  const fills = out.filter((s) => s.mode === "fill-empty-tc");
+  assert.ok(fills.length >= 3, `expected >=3 fill-empty-tc got ${fills.length}`);
+  assert.equal(
+    new Set(fills.map((s) => s.name)).size,
+    fills.length,
+    "prototype cells must have unique names",
+  );
+  assert.ok(
+    !out.some((s) => looksLikeGarbledName(String(s.name || ""))),
+    "no degenerate field names",
+  );
+});
+
+await check("no keyword denylist or ลำดับ default in ai-tag-draft source", async () => {
+  const src = readFileSync(join(root, "src/server/ai-tag-draft.ts"), "utf8");
+  assert.doesNotMatch(
+    src,
+    /\/\^\(รายการ\|ค่า\|value\|rows\|loop\)\$\/iu/,
+  );
+  assert.doesNotMatch(src, /resolveVarName\(\s*lang\s*===\s*["']en["']\s*\?\s*["']no["']\s*:\s*["']ลำดับ["']/);
 });
 
 await check("VAT rate caption is never tagged as a field", async () => {

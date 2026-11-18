@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - local
       - feat/oidc-sso
       - "cursor/**"
       - "fix/**"

@@ -4757,6 +4757,14 @@ async function runTaggerAiDraft() {
         op.rowPlainStart = rowPlainStart;
         op.rowPlainEnd = rowPlainEnd;
       }
+      if (mode === "wrap-row") {
+        const tableIndex = Number(s.tableIndex);
+        const rowIndexInTable = Number(s.rowIndexInTable);
+        if (Number.isFinite(tableIndex) && tableIndex >= 0) op.tableIndex = tableIndex;
+        if (Number.isFinite(rowIndexInTable) && rowIndexInTable >= 0) {
+          op.rowIndexInTable = rowIndexInTable;
+        }
+      }
 
       // Nested replace inside a list-table: keep wrapTag when the server sent it.
       if (!isList && mode === "replace") {

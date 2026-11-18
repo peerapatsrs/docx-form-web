@@ -8,7 +8,7 @@ import {
   getMwOidcHandlers,
 } from "./mw-auth";
 import { getAppBaseUrl } from "@/lib/app-base-url";
-import { logOidcNotConfigured } from "./oidc-config";
+import { getOidcConfig, logOidcNotConfigured } from "./oidc-config";
 
 function absoluteLocation(location: string | null): string | null {
   if (!location) return null;
@@ -38,6 +38,88 @@ export function escapeHtmlAttr(value: string): string {
     .replace(/>/g, "&gt;");
 }
 
+export type EndSessionContinueOptions = {
+  /**
+   * Absolute origin of the IdP `end_session_endpoint` (from OIDC discovery).
+   * When omitted, derived from `issuerUrl` / `OIDC_ISSUER` (same origin as
+   * Keycloak end_session). Never hardcode hosts.
+   */
+  allowedEndSessionOrigin?: string | null;
+  /** OIDC issuer URL — used when allowedEndSessionOrigin is omitted. */
+  issuerUrl?: string | null;
+  /** Safe same-app fallback when the candidate URL is rejected. */
+  fallbackHref?: string;
+};
+
+function resolveAllowedEndSessionOrigin(
+  opts: EndSessionContinueOptions = {},
+): { origin: string; allowHttp: boolean } | null {
+  if (opts.allowedEndSessionOrigin) {
+    try {
+      const u = new URL(opts.allowedEndSessionOrigin);
+      if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+      return { origin: u.origin, allowHttp: u.protocol === "http:" };
+    } catch {
+      return null;
+    }
+  }
+
+  const issuerRaw =
+    opts.issuerUrl || getOidcConfig()?.issuer || process.env.OIDC_ISSUER || "";
+  const trimmed = String(issuerRaw).trim();
+  if (!trimmed) return null;
+  try {
+    const u = new URL(trimmed);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return { origin: u.origin, allowHttp: u.protocol === "http:" };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Defense in depth for the logout continue page: only emit http(s) URLs whose
+ * origin matches the configured IdP end_session origin. Reject javascript:,
+ * data:, foreign https origins, and CTL/whitespace smuggling.
+ */
+export function resolveSafeEndSessionContinueHref(
+  endSessionUrl: string,
+  opts: EndSessionContinueOptions = {},
+): string {
+  const fallback = opts.fallbackHref || "/logged-out";
+  const allowed = resolveAllowedEndSessionOrigin(opts);
+  if (!allowed) return fallback;
+
+  const raw = String(endSessionUrl ?? "");
+  // Reject control characters (incl. NUL) anywhere — blocks prefix smuggling.
+  for (let i = 0; i < raw.length; i += 1) {
+    const c = raw.charCodeAt(i);
+    if (c <= 0x1f || c === 0x7f) return fallback;
+  }
+
+  const trimmed = raw.trim();
+  if (!trimmed) return fallback;
+
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return fallback;
+  }
+
+  if (url.protocol === "https:") {
+    // always allowed when origin matches
+  } else if (url.protocol === "http:") {
+    // http: only when the configured issuer/end_session is itself http (local).
+    if (!allowed.allowHttp) return fallback;
+  } else {
+    return fallback;
+  }
+
+  if (url.origin !== allowed.origin) return fallback;
+  return url.toString();
+}
+
 /**
  * Browser continue page for cross-origin RP logout.
  *
@@ -50,9 +132,14 @@ export function escapeHtmlAttr(value: string): string {
  * The end_session URL must never be interpolated into a `<script>` literal —
  * a raw `</script>` in the URL would end the script early (XSS). Meta + `<a href>`
  * use HTML attribute escaping; any script only reads the URL from the anchor.
+ * Candidate URLs are origin-checked (DEF-BE-END-SESSION-JAVASCRIPT-HREF).
  */
-export function buildEndSessionContinueHtml(endSessionUrl: string): string {
-  const href = escapeHtmlAttr(endSessionUrl);
+export function buildEndSessionContinueHtml(
+  endSessionUrl: string,
+  opts: EndSessionContinueOptions = {},
+): string {
+  const safeHref = resolveSafeEndSessionContinueHref(endSessionUrl, opts);
+  const href = escapeHtmlAttr(safeHref);
   return `<!DOCTYPE html>
 <html lang="th">
 <head>
@@ -82,8 +169,9 @@ export function buildEndSessionContinueHtml(endSessionUrl: string): string {
 export function maybeContinueToEndSession(response: Response): Response {
   if (response.status < 300 || response.status >= 400) return response;
   const loc = response.headers.get("Location");
-  if (!loc || !/^https?:\/\//i.test(loc)) return response;
+  if (!loc) return response;
   const appBase = getAppBaseUrl();
+  // Same-origin post_logout (/logged-out) stays a normal redirect.
   if (sameOrigin(loc, appBase)) return response;
 
   const headers = new Headers();
@@ -97,10 +185,19 @@ export function maybeContinueToEndSession(response: Response): Response {
   headers.set("Cache-Control", "no-store");
   headers.set("Referrer-Policy", "no-referrer");
 
-  return new Response(buildEndSessionContinueHtml(loc), {
-    status: 200,
-    headers,
-  });
+  const cfg = getOidcConfig();
+  return new Response(
+    buildEndSessionContinueHtml(loc, {
+      issuerUrl: cfg?.issuer ?? null,
+      // Issuer origin == end_session_endpoint origin for Keycloak / standard OIDC.
+      allowedEndSessionOrigin: cfg ? new URL(cfg.issuer).origin : null,
+      fallbackHref: "/logged-out",
+    }),
+    {
+      status: 200,
+      headers,
+    },
+  );
 }
 
 /**

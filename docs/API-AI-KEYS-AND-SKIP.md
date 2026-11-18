@@ -417,6 +417,7 @@ Env:
 - `DOCX_FORM_AI_TIMEOUT_EXTRA_MS_PER_MIB` — optional size scaling for large docs (default 8000; `0` disables)
 - `DOCX_FORM_AI_RETRY_MAX` / `DOCX_FORM_AI_RETRY_BACKOFF_MS` — bounded retries for timeouts/429/5xx only (not 401/4xx); suggest-tags uses these
 - `DOCX_FORM_AI_OVERALL_TIMEOUT_MS` — optional wall budget across attempts
+- `DOCX_FORM_AI_SUGGEST_CHUNK_CHARS` — large-doc suggest chunk size (default 120000; `0` disables; timeout may fall back to chunking)
 - `DOCX_FORM_AI_KEY_TEST_MOCK=ok\|401\|auth\|quota\|429\|hang` — local/CI mock for key probe
 
 ---

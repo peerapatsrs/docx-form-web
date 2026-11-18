@@ -273,6 +273,132 @@ function resolveVarName(raw: string, lang: AiTagNameLanguage): string {
   return englishNameFromLabel(normalized);
 }
 
+/**
+ * Drop model/collision junk like `_2` / `_3` so uniqueness can be rebuilt from
+ * nearby labels/headers instead of opaque numeric suffixes.
+ */
+export function stripJunkNumericSuffix(name: string): string {
+  let s = String(name || "").normalize("NFC").trim();
+  // Repeatedly peel trailing _digits (field_2_3 → field).
+  for (let i = 0; i < 4; i += 1) {
+    const next = s.replace(/_+\d+$/u, "").replace(/_+$/u, "");
+    if (next === s) break;
+    s = next;
+  }
+  return s;
+}
+
+/**
+ * Prefer a richer label/header when the model name is empty, numeric-junked,
+ * or only a short segment of a longer contextual name (generic — no denylist).
+ */
+export function preferContextualNameSource(
+  modelName: string,
+  label: string,
+  extraContext: string[] = [],
+): string {
+  const cleanedModel = stripJunkNumericSuffix(String(modelName || "").trim());
+  const labelTrim = String(label || "").trim();
+  if (!cleanedModel) return labelTrim || extraContext.find((c) => String(c || "").trim()) || "";
+  if (!labelTrim && !extraContext.length) return cleanedModel;
+
+  const candidates = [labelTrim, ...extraContext.map((c) => String(c || "").trim())].filter(
+    Boolean,
+  );
+  const norm = (s: string) =>
+    s
+      .normalize("NFC")
+      .replace(/[\s/_-]+/gu, "")
+      .toLowerCase();
+  const modelNorm = norm(cleanedModel);
+  // If any context string properly extends the model token, use the longest.
+  let best = cleanedModel;
+  for (const c of candidates) {
+    const cNorm = norm(c);
+    if (!cNorm) continue;
+    if (
+      c.length >= cleanedModel.length &&
+      (c.includes(cleanedModel) ||
+        cNorm.includes(modelNorm) ||
+        // Model is a proper substring of context (not the reverse — avoids
+        // short names like 「ชื่อ」stealing unrelated long context).
+        (modelNorm.length >= 2 && cNorm.includes(modelNorm)))
+    ) {
+      if (c.length > best.length || (best === cleanedModel && cNorm !== modelNorm)) {
+        best = c;
+      }
+    }
+  }
+  // Model name that is only a trailing/leading segment of a multi-part label.
+  if (labelTrim) {
+    const labelParts = labelTrim.split(/[\s/_-]+/u).filter(Boolean);
+    if (
+      labelParts.length >= 2 &&
+      (labelParts.includes(cleanedModel) ||
+        labelParts.some((p) => modelNorm.includes(norm(p)) && norm(p).length >= 2)) &&
+      cleanedModel.length < labelTrim.length
+    ) {
+      return labelTrim;
+    }
+  }
+  return best === cleanedModel ? cleanedModel : best;
+}
+
+/** Default unchecked glyph when the model omits falseText. */
+export const DEFAULT_BOOL_FALSE_TEXT = "☐";
+export const DEFAULT_BOOL_TRUE_TEXT = "√";
+
+export function normalizeBoolArms(
+  trueRaw: unknown,
+  falseRaw: unknown,
+): { trueText: string; falseText: string } {
+  let trueText = String(trueRaw ?? DEFAULT_BOOL_TRUE_TEXT).slice(0, 40);
+  let falseText = String(falseRaw ?? "").slice(0, 40);
+  if (!trueText.trim()) trueText = DEFAULT_BOOL_TRUE_TEXT;
+  // Empty false arm is the common defect that leaves √ visible when unchecked.
+  if (!falseText.trim()) falseText = DEFAULT_BOOL_FALSE_TEXT;
+  // If both arms somehow match, force a distinct unchecked glyph.
+  if (falseText === trueText) falseText = DEFAULT_BOOL_FALSE_TEXT;
+  return { trueText, falseText };
+}
+
+/**
+ * auto / {{+name}} only for real running numbers (sequence column / short first-col digit).
+ * Prices, survey pages, and other numeric-ish values stay text even inside loops.
+ */
+export function looksLikeRunSequence(opts: {
+  header?: string | null;
+  cellIndex?: number | null;
+  cellText?: string | null;
+}): boolean {
+  const text = String(opts.cellText ?? "").trim();
+  // Non-digit payloads (prices-as-text, labels) are never {{+}}.
+  if (text && !/^\d{1,4}$/.test(text)) return false;
+  const header = String(opts.header ?? "")
+    .normalize("NFC")
+    .trim();
+  if (header) {
+    if (/[#№]|no\.?\b|seq(uence)?\b|ordinal|\brun\b/i.test(header)) return true;
+    if (/ลำดับ/.test(header)) return true;
+    // Short captions that end with 「ที่」 (จำเลยที่ / โจทก์ที่) are run labels.
+    if (header.length <= 16 && /ที่\s*$/u.test(header)) return true;
+    if (/^(ที่|No\.?|#)$/iu.test(header.replace(/\s+/gu, ""))) return true;
+  }
+  // First body column + short digit (or empty fill-empty-tc in col 0)
+  // only when the header is absent or itself sequence-like — never for
+  // labeled price/qty/amount columns.
+  if (
+    typeof opts.cellIndex === "number" &&
+    opts.cellIndex === 0 &&
+    (!text || /^\d{1,3}$/.test(text)) &&
+    !header
+  ) {
+    return true;
+  }
+  // Digit with no header and no cell index — not enough evidence for {{+}}.
+  return false;
+}
+
 function collectExistingTagRanges(plain: string): OccupiedSpan[] {
   const ranges: OccupiedSpan[] = [];
   const re = /\{\{[^{}]+\}\}/g;
@@ -620,14 +746,47 @@ function resolveFieldPlainHits(
   return order;
 }
 
-function uniqueName(base: string, usedNames: Set<string>): string | null {
-  let name = base;
-  if (!name || !NAME_RE.test(name)) return null;
-  if (!usedNames.has(name)) return name;
-  let n = 2;
-  while (usedNames.has(`${base}_${n}`) && n < 50) n += 1;
-  name = `${base}_${n}`;
-  return NAME_RE.test(name) ? name : null;
+/**
+ * Claim a unique variable name. Never invent `_2` / `_3` disambiguators —
+ * prefer contextual suffixes from labels/headers/parent wraps, then letter suffixes.
+ */
+function uniqueName(
+  base: string,
+  usedNames: Set<string>,
+  contextParts: string[] = [],
+  lang: AiTagNameLanguage = "th",
+): string | null {
+  const cleaned = stripJunkNumericSuffix(base);
+  if (!cleaned || !NAME_RE.test(cleaned)) return null;
+  if (!usedNames.has(cleaned)) return cleaned;
+
+  const ctxNames: string[] = [];
+  for (const raw of contextParts) {
+    const n = resolveVarName(String(raw || ""), lang);
+    if (!n || n === cleaned) continue;
+    if (!ctxNames.includes(n)) ctxNames.push(n);
+  }
+  const candidates: string[] = [];
+  for (const ctx of ctxNames) {
+    const last = ctx.split(/[_/-]/u).filter(Boolean).pop() || ctx;
+    for (const cand of [`${cleaned}_${ctx}`, `${ctx}_${cleaned}`, `${cleaned}_${last}`, ctx]) {
+      const s = (lang === "en" ? sanitizeNameAscii(cand) : sanitizeName(cand)).slice(0, 40);
+      if (s && NAME_RE.test(s) && !candidates.includes(s)) candidates.push(s);
+    }
+  }
+  for (const cand of candidates) {
+    if (!usedNames.has(cand)) return cand;
+  }
+  // Last resort: alphabetic suffixes (never numeric _2/_3).
+  const alphabet =
+    lang === "en"
+      ? "abcdefghijklmnopqrstuvwxyz"
+      : "กขคงจฉชซฌญฎฏฐฑฒณดตถทธนบปผฝพฟภมยรลวศษสหฬอฮ";
+  for (let i = 0; i < alphabet.length; i += 1) {
+    const cand = `${cleaned}_${alphabet[i]}`;
+    if (NAME_RE.test(cand) && !usedNames.has(cand)) return cand;
+  }
+  return null;
 }
 
 function parseKind(raw: unknown): AiTagDraftKind | null {
@@ -704,14 +863,16 @@ function formatParagraphListHintsForPrompt(hints: ParagraphListHint[]): string {
 function nameLanguagePromptRule(lang: AiTagNameLanguage): string {
   if (lang === "en") {
     return `- name (REQUIRED language: English snake_case): ASCII letters, digits, underscore, dot, hyphen only — NO Thai characters.
-  Examples: defendant_no, district, seq, plaintiff_name, amount.
+  Examples: defendant_no, district, seq, plaintiff_name, expense_amount.
   From Thai headers: 「จำเลยที่」/「ลำดับ」→ defendant_no or seq; 「เขต / อำเภอ」→ district.
-  Prefer short descriptive English identifiers.`;
+  Prefer short descriptive English identifiers grounded in the nearby label.
+  Never use numeric collision suffixes (_2/_3). Never emit bare generics (items/amount/list) when a label/role is available.`;
   }
   return `- name (REQUIRED language: Thai identifiers preferred): Thai and/or Latin letters, digits, underscore, dot, hyphen only (no spaces).
-  Examples: ลำดับ, เขต_อำเภอ, จำเลยที่, ชื่อ.
+  Examples: ลำดับ, เขต_อำเภอ, จำเลยที่, ชื่อ, รายการค่าใช้จ่าย.
   From headers keep Thai when clear (「จำเลยที่」→ จำเลยที่ or ลำดับ; 「เขต / อำเภอ」→ เขต_อำเภอ).
-  Prefer short descriptive names.`;
+  Prefer short descriptive names grounded in the nearby label/role.
+  Never use numeric collision suffixes (_2/_3). Never emit bare one-token names when the caption gives more context.`;
 }
 
 function buildSuggestPrompt(opts: {
@@ -789,16 +950,16 @@ How to split label vs value (use your judgment on the real text):
 - Prefer omitting instructional tails like 「(ตัวอย่าง)」 and usually omit wrapping 「()」.
 
 Kinds / modes (schema the app understands — pick what fits the document):
-- "text" — one-off sample → {{name}} (replace), OR blank table cell (fill-empty-tc). Digits outside loops are text (e.g. ${outsideDigitExample}), never {{+name}} there.
-- "bool" — checkbox-like √/✓ → {{name?true,false}}
-- "auto" — ONLY run numbers INSIDE an accepted list/list-table wrap → {{+name}}. Forbidden outside loops. 「จำเลยที่」alone is never auto.
-- "list" — repeating prose OUTSIDE tables: wrap the FIRST unit only (mode "wrap"). Name like "${listNameExample}". Tag inner samples inside that wrap; leave later units untagged.
-- "list-table" — repeating TABLE rows: wrap ONLY the first body/data row (mode "wrap-row"). Skip headers and later sample rows. Usually also emit replace/auto/bool for each non-empty sample cell on that prototype row (incl. first column), e.g. ${nameExample}. Empty meaningful cells → fill-empty-tc with cellIndex (name e.g. ${emptyNameExample}).
+- "text" — one-off sample → {{name}} (replace), OR blank table cell (fill-empty-tc). Digits outside loops are text (e.g. ${outsideDigitExample}), never {{+name}} there. Prices, quantities, page refs, and other non-sequence numbers are text even inside loops.
+- "bool" — checkbox-like √/✓/☑ → always emit BOTH arms: {{name?√,☐}} (true glyph, unchecked glyph). Never leave falseText empty. Unchecked must render ☐ (or ×), never √.
+- "auto" — ONLY a running sequence number INSIDE an accepted list/list-table wrap (column labeled ลำดับ/ที่/No/seq, or first-column short run index) → {{+name}}. Forbidden for prices, rates, survey pages, amounts, case numbers outside that sequence column. 「จำเลยที่」alone is never auto.
+- "list" — repeating prose OUTSIDE tables: wrap the FIRST unit only (mode "wrap"). Name like "${listNameExample}". MUST also emit inner replace fields for every fill-in inside that first unit (name, address, ids, …). Leave later units untagged.
+- "list-table" — repeating TABLE rows: wrap ONLY the first body/data row (mode "wrap-row"). Skip headers and later sample rows. MUST emit replace/auto/bool for each non-empty sample cell on that prototype row (incl. first column), e.g. ${nameExample}. Empty meaningful cells → fill-empty-tc with cellIndex (name e.g. ${emptyNameExample}).
 - Prefer sample fill-in spots over headings/boilerplate as the replaced span (captions go in "label").
-- Distinct meanings → distinct names even when values look alike: buyer vs seller address, buyer vs seller tax id, document date vs document number, party A vs party B phone. Derive names from the nearby label/role (e.g. ที่อยู่ผู้ซื้อ / ที่อยู่ผู้ขาย), never reuse one name for two roles.
-- Leave fixed letterhead, court/agency titles, section headings, logos captions, and other non-editable boilerplate as plain text — do NOT turn them into variables.
-- Cover typical fill blanks: end dates, signature lines, name lines, amounts, and empty table cells that a user would fill. If you intentionally skip a blank, omit it only when it is clearly instructional/boilerplate.
-- Repeating table body rows MUST use kind "list-table" (wrap-row on the first data row). Do not emit a flat text tag per cell across every sample row.
+- Distinct meanings → distinct names even when values look alike: buyer vs seller address, buyer vs seller tax id, document date vs document number, party A vs party B phone. Derive names from the nearby label/role (e.g. ที่อยู่ผู้ซื้อ / ที่อยู่ผู้ขาย). NEVER disambiguate with _2/_3/_47 numeric suffixes — use role/context words instead. Never emit bare one-word names when a nearby caption gives more context.
+- Leave fixed letterhead logos/court seals as plain text, BUT DO tag fillable letterhead/header values: case/black-red numbers, party names, phones, emails, addresses, and dates when they are user-fillable samples.
+- Cover typical fill blanks: letterhead/header fields, end dates, signature lines, name lines, amounts, defendant/plaintiff inners, and empty table cells. Tag unique footer/total figures when they are fill-ins. If you intentionally skip a blank, omit it only when it is clearly instructional/boilerplate.
+- Repeating table body rows MUST use kind "list-table" (wrap-row on the first data row). Do not emit a flat text tag per cell across every sample row. Later sample rows stay untagged (the app clones the prototype).
 - Nested lists are unsupported — one wrap level only. One wrap per repeating sample group / table.
 ${nameLanguagePromptRule(opts.nameLanguage)}
 ${truncNotes ? `\nNOTE: ${truncNotes}\n` : ""}
@@ -1183,16 +1344,56 @@ function findParentWrap(
 
 /**
  * auto / {{+name}} is only valid inside an accepted list or list-table soft wrap
- * (or as a fill-empty-tc cell bound to such a wrap). Stray auto → text.
+ * AND only when the span looks like a real run/sequence number.
+ * Stray or misused auto → text.
  */
 function coerceFieldKindForWrap(
   kind: AiTagDraftKind,
   wraps: SoftWrapSpan[],
   start: number,
   end: number,
+  opts?: {
+    header?: string | null;
+    cellIndex?: number | null;
+    cellText?: string | null;
+  },
 ): AiTagDraftKind {
   if (kind !== "auto") return kind;
-  return findParentWrap(wraps, start, end) ? "auto" : "text";
+  if (!findParentWrap(wraps, start, end)) return "text";
+  const text = String(opts?.cellText ?? "").trim();
+  // Mis-tagged non-digit values (ราคา/หน่วย, หน้าสำรวจ, …) must not keep {{+}}.
+  if (text && !/^\d{1,4}$/.test(text)) return "text";
+  if (/^\d{1,4}$/.test(text)) {
+    // Explicit non-sequence header (price/qty/…) → text.
+    if (opts?.header) {
+      return looksLikeRunSequence({
+        header: opts.header,
+        cellIndex: opts.cellIndex,
+        cellText: text,
+      })
+        ? "auto"
+        : "text";
+    }
+    if (typeof opts?.cellIndex === "number") {
+      return looksLikeRunSequence({
+        header: null,
+        cellIndex: opts.cellIndex,
+        cellText: text,
+      })
+        ? "auto"
+        : "text";
+    }
+    // Paragraph-list run index inside a wrap (no column header).
+    return "auto";
+  }
+  // Empty fill-empty-tc: only sequence columns.
+  return looksLikeRunSequence({
+    header: opts?.header,
+    cellIndex: opts?.cellIndex,
+    cellText: null,
+  })
+    ? "auto"
+    : "text";
 }
 
 /**
@@ -1248,13 +1449,25 @@ function findCellTextInRow(
   return null;
 }
 
-function inferSampleFieldKind(cellText: string): AiTagDraftKind {
-  if (/^\d+$/.test(cellText)) return "auto";
+function inferSampleFieldKind(
+  cellText: string,
+  opts?: { header?: string | null; cellIndex?: number | null },
+): AiTagDraftKind {
   if (/^[✓√✔☑]$/u.test(cellText)) return "bool";
+  if (
+    /^\d+$/.test(cellText) &&
+    looksLikeRunSequence({
+      header: opts?.header,
+      cellIndex: opts?.cellIndex,
+      cellText,
+    })
+  ) {
+    return "auto";
+  }
   return "text";
 }
 
-/** Prefer a readable list name from prototype column headers. */
+/** Prefer a readable list name from prototype column headers / sample cells. */
 function inventListTableName(
   samples: TableSampleCellHint[],
   empties: TableEmptyCellHint[],
@@ -1269,12 +1482,33 @@ function inventListTableName(
     if (/จำเล|จำลย|defendant/i.test(blob)) return "defendants";
     if (/ทรัพย์|property/i.test(blob)) return "properties";
     if (/ค่าใช้|expense|cost/i.test(blob)) return "expenses";
-    return `rows_${tableIndex + 1}`;
+    const fromHeaders = headers
+      .map((h) => resolveVarName(h, "en"))
+      .filter((h) => h && h.length >= 2)
+      .slice(0, 2);
+    if (fromHeaders.length) return sanitizeNameAscii(fromHeaders.join("_")).slice(0, 40) || "table_rows";
+    const cell = resolveVarName(String(samples[0]?.cellText || "").slice(0, 24), "en");
+    if (cell) return sanitizeNameAscii(`rows_${cell}`).slice(0, 40);
+    return "table_rows";
   }
   if (/จำเล|จำลย/.test(blob)) return "รายการจำเลย";
   if (/ทรัพย์/.test(blob)) return "รายการทรัพย์";
   if (/ค่าใช้/.test(blob)) return "รายการค่าใช้จ่าย";
-  return `รายการ${tableIndex + 1}`;
+  const fromHeaders = headers
+    .map((h) => resolveVarName(h, "th"))
+    .filter((h) => h && h.length >= 2)
+    .slice(0, 2);
+  if (fromHeaders.length) {
+    const joined = sanitizeName(fromHeaders.join("_")).slice(0, 40);
+    if (joined) {
+      return joined.startsWith("รายการ") ? joined : sanitizeName(`รายการ_${joined}`).slice(0, 40);
+    }
+  }
+  const cell = resolveVarName(String(samples[0]?.cellText || "").slice(0, 24), "th");
+  if (cell) return sanitizeName(`รายการ_${cell}`).slice(0, 40);
+  // Stable non-numeric fallback (uniqueName adds context if multiple tables collide).
+  void tableIndex;
+  return "รายการตาราง";
 }
 
 /** True when [start,end) lies fully inside a first-data/prototype table row. */
@@ -1554,17 +1788,29 @@ export function validateAiTagSuggestions(
     const anchorLabel = String(
       row.label ?? row.fieldLabel ?? row.field_label ?? row.caption ?? "",
     ).trim();
-    const nameSource = String(row.name ?? "").trim() || anchorLabel;
-    const baseName = resolveVarName(nameSource, lang);
-    const name = uniqueName(baseName, usedNames);
+    const headerHintEarly = String(
+      row.headerHint ?? row.header ?? row.columnHeader ?? "",
+    ).trim();
+    const nameSource = preferContextualNameSource(
+      String(row.name ?? "").trim(),
+      anchorLabel,
+      [headerHintEarly].filter(Boolean),
+    );
+    const baseName = resolveVarName(nameSource || anchorLabel, lang);
+    const name = uniqueName(
+      baseName,
+      usedNames,
+      [anchorLabel, headerHintEarly].filter(Boolean),
+      lang,
+    );
     if (!name) continue;
 
-    const trueText =
+    const boolArms =
       kind === "bool"
-        ? String(row.trueText ?? row.true_text ?? "√").slice(0, 40)
-        : "";
-    const falseText =
-      kind === "bool" ? String(row.falseText ?? row.false_text ?? "").slice(0, 40) : "";
+        ? normalizeBoolArms(row.trueText ?? row.true_text, row.falseText ?? row.false_text)
+        : { trueText: "", falseText: "" };
+    const trueText = boolArms.trueText;
+    const falseText = boolArms.falseText;
 
     let accepted: AiTagSuggestion | null = null;
     /** Scalar replace may match many locations from one AI row. */
@@ -1713,6 +1959,12 @@ export function validateAiTagSuggestions(
               softWraps,
               rowSpan.start,
               rowSpan.end,
+              {
+                cellIndex: ci,
+                // Empty cell — run detection uses header / column index only.
+                cellText: null,
+                header: headerHintEarly || null,
+              },
             );
             const tag = buildTag(fieldKind, name, trueText, falseText);
             if (validateTag(tag)) continue;
@@ -1740,6 +1992,11 @@ export function validateAiTagSuggestions(
             softWraps,
             hint.plainStart,
             hint.plainEnd,
+            {
+              cellIndex: hint.cellIndex,
+              cellText: null,
+              header: hint.header || headerHintEarly || null,
+            },
           );
           const tag = buildTag(fieldKind, name, trueText, falseText);
           if (validateTag(tag)) continue;
@@ -1801,11 +2058,21 @@ export function validateAiTagSuggestions(
             continue;
           }
         }
-        const fieldKind = coerceFieldKindForWrap(kind, softWraps, start, end);
+        const parent = findParentWrap(softWraps, start, end);
+        const sampleMeta = sampleHints.find(
+          (h) =>
+            start >= h.plainStart &&
+            end <= h.plainEnd &&
+            h.cellText === matchPlain,
+        );
+        const fieldKind = coerceFieldKindForWrap(kind, softWraps, start, end, {
+          header: sampleMeta?.header || headerHintEarly || anchorLabel || null,
+          cellIndex: sampleMeta?.cellIndex ?? null,
+          cellText: matchPlain,
+        });
         const tag = buildTag(fieldKind, name, trueText, falseText);
         if (validateTag(tag)) continue;
 
-        const parent = findParentWrap(softWraps, start, end);
         // occurrence among identical matchPlain spans in document order
         const allStarts = findOccurrenceStarts(plainText, matchPlain);
         const occIdx = Math.max(0, allStarts.indexOf(start));
@@ -1849,7 +2116,12 @@ export function validateAiTagSuggestions(
       const baseName =
         resolveVarName(hint.header, lang) ||
         (lang === "en" ? `col_${hint.cellIndex}` : "");
-      const name = uniqueName(baseName, usedNames);
+      const name = uniqueName(
+        baseName,
+        usedNames,
+        [hint.header, parent.name].filter(Boolean),
+        lang,
+      );
       if (!name) continue;
       const tag = buildTag("text", name, "", "");
       if (validateTag(tag)) continue;
@@ -1894,15 +2166,27 @@ export function validateAiTagSuggestions(
         continue;
       }
 
-      const fieldKind = inferSampleFieldKind(hint.cellText);
+      const fieldKind = inferSampleFieldKind(hint.cellText, {
+        header: hint.header,
+        cellIndex: hint.cellIndex,
+      });
       const baseName =
         resolveVarName(hint.header, lang) ||
         resolveVarName(hint.cellText, lang) ||
         (lang === "en" ? `col_${hint.cellIndex}` : "");
-      const name = uniqueName(baseName, usedNames);
+      const name = uniqueName(
+        baseName,
+        usedNames,
+        [hint.header, parent.name].filter(Boolean),
+        lang,
+      );
       if (!name) continue;
-      const trueText = fieldKind === "bool" ? hint.cellText || "√" : "";
-      const falseText = "";
+      const boolArms =
+        fieldKind === "bool"
+          ? normalizeBoolArms(hint.cellText || DEFAULT_BOOL_TRUE_TEXT, "")
+          : { trueText: "", falseText: "" };
+      const trueText = boolArms.trueText;
+      const falseText = boolArms.falseText;
       const tag = buildTag(fieldKind, name, trueText, falseText);
       if (validateTag(tag)) continue;
 
@@ -2007,7 +2291,7 @@ function enrichContactFieldsFromPlain(
     const base =
       resolveVarName(lang === "en" ? "phone" : "โทรศัพท์", lang) ||
       (lang === "en" ? "phone" : "โทรศัพท์");
-    const name = uniqueName(base, usedNames);
+    const name = uniqueName(base, usedNames, [label], lang);
     if (!name) continue;
     const tag = buildTag("text", name, "", "");
     if (validateTag(tag)) continue;
@@ -2038,7 +2322,7 @@ function enrichContactFieldsFromPlain(
     const base =
       resolveVarName(lang === "en" ? "email" : "อีเมล", lang) ||
       (lang === "en" ? "email" : "อีเมล");
-    const name = uniqueName(base, usedNames);
+    const name = uniqueName(base, usedNames, ["Email"], lang);
     if (!name) continue;
     const tag = buildTag("text", name, "", "");
     if (validateTag(tag)) continue;
@@ -2057,6 +2341,110 @@ function enrichContactFieldsFromPlain(
       labelHint: "Email",
     });
   }
+}
+
+/** 0 disables chunking. Default ~120k chars of TAGGER_PLAIN per provider call. */
+export const AI_SUGGEST_CHUNK_CHARS_ENV = "DOCX_FORM_AI_SUGGEST_CHUNK_CHARS";
+export const DEFAULT_AI_SUGGEST_CHUNK_CHARS = 120_000;
+
+export function getAiSuggestChunkChars(): number {
+  const raw = String(process.env[AI_SUGGEST_CHUNK_CHARS_ENV] || "").trim();
+  if (raw === "") return DEFAULT_AI_SUGGEST_CHUNK_CHARS;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_AI_SUGGEST_CHUNK_CHARS;
+  if (n === 0) return 0;
+  return Math.min(Math.floor(n), PLAIN_PROMPT_MAX);
+}
+
+/** Split TAGGER_PLAIN on soft boundaries for graceful large-doc degrade. */
+export function splitPlainTextChunks(
+  plainText: string,
+  chunkChars: number,
+): string[] {
+  const text = String(plainText || "");
+  if (!chunkChars || text.length <= chunkChars) return [text];
+  const chunks: string[] = [];
+  let i = 0;
+  while (i < text.length) {
+    let end = Math.min(text.length, i + chunkChars);
+    if (end < text.length) {
+      const window = text.slice(i, end);
+      // Prefer break on whitespace / Thai sentence end near the tail.
+      const rel = Math.max(
+        window.lastIndexOf("\n"),
+        window.lastIndexOf("\t"),
+        window.lastIndexOf(" "),
+        window.lastIndexOf("。"),
+        window.lastIndexOf("ฯ"),
+      );
+      if (rel >= Math.floor(chunkChars * 0.5)) end = i + rel + 1;
+    }
+    const piece = text.slice(i, end);
+    if (piece) chunks.push(piece);
+    i = end;
+  }
+  return chunks.length ? chunks : [text];
+}
+
+async function callSuggestProvider(
+  prompt: string,
+  xml: string,
+  buffer: Buffer,
+  opts: {
+    providerId: string;
+    apiFamily: string;
+    apiKey: string;
+    model: string;
+    filename: string;
+    attachDocx: boolean;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  },
+): Promise<SuggestCallResult> {
+  if (opts.apiFamily === "gemini") {
+    const geminiKey = getGeminiApiKey(opts.apiKey);
+    if (!geminiKey) throw new Error("ยังไม่ได้เชื่อมต่อ Google AI — ใส่ Gemini API key ก่อน");
+    const geminiModel = getGeminiModel(opts.model);
+    return callGeminiSuggest(prompt, xml, {
+      apiKey: geminiKey,
+      model: geminiModel,
+      docxBuffer: opts.attachDocx ? buffer : undefined,
+      filename: opts.filename,
+      signal: opts.signal,
+      timeoutMs: opts.timeoutMs,
+    });
+  }
+  if (opts.apiFamily === "cursor") {
+    const cursorKey = getCursorApiKey(opts.apiKey);
+    if (!cursorKey) {
+      throw new Error("ยังไม่ได้เชื่อมต่อ Cursor — ใส่ Cursor API key ก่อน");
+    }
+    const parsed = await callCursorAgentJson(prompt, {
+      apiKey: cursorKey,
+      model: opts.model,
+      signal: opts.signal,
+      timeoutMs: opts.timeoutMs,
+      route: "suggest-tags.cursor",
+    });
+    return {
+      parsed,
+      rawText: parsed ? JSON.stringify(parsed, null, 2) : "",
+    };
+  }
+  if (opts.apiFamily === "anthropic") {
+    return callAnthropicSuggest(prompt, {
+      apiKey: opts.apiKey,
+      model: opts.model,
+      signal: opts.signal,
+      timeoutMs: opts.timeoutMs,
+    });
+  }
+  return callOpenAiSuggest(opts.providerId, prompt, {
+    apiKey: opts.apiKey,
+    model: opts.model,
+    signal: opts.signal,
+    timeoutMs: opts.timeoutMs,
+  });
 }
 
 export async function suggestTemplateTags(
@@ -2096,63 +2484,100 @@ export async function suggestTemplateTags(
     buffer.byteLength > 0 &&
     buffer.byteLength <= DOCX_ATTACH_MAX_BYTES;
 
-  const prompt = buildSuggestPrompt({
+  const callOpts = {
+    providerId: provider.id,
+    apiFamily: provider.apiFamily,
+    apiKey,
+    model,
     filename,
-    plainText,
-    xmlSnippet,
-    includeXmlInline: isGemini,
-    emptyCellHints,
-    sampleCellHints,
-    paragraphListHints,
-    nameLanguage,
-    plainTruncated,
-    xmlTruncated,
-    docxAttached: attachDocx,
-  });
+    attachDocx,
+    signal: opts?.signal,
+    timeoutMs: opts?.timeoutMs,
+  };
 
-  let callResult: SuggestCallResult = { parsed: null, rawText: "" };
-  if (isGemini) {
-    const geminiKey = getGeminiApiKey(apiKey);
-    if (!geminiKey) throw new Error("ยังไม่ได้เชื่อมต่อ Google AI — ใส่ Gemini API key ก่อน");
-    const geminiModel = getGeminiModel(model);
-    callResult = await callGeminiSuggest(prompt, xml, {
-      apiKey: geminiKey,
-      model: geminiModel,
-      docxBuffer: attachDocx ? buffer : undefined,
+  const buildPromptForPlain = (plainSlice: string, truncated: boolean) =>
+    buildSuggestPrompt({
       filename,
-      signal: opts?.signal,
-      timeoutMs: opts?.timeoutMs,
+      plainText: plainSlice,
+      xmlSnippet,
+      includeXmlInline: isGemini,
+      emptyCellHints,
+      sampleCellHints,
+      paragraphListHints,
+      nameLanguage,
+      plainTruncated: truncated,
+      xmlTruncated,
+      docxAttached: attachDocx,
     });
-  } else if (provider.apiFamily === "cursor") {
-    const cursorKey = getCursorApiKey(apiKey);
-    if (!cursorKey) {
-      throw new Error("ยังไม่ได้เชื่อมต่อ Cursor — ใส่ Cursor API key ก่อน");
+
+  const runFull = () =>
+    callSuggestProvider(
+      buildPromptForPlain(plainText, plainTruncated),
+      xml,
+      buffer,
+      callOpts,
+    );
+
+  const runChunked = async (): Promise<SuggestCallResult> => {
+    const chunkChars = getAiSuggestChunkChars() || DEFAULT_AI_SUGGEST_CHUNK_CHARS;
+    const chunks = splitPlainTextChunks(plainText, chunkChars);
+    const merged: Record<string, unknown>[] = [];
+    const rawParts: string[] = [];
+    let lastParsed: Record<string, unknown> | null = null;
+    const { isAiTimeoutError, isRetryableAiError } = await import("./ai-request");
+    for (let i = 0; i < chunks.length; i += 1) {
+      if (opts?.signal?.aborted) break;
+      const chunk = chunks[i]!;
+      try {
+        const part = await callSuggestProvider(
+          buildPromptForPlain(chunk, chunk.length >= chunkChars),
+          xml,
+          buffer,
+          {
+            ...callOpts,
+            // Attach full .docx only on the first chunk (Gemini) to limit payload.
+            attachDocx: attachDocx && i === 0,
+          },
+        );
+        rawParts.push(part.rawText || "");
+        lastParsed = part.parsed;
+        merged.push(...normalizeRawSuggestions(part.parsed));
+      } catch (err) {
+        if (!isRetryableAiError(err) && !isAiTimeoutError(err)) throw err;
+        // Skip failed chunk; keep partial coverage rather than failing the whole doc.
+        rawParts.push(`/* chunk_${i + 1}_skipped */`);
+      }
     }
-    const parsed = await callCursorAgentJson(prompt, {
-      apiKey: cursorKey,
-      model,
-      signal: opts?.signal,
-      timeoutMs: opts?.timeoutMs,
-      route: "suggest-tags.cursor",
-    });
-    callResult = {
-      parsed,
-      rawText: parsed ? JSON.stringify(parsed, null, 2) : "",
+    return {
+      // Keep merged suggestions — do not let lastParsed.suggestions overwrite.
+      parsed: { ...(lastParsed || {}), suggestions: merged },
+      rawText: rawParts.filter(Boolean).join("\n\n"),
     };
-  } else if (provider.apiFamily === "anthropic") {
-    callResult = await callAnthropicSuggest(prompt, {
-      apiKey,
-      model,
-      signal: opts?.signal,
-      timeoutMs: opts?.timeoutMs,
-    });
+  };
+
+  const chunkChars = getAiSuggestChunkChars();
+  const preferChunkFirst =
+    chunkChars > 0 && plainText.length > chunkChars * 1.25;
+
+  let callResult: SuggestCallResult;
+  if (preferChunkFirst) {
+    callResult = await runChunked();
   } else {
-    callResult = await callOpenAiSuggest(provider.id, prompt, {
-      apiKey,
-      model,
-      signal: opts?.signal,
-      timeoutMs: opts?.timeoutMs,
-    });
+    try {
+      callResult = await runFull();
+    } catch (err) {
+      const { isAiTimeoutError, isRetryableAiError } = await import("./ai-request");
+      // Graceful degrade: on timeout / transient errors for larger docs, chunk.
+      if (
+        chunkChars > 0 &&
+        plainText.length >= Math.min(40_000, chunkChars) &&
+        (isAiTimeoutError(err) || isRetryableAiError(err))
+      ) {
+        callResult = await runChunked();
+      } else {
+        throw err;
+      }
+    }
   }
 
   const { parsed, rawText } = callResult;

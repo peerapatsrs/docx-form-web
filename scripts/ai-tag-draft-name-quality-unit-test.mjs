@@ -42,7 +42,8 @@ await check("stripJunkNumericSuffix peels _2/_3/_ก/_a collision noise", async 
   assert.equal(stripJunkNumericSuffix("field_ก"), "field");
   assert.equal(stripJunkNumericSuffix("field_a"), "field");
   assert.equal(stripJunkNumericSuffix("ลำดับ"), "ลำดับ");
-  assert.equal(looksLikeGarbledName("ที่ทัที่_ที่"), true);
+  assert.equal(looksLikeGarbledName("ab_ab_ab_cd"), true);
+  assert.equal(looksLikeGarbledName("xx_xx_xx"), true);
   assert.equal(looksLikeGarbledName("เขต_อำเภอ"), false);
 });
 
@@ -235,6 +236,17 @@ await check("splitPlainTextChunks respects soft boundaries", async () => {
   const chunks = splitPlainTextChunks(text, 90);
   assert.ok(chunks.length >= 2);
   assert.equal(chunks.join(""), text);
+});
+
+
+await check("normalizeBoolArms swaps inverted ☐,√", async () => {
+  const { normalizeBoolArms } = await load();
+  const a = normalizeBoolArms("☐", "√");
+  assert.equal(a.trueText, "√");
+  assert.equal(a.falseText, "☐");
+  const b = normalizeBoolArms("☐", "✓");
+  assert.equal(b.trueText, "✓");
+  assert.equal(b.falseText, "☐");
 });
 
 await check("false checkbox fill uses unchecked glyph from AI tag", async () => {

@@ -4470,6 +4470,9 @@ async function runTaggerAiDraft() {
     }
 
     const rawList = Array.isArray(data.suggestions) ? data.suggestions : [];
+    const suggestWarnings = Array.isArray(data.warnings)
+      ? data.warnings.map((w) => String(w || "").trim()).filter(Boolean)
+      : [];
     if (!rawList.length) {
       showBanner(
         staff && (rawAi || rawText)
@@ -4788,9 +4791,10 @@ async function runTaggerAiDraft() {
     showBanner("กำลังใส่แท็กจากข้อเสนอ AI…", "progress");
     const ok = await commitTaggerOps(toAdd);
     if (ok) {
+      const thinNote = suggestWarnings[0] ? ` · ${suggestWarnings[0]}` : "";
       showBanner(
-        `สร้างแล้ว ${toAdd.length} รายการจาก AI — ตรวจทานแล้วค่อยดาวน์โหลด · อันไม่เอาให้คลิกแท็กแล้วกดยกเลิกแท็ก`,
-        "success",
+        `สร้างแล้ว ${toAdd.length} รายการจาก AI — ตรวจทานแล้วค่อยดาวน์โหลด · อันไม่เอาให้คลิกแท็กแล้วกดยกเลิกแท็ก${thinNote}`,
+        suggestWarnings.length ? "warn" : "success",
       );
     }
   } catch (err) {

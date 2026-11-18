@@ -97,6 +97,13 @@ await check("suggest temperature constant is 0 in source", async () => {
     (src.match(/temperature:\s*0\b/g) || []).length >= 3,
     "suggest callers use temperature 0",
   );
+  assert.match(
+    src,
+    /DETERMINISM: behave as temperature 0/,
+    "Cursor path must encode temperature-0 determinism in-prompt",
+  );
+  assert.match(src, /estimateSuggestCoverage/, "thin coverage gate present");
+  assert.match(src, /coverage\.thin/, "thin retry/warning path present");
 });
 
 if (failed) {

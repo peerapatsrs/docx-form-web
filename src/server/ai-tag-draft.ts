@@ -219,62 +219,25 @@ function sanitizeNameAscii(raw: string): string {
 }
 
 /**
- * Common Thai form/header fragments → English snake tokens for enrichment
- * when the user asks for English variable names.
+ * English variable name from a label without a language keyword map:
+ * prefer Latin tokens already in the label; otherwise a stable short hash
+ * of the Unicode label so collisions stay deterministic.
  */
-const TH_HEADER_EN: ReadonlyArray<readonly [string, string]> = [
-  ["เขต / อำเภอ", "district"],
-  ["เขต/อำเภอ", "district"],
-  ["จำเลยที่", "defendant_no"],
-  ["จำลยที่", "defendant_no"], // common form typo (missing เ)
-  ["โจทก์ที่", "plaintiff_no"],
-  ["ลำดับที่", "seq"],
-  ["หมายเลข", "number"],
-  ["ที่อยู่", "address"],
-  ["วันที่", "date"],
-  ["เบอร์โทร", "phone"],
-  ["โทรศัพท์", "phone"],
-  ["อีเมล", "email"],
-  ["จำเลย", "defendant"],
-  ["โจทก์", "plaintiff"],
-  ["ลำดับ", "seq"],
-  ["ชื่อ", "name"],
-  ["นามสกุล", "surname"],
-  ["เขต", "district"],
-  ["อำเภอ", "district"],
-  ["จังหวัด", "province"],
-  ["ตำบล", "subdistrict"],
-  ["หมู่", "moo"],
-  ["ถนน", "road"],
-  ["ราคา", "price"],
-  ["จำนวน", "amount"],
-  ["รายการ", "items"],
-  ["หมายเหตุ", "note"],
-  ["ที่", "no"],
-];
-
 function englishNameFromLabel(raw: string): string {
-  let s = String(raw || "").trim();
+  const s = String(raw || "").trim();
   if (!s) return "";
-  const exact = TH_HEADER_EN.find(([th]) => th === s);
-  if (exact) return sanitizeNameAscii(exact[1]);
-
-  // Longest-first token replace so 「จำเลยที่」beats 「ที่」.
-  const sorted = [...TH_HEADER_EN].sort((a, b) => b[0].length - a[0].length);
-  for (const [th, en] of sorted) {
-    if (s.includes(th)) s = s.split(th).join(`_${en}_`);
-  }
-
   const latin = s.match(/[A-Za-z][A-Za-z0-9_]*/g);
   if (latin?.length) return sanitizeNameAscii(latin.join("_"));
-
   const ascii = sanitizeNameAscii(s);
-  return ascii || "field";
+  if (ascii && /[A-Za-z]/.test(ascii)) return ascii;
+  // Stable non-keyword fallback from code points (no Thai→English dictionary).
+  let h = 0;
+  for (let i = 0; i < s.length; i += 1) h = (h * 33 + s.charCodeAt(i)) >>> 0;
+  return `lbl_${h.toString(36).slice(0, 8)}`;
 }
 
 function resolveVarName(raw: string, lang: AiTagNameLanguage): string {
-  // Normalize a frequent form typo so chips/tags read 「จำเลยที่」.
-  const normalized = String(raw || "").replace(/จำลยที่/g, "จำเลยที่");
+  const normalized = String(raw || "");
   if (lang === "th") return sanitizeName(normalized);
   const ascii = sanitizeNameAscii(normalized);
   if (ascii && /[A-Za-z]/.test(ascii)) return ascii;
@@ -301,7 +264,7 @@ export function stripJunkNumericSuffix(name: string): string {
 }
 
 /**
- * Reject OCR/garbled identifiers like 「ที่ทัที่_ที่」— short repeated syllables
+ * Reject OCR/garbled identifiers with short repeated syllables
  * with almost no unique content.
  */
 export function looksLikeGarbledName(name: string): boolean {
@@ -317,8 +280,6 @@ export function looksLikeGarbledName(name: string): boolean {
     const uniq = new Set([...joined]);
     if (uniq.size <= 2) return true;
   }
-  // Alternating 1–2 char Thai noise: ที่ทัที่
-  if (/^(?:ที่|ทั|ทิ|ที){3,}/u.test(joined)) return true;
   return false;
 }
 
@@ -382,13 +343,27 @@ export function preferContextualNameSource(
 export const DEFAULT_BOOL_FALSE_TEXT = "☐";
 export const DEFAULT_BOOL_TRUE_TEXT = "√";
 
+const CHECKED_ARM_RE = /^[√✓✔☑]$/u;
+const UNCHECKED_ARM_RE = /^[☐□☒×✖]$/u;
+
 export function normalizeBoolArms(
   trueRaw: unknown,
   falseRaw: unknown,
 ): { trueText: string; falseText: string } {
   let trueText = String(trueRaw ?? DEFAULT_BOOL_TRUE_TEXT).slice(0, 40);
   let falseText = String(falseRaw ?? "").slice(0, 40);
-  if (!trueText.trim()) trueText = DEFAULT_BOOL_TRUE_TEXT;
+  // Model sometimes inverts arms (☐ as true, √ as false) — put checked first.
+  if (
+    UNCHECKED_ARM_RE.test(trueText.trim()) &&
+    CHECKED_ARM_RE.test(falseText.trim())
+  ) {
+    const swap = trueText;
+    trueText = falseText;
+    falseText = swap;
+  }
+  if (!trueText.trim() || UNCHECKED_ARM_RE.test(trueText.trim())) {
+    trueText = DEFAULT_BOOL_TRUE_TEXT;
+  }
   // Empty false arm is the common defect that leaves √ visible when unchecked.
   if (!falseText.trim()) falseText = DEFAULT_BOOL_FALSE_TEXT;
   // If both arms somehow match, force a distinct unchecked glyph.
@@ -455,15 +430,8 @@ export function looksLikeRunSequence(opts: {
   if (text && !/^\d{1,4}$/.test(text)) return false;
   if (opts.isRunColumn === true) return true;
   if (opts.isRunColumn === false) return false;
-  const header = String(opts.header ?? "")
-    .normalize("NFC")
-    .trim();
-  // Weak Latin markers when column evidence is unavailable.
-  if (header && /[#№]|\bno\.?\b|\bseq(uence)?\b|\bordinal\b|\brun\b/i.test(header)) {
-    return true;
-  }
-  // Single-row / unknown columns cannot prove a sequence from data. Fall back to
-  // first-column short digit only (never language-specific caption words).
+  // No caption-keyword shortcuts. When column evidence is unknown, only the
+  // first short digit column is a weak structural fallback.
   if (
     typeof opts.cellIndex === "number" &&
     opts.cellIndex === 0 &&
@@ -931,14 +899,12 @@ function formatParagraphListHintsForPrompt(hints: ParagraphListHint[]): string {
 function nameLanguagePromptRule(lang: AiTagNameLanguage): string {
   if (lang === "en") {
     return `- name (REQUIRED language: English snake_case): ASCII letters, digits, underscore, dot, hyphen only — NO Thai characters.
-  Examples: district, seq, party_name, amount, address.
-  From headers derive snake_case from the nearby label (「เขต / อำเภอ」→ district).
+  Derive snake_case from the nearby label/role in THIS document (no canned example names).
   Prefer short descriptive English identifiers grounded in the nearby label.
-  Never use numeric/letter collision suffixes (_2/_3/_a). Never emit bare generics (items/amount/list) when a label/role is available.`;
+  Never use numeric/letter collision suffixes (_2/_3/_a). Never emit bare generics when a label/role is available.`;
   }
   return `- name (REQUIRED language: Thai identifiers preferred): Thai and/or Latin letters, digits, underscore, dot, hyphen only (no spaces).
-  Examples: เขต_อำเภอ, ชื่อ, วันที่, ที่อยู่.
-  From headers keep Thai when clear (「เขต / อำเภอ」→ เขต_อำเภอ).
+  Derive names from the nearby label/role in THIS document (no canned example names).
   Prefer short descriptive names grounded in the nearby label/role.
   Never use numeric/letter collision suffixes (_2/_3/_ก). Never emit bare one-token names when the caption gives more context.`;
 }
@@ -977,13 +943,13 @@ function buildSuggestPrompt(opts: {
       ? '{"plainText":"1","name":"seq","kind":"auto","mode":"replace"}'
       : '{"plainText":"1","name":"seq","kind":"auto","mode":"replace"}';
   const listNameExample =
-    opts.nameLanguage === "en" ? "party_rows" : "รายการแถว";
+    opts.nameLanguage === "en" ? "row_group" : "กลุ่มแถว";
   const outsideDigitExample =
     opts.nameLanguage === "en"
-      ? '{"plainText":"1","name":"ref_no","kind":"text","mode":"replace"}'
-      : '{"plainText":"1","name":"เลขอ้างอิง","kind":"text","mode":"replace"}';
+      ? '{"plainText":"1","name":"code","kind":"text","mode":"replace"}'
+      : '{"plainText":"1","name":"รหัส","kind":"text","mode":"replace"}';
   const emptyNameExample =
-    opts.nameLanguage === "en" ? "district" : "เขต_อำเภอ";
+    opts.nameLanguage === "en" ? "col_value" : "ค่าคอลัมน์";
   const truncNotes = [
     opts.plainTruncated
       ? `TAGGER_PLAIN was truncated to ${PLAIN_PROMPT_MAX} chars (safety cap).`
@@ -996,6 +962,8 @@ function buildSuggestPrompt(opts: {
     .join(" ");
 
   return `You draft Word form placeholders for a Thai/English .docx template.
+
+DETERMINISM (required): treat this as temperature 0. Same document MUST yield the same suggestions. Be complete — cover letterhead/header fill-ins, case/document numbers, party blocks, table prototype cells (every non-empty cell + meaningful blanks), totals on distinct rows, and label-followed values. Do not under-suggest.
 
 You receive the FULL document (TAGGER_PLAIN + document.xml${opts.docxAttached ? " + original .docx" : ""}). Read all of it and decide yourself what should become form fields / list wraps. Heuristic hint blocks below are OPTIONAL aids only — they may be incomplete or wrong; override them when the document says otherwise.
 
@@ -1550,11 +1518,11 @@ function inventListTableName(
       .filter((h) => h && h.length >= 2)
       .slice(0, 2);
     if (fromHeaders.length) {
-      return sanitizeNameAscii(fromHeaders.join("_")).slice(0, 40) || `table_loop_${tableIndex + 1}`;
+      return sanitizeNameAscii(fromHeaders.join("_")).slice(0, 40) || `loop_${tableIndex + 1}`;
     }
     const cell = resolveVarName(String(samples[0]?.cellText || "").slice(0, 24), "en");
     if (cell) return sanitizeNameAscii(`rows_${cell}`).slice(0, 40);
-    return `table_loop_${tableIndex + 1}`;
+    return `loop_${tableIndex + 1}`;
   }
   const fromHeaders = headers
     .map((h) => resolveVarName(h, "th"))
@@ -1568,10 +1536,11 @@ function inventListTableName(
         : sanitizeName(`รายการ_${joined}`).slice(0, 40);
     }
   }
-  const cell = resolveVarName(String(samples[0]?.cellText || "").slice(0, 24), "th");
-  if (cell) return sanitizeName(`รายการ_${cell}`).slice(0, 40);
-  // Structural fallback — table index, not opaque รายการ1/2/3.
-  return `table_loop_${tableIndex + 1}`;
+  const cellRaw = String(samples[0]?.cellText || "").trim();
+  const cell = resolveVarName(cellRaw.slice(0, 24), "th");
+  if (cell && !/^\d+$/.test(cell)) return sanitizeName(`รายการ_${cell}`).slice(0, 40);
+  // Last resort structural index only when no header/cell context exists.
+  return `loop_${tableIndex + 1}`;
 }
 
 /** True when [start,end) lies fully inside a first-data/prototype table row. */
@@ -1646,25 +1615,73 @@ function valueAppearsInPrototypeRows(
   return false;
 }
 
-const SUMMARY_FIELD_RE =
-  /รวม(?:เป็นเงิน)?(?:ทั้งสิ้น)?|สุทธิ|ยอดรวม|ภาษี(?:มูลค่าเพิ่ม)?|vat|subtotal|grand\s*total|\btotal\b/iu;
+/**
+ * Structural cell-shape for a table row (empty / short-int / amount / bool / text).
+ * Used to tell sample clones from distinct fixed rows without keyword lists.
+ * Text cells encode leading-ordinal + remaining digit-run count + length bucket
+ * so a single-cell sample ("1…1200…") does not collide with a totals line.
+ */
+export function tableRowShapeSignature(
+  cells: ReadonlyArray<{ text: string }>,
+): string {
+  return cells
+    .map((c) => {
+      const t = String(c.text ?? "").trim();
+      if (!t) return "E";
+      if (/^[✓√✔☑☐□☒×✖]$/u.test(t)) return "B";
+      if (/^\d{1,4}$/.test(t)) return "N";
+      if (/^\d{1,3}([.,]\d{3})+([.,]\d+)?$/.test(t) || /^\d{4,}$/.test(t)) return "A";
+      if (t.length <= 2) return "S";
+      const lead = t.match(/^(\d{1,4})(?!\d)/);
+      const leadOrd = lead ? "o" : "x";
+      const rest = lead ? t.slice(lead[0].length) : t;
+      const restDigitRuns = Math.min(3, (rest.match(/\d[\d,.]*/g) || []).length);
+      const bucket = t.length < 24 ? "s" : t.length < 64 ? "m" : "l";
+      return `T${leadOrd}${restDigitRuns}${bucket}`;
+    })
+    .join("|");
+}
 
-/** Footer/total rows may tag outside the prototype; ordinary later sample rows may not. */
-function isSummaryTableField(
-  plainText: string,
+/** True when two row shapes match as sample clones (same column roles). */
+export function tableRowsSameSampleShape(
+  a: ReadonlyArray<{ text: string }>,
+  b: ReadonlyArray<{ text: string }>,
+): boolean {
+  const sa = tableRowShapeSignature(a);
+  const sb = tableRowShapeSignature(b);
+  if (!sa || !sb || sa !== sb) return false;
+  // Require at least one filled sample token so blank-vs-blank is not a clone.
+  return /[NBATS]/.test(sa);
+}
+
+/**
+ * Distinct non-prototype rows (different shape) may host unique fill values
+ * (totals, fixed labels). Keyword-free: shape mismatch vs prototype.
+ */
+function isDistinctNonSampleTableField(
   xml: string,
   start: number,
   end: number,
-  anchorLabel: string,
-  matchPlain: string,
+  prototypes: PrototypeTableRowSpan[],
+  allDataRows: DataTableRowInfo[],
 ): boolean {
-  if (SUMMARY_FIELD_RE.test(anchorLabel) || SUMMARY_FIELD_RE.test(matchPlain)) {
-    return true;
-  }
   if (!xml) return false;
   const rowSpan = tryPlainSpanOfTableRow(xml, start, end);
   if (!rowSpan) return false;
-  return SUMMARY_FIELD_RE.test(plainText.slice(rowSpan.start, rowSpan.end));
+  const hit = allDataRows.find(
+    (r) => r.plainStart === rowSpan.start && r.plainEnd === rowSpan.end,
+  );
+  if (!hit) return false;
+  const proto = prototypes.find((p) => p.tableIndex === hit.tableIndex);
+  if (!proto) return false;
+  if (hit.rowIndexInTable <= proto.rowIndexInTable) return false;
+  const protoRow = allDataRows.find(
+    (r) =>
+      r.tableIndex === hit.tableIndex &&
+      r.rowIndexInTable === proto.rowIndexInTable,
+  );
+  if (!protoRow) return false;
+  return !tableRowsSameSampleShape(protoRow.cells, hit.cells);
 }
 
 /**
@@ -1926,6 +1943,9 @@ export function validateAiTagSuggestions(
           resolvedKind = "list-table";
           occupyStart = rowSpan.start;
           occupyEnd = rowSpan.end;
+          // Always wrap the WHOLE row — never leave plainText as a lone "1".
+          wrapPlain = plainText.slice(occupyStart, occupyEnd);
+          wrapPlainStart = occupyStart;
         } else if (kind === "list-table") {
           // Claimed table row but not in <w:tr> — skip (don't silently become paragraph list).
           continue;
@@ -2143,14 +2163,14 @@ export function validateAiTagSuggestions(
         // same <w:tbl> (e.g. รวมทั้งสิ้น 1,116) may still tag when labeled/row
         // looks like a summary — and the value is not a prototype duplicate.
         if (role === "other") {
+          // Only keep unique fill values on distinct (non-sample-shape) rows.
           if (
-            !isSummaryTableField(
-              plainText,
+            !isDistinctNonSampleTableField(
               xml,
               start,
               end,
-              anchorLabel,
-              matchPlain,
+              prototypes,
+              allDataRows,
             ) ||
             valueAppearsInPrototypeRows(plainText, matchPlain, prototypes)
           ) {
@@ -2343,8 +2363,9 @@ export function validateAiTagSuggestions(
     }
   }
 
-  // Coverage repair: when soft wraps exist but prototype cells are sparsely
-  // tagged, force another pass over sample/empty hints (deterministic, no AI).
+  // Coverage repair: force every prototype sample/empty cell under an accepted
+  // soft wrap to be tagged (deterministic, no AI). Runs whenever any cell is
+  // still missing — not only when the ratio is low.
   if (xml && softWraps.length) {
     const expectedCells = sampleHints.length + emptyHints.length;
     const taggedCells = out.filter(
@@ -2352,9 +2373,7 @@ export function validateAiTagSuggestions(
         (s.mode === "replace" || s.mode === "fill-empty-tc") &&
         typeof s.cellIndex === "number",
     ).length;
-    const coverage =
-      expectedCells > 0 ? taggedCells / expectedCells : 1;
-    if (coverage < 0.6 && expectedCells > 0) {
+    if (expectedCells > 0 && taggedCells < expectedCells) {
       for (const hint of [...sampleHints, ...emptyHints]) {
         if (out.length >= MAX_SUGGESTIONS + CONTACT_ENRICH_SLACK) break;
         const key = cellKey(hint.tableIndex, hint.rowIndexInTable, hint.cellIndex);
@@ -2441,8 +2460,9 @@ export function validateAiTagSuggestions(
     }
   }
 
-  // After list-table wraps are accepted: remove leftover sample rows (not
-  // summary/total rows). Summary rows with unique amounts stay for tagging.
+  // After list-table wraps: delete leftover SAMPLE rows (same structural shape
+  // as the prototype). Distinct-shape rows (totals / fixed labels) are kept and
+  // may be tagged below.
   if (xml && usedPrototypeTables.size) {
     const protoRowByTable = new Map(
       prototypes.map((pr) => [pr.tableIndex, pr.rowIndexInTable]),
@@ -2452,16 +2472,14 @@ export function validateAiTagSuggestions(
       const protoRi = protoRowByTable.get(row.tableIndex);
       if (typeof protoRi !== "number") continue;
       if (row.rowIndexInTable <= protoRi) continue;
+      const protoRow = allDataRows.find(
+        (r) =>
+          r.tableIndex === row.tableIndex && r.rowIndexInTable === protoRi,
+      );
+      if (!protoRow) continue;
+      // Different shape → fixed/total row — do not delete.
+      if (!tableRowsSameSampleShape(protoRow.cells, row.cells)) continue;
       const rowText = plainText.slice(row.plainStart, row.plainEnd);
-      const isSummary =
-        SUMMARY_FIELD_RE.test(rowText) ||
-        row.headers.some((h) => SUMMARY_FIELD_RE.test(h)) ||
-        row.cells.some((c) => SUMMARY_FIELD_RE.test(c.text));
-      if (isSummary) {
-        // Unique total figures outside the prototype may still be tagged above;
-        // do not delete the summary row.
-        continue;
-      }
       out.push({
         plainText: row.rowAnchor || rowText.slice(0, 80) || `row_${row.rowIndexInTable}`,
         occurrence: row.occurrence >= 0 ? row.occurrence : 0,
@@ -2476,8 +2494,65 @@ export function validateAiTagSuggestions(
     }
   }
 
+  // Tag unique amounts / fill values on distinct-shape (non-sample) table rows.
+  // Uses XML prototypes even when the model omitted/rejected the wrap so totals
+  // and baht-text on fixed rows still get coverage.
+  if (xml && prototypes.length && out.length < MAX_SUGGESTIONS + CONTACT_ENRICH_SLACK) {
+    const protoRowByTable = new Map(
+      prototypes.map((pr) => [pr.tableIndex, pr.rowIndexInTable]),
+    );
+    for (const row of allDataRows) {
+      const protoRi = protoRowByTable.get(row.tableIndex);
+      if (typeof protoRi !== "number" || row.rowIndexInTable <= protoRi) continue;
+      const protoRow = allDataRows.find(
+        (r) =>
+          r.tableIndex === row.tableIndex && r.rowIndexInTable === protoRi,
+      );
+      if (!protoRow || tableRowsSameSampleShape(protoRow.cells, row.cells)) continue;
+      for (let ci = 0; ci < row.cells.length; ci += 1) {
+        if (out.length >= MAX_SUGGESTIONS + CONTACT_ENRICH_SLACK) break;
+        const cellText = String(row.cells[ci]?.text || "").trim();
+        if (!cellText) continue;
+        if (valueAppearsInPrototypeRows(plainText, cellText, prototypes)) continue;
+        const loc = findCellTextInRow(
+          plainText,
+          cellText,
+          row.plainStart,
+          row.plainEnd,
+        );
+        if (!loc || !fieldSpanAllowed(loc.start, loc.end, occupied)) continue;
+        const header = row.headers[ci] || "";
+        const baseName =
+          resolveVarName(header, lang) ||
+          resolveVarName(cellText.slice(0, 24), lang) ||
+          (lang === "en" ? `extra_${ci}` : `เพิ่มเติม_${ci + 1}`);
+        const name = uniqueName(baseName, usedNames, [header].filter(Boolean), lang);
+        if (!name) continue;
+        const tag = buildTag("text", name, "", "");
+        if (validateTag(tag)) continue;
+        usedNames.add(name);
+        occupied.push({ start: loc.start, end: loc.end });
+        out.push({
+          plainText: cellText,
+          occurrence: loc.occurrence,
+          plainStart: loc.start,
+          name,
+          kind: "text",
+          tag,
+          mode: "replace",
+          cellIndex: ci,
+          tableIndex: row.tableIndex,
+          rowIndexInTable: row.rowIndexInTable,
+          headerHint: header || undefined,
+        });
+      }
+    }
+  }
+
   // Enrich: letterhead/footer phones & emails the model often skips.
   enrichContactFieldsFromPlain(plainText, out, occupied, usedNames, lang);
+  // Structural label→value pairs (tabs / multi-space), incl. letterhead addresses.
+  enrichLabelFollowedValuesFromPlain(plainText, out, occupied, usedNames, lang);
 
   out.sort((a, b) => {
     // Apply deletes after wraps/fields at the same locus; stable by plainStart.
@@ -2588,6 +2663,67 @@ function enrichContactFieldsFromPlain(
   }
 }
 
+/**
+ * Seed label-followed fill-ins the model skipped (letterhead addresses, case
+ * numbers, short captions with a value after tabs/multi-space). Keyword-free:
+ * short stem + separator run + longer value to line end.
+ */
+function enrichLabelFollowedValuesFromPlain(
+  plainText: string,
+  out: AiTagSuggestion[],
+  occupied: OccupiedSpan[],
+  usedNames: Set<string>,
+  lang: AiTagNameLanguage,
+): void {
+  if (!plainText) return;
+  const softMax = MAX_SUGGESTIONS + CONTACT_ENRICH_SLACK;
+  const re =
+    /(^|[\n\r])([^\t\n\r]{2,28})([\t \u00A0]{2,}|\t+)([^\t\n\r]{3,96})/gu;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(plainText)) !== null) {
+    if (out.length >= softMax) break;
+    const label = String(m[2] || "").trim();
+    const value = String(m[4] || "").trim();
+    if (!label || !value) continue;
+    if (value.length <= label.length) continue;
+    // Skip pure punctuation / checkbox-only values.
+    if (/^[✓√✔☑☐□☒×✖.\-–—]+$/u.test(value)) continue;
+    if (/^\d{1,2}$/.test(value) && label.length <= 4) continue;
+    // Re-locate trimmed value precisely in the match window.
+    const lineStart = (m.index || 0) + String(m[1] || "").length;
+    const window = plainText.slice(lineStart, (m.index || 0) + m[0].length);
+    const rel = window.indexOf(value);
+    if (rel < 0) continue;
+    const start = lineStart + rel;
+    const end = start + value.length;
+    if (!fieldSpanAllowed(start, end, occupied)) continue;
+    if (!plainDigitMatchAllowed(plainText, start, value)) continue;
+    if (!plainValueTailOk(plainText, start, value)) continue;
+    const base =
+      resolveVarName(label, lang) ||
+      resolveVarName(value.slice(0, 24), lang) ||
+      (lang === "en" ? "field" : "ฟิลด์");
+    const name = uniqueName(base, usedNames, [label], lang);
+    if (!name) continue;
+    const tag = buildTag("text", name, "", "");
+    if (validateTag(tag)) continue;
+    const allStarts = findOccurrenceStarts(plainText, value);
+    const occIdx = Math.max(0, allStarts.indexOf(start));
+    usedNames.add(name);
+    occupied.push({ start, end });
+    out.push({
+      plainText: value,
+      occurrence: occIdx,
+      plainStart: start,
+      name,
+      kind: "text",
+      tag,
+      mode: "replace",
+      labelHint: label,
+    });
+  }
+}
+
 /** 0 disables chunking. Default ~120k chars of TAGGER_PLAIN per provider call. */
 export const AI_SUGGEST_CHUNK_CHARS_ENV = "DOCX_FORM_AI_SUGGEST_CHUNK_CHARS";
 export const DEFAULT_AI_SUGGEST_CHUNK_CHARS = 120_000;
@@ -2664,7 +2800,13 @@ async function callSuggestProvider(
     if (!cursorKey) {
       throw new Error("ยังไม่ได้เชื่อมต่อ Cursor — ใส่ Cursor API key ก่อน");
     }
-    const parsed = await callCursorAgentJson(prompt, {
+    // Cursor Agent SDK has no temperature/seed API — encode determinism in-prompt
+    // and rely on validate/enrich + thin-retry for stable complete output.
+    const cursorPrompt =
+      "DETERMINISM: behave as temperature 0. Identical input → identical JSON. " +
+      "Complete coverage required (letterhead, parties, tables, totals).\n\n" +
+      prompt;
+    const parsed = await callCursorAgentJson(cursorPrompt, {
       apiKey: cursorKey,
       model: opts.model,
       signal: opts.signal,
@@ -2692,6 +2834,61 @@ async function callSuggestProvider(
   });
 }
 
+
+/**
+ * Whole-document coverage vs structural expectations (tables, para lists,
+ * contacts). Used to refuse thin success and trigger repair/retry.
+ */
+export function estimateSuggestCoverage(
+  suggestions: AiTagSuggestion[],
+  plainText: string,
+  documentXml?: string | null,
+): { score: number; expected: number; actual: number; thin: boolean } {
+  const xml = typeof documentXml === "string" && documentXml ? documentXml : "";
+  const sampleHints = xml ? listSampleTableCellHints(xml) : [];
+  const emptyHints = xml ? listEmptyTableCellHints(xml) : [];
+  const paraHints = xml ? listParagraphListHints(xml) : [];
+  const prototypes = xml ? listPrototypeTableRowSpans(xml) : [];
+  let expected =
+    sampleHints.length + emptyHints.length + prototypes.length + paraHints.length;
+  for (const h of paraHints) {
+    expected += Math.min(4, Math.max(1, Math.floor(String(h.plainText || "").length / 48)));
+  }
+  const phoneHits = String(plainText || "").match(/\d{2,3}[-\s]?\d{3}[-\s]?\d{3,4}/g);
+  if (phoneHits) expected += Math.min(8, phoneHits.length);
+  const emailHits = String(plainText || "").match(
+    /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g,
+  );
+  if (emailHits) expected += Math.min(4, emailHits.length);
+  // Label-followed blanks (tabs / multi-space) — letterhead, case nos, addresses.
+  const labelFollowHits = String(plainText || "").match(
+    /(^|[\n\r])[^\t\n\r]{2,28}([\t \u00A0]{2,}|\t+)[^\t\n\r]{3,96}/gu,
+  );
+  if (labelFollowHits) expected += Math.min(12, labelFollowHits.length);
+  // Distinct-shape amount cells (non-sample rows) — at least one per such row.
+  if (xml) {
+    const allRows = listAllDataTableRows(xml);
+    for (const p of prototypes) {
+      const proto = allRows.find(
+        (r) => r.tableIndex === p.tableIndex && r.rowIndexInTable === p.rowIndexInTable,
+      );
+      if (!proto) continue;
+      for (const row of allRows) {
+        if (row.tableIndex !== p.tableIndex) continue;
+        if (row.rowIndexInTable <= p.rowIndexInTable) continue;
+        if (tableRowsSameSampleShape(proto.cells, row.cells)) continue;
+        expected += 1;
+      }
+    }
+  }
+  const actual = suggestions.filter((s) => s.mode !== "delete-tr").length;
+  const score = expected > 0 ? actual / Math.max(1, expected) : 1;
+  // Small fixtures and short letters can still be "thin" once a few structural
+  // expectations exist; refuse success below ~half coverage.
+  const thin = expected >= 4 && score < 0.45;
+  return { score, expected, actual, thin };
+}
+
 export async function suggestTemplateTags(
   buffer: Buffer,
   opts?: AiTagDraftOpts,
@@ -2702,6 +2899,9 @@ export async function suggestTemplateTags(
   rawAi: Record<string, unknown> | null;
   /** Exact model text (may include fences); empty when unavailable. */
   rawText: string;
+  /** Surfaced when coverage stays thin after repair/retry. */
+  warning?: string;
+  coverage?: { score: number; expected: number; actual: number; thin: boolean };
 }> {
   const provider = getAiProvider(opts?.provider) || getAiProvider("google")!;
   assertFormAiSupported(provider);
@@ -2825,12 +3025,51 @@ export async function suggestTemplateTags(
     }
   }
 
-  const { parsed, rawText } = callResult;
-  const suggestions = validateAiTagSuggestions(
+  const finalize = (parsed: Record<string, unknown> | null, rawText: string) => {
+    const suggestions = validateAiTagSuggestions(
+      plainText,
+      normalizeRawSuggestions(parsed),
+      xml,
+      nameLanguage,
+    );
+    const coverage = estimateSuggestCoverage(suggestions, plainText, xml);
+    return { suggestions, coverage, parsed, rawText };
+  };
+
+  let { parsed, rawText } = callResult;
+  let finalized = finalize(parsed, rawText);
+
+  // Thin output is never silent success: one deterministic repair-oriented retry.
+  if (finalized.coverage.thin && !opts?.signal?.aborted) {
+    try {
+      const repairPrompt =
+        buildPromptForPlain(plainText, plainTruncated) +
+        "\n\nREPAIR PASS: prior suggestions were too thin. Emit EVERY missing fill-in " +
+        "(letterhead, numbers, parties, all prototype table cells, distinct-row totals, " +
+        "label-followed blanks). Same determinism rules. Return full JSON suggestions array.";
+      const retry = await callSuggestProvider(repairPrompt, xml, buffer, callOpts);
+      const retried = finalize(retry.parsed, retry.rawText || rawText);
+      // Prefer the richer of the two validated sets.
+      if (retried.suggestions.length >= finalized.suggestions.length) {
+        finalized = retried;
+        parsed = retry.parsed;
+        rawText = retry.rawText || rawText;
+      }
+    } catch {
+      // Keep first pass; surface thin warning below.
+    }
+  }
+
+  const warning = finalized.coverage.thin
+    ? `AI tag coverage still thin (${finalized.coverage.actual}/${finalized.coverage.expected}) — review letterhead, parties, tables, and totals`
+    : undefined;
+
+  return {
+    suggestions: finalized.suggestions,
     plainText,
-    normalizeRawSuggestions(parsed),
-    xml,
-    nameLanguage,
-  );
-  return { suggestions, plainText, rawAi: parsed, rawText };
+    rawAi: parsed,
+    rawText,
+    coverage: finalized.coverage,
+    ...(warning ? { warning } : {}),
+  };
 }

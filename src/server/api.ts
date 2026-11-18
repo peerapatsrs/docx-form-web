@@ -2757,10 +2757,12 @@ export function createApi(options: {
             "AI ไม่เสนอแท็กที่ผ่านการตรวจสอบ — ลองตรวจเอกสารหรือใส่แท็กเอง",
           );
         }
+        if (result.warning) warnings.push(String(result.warning));
         return {
           suggestions: result.suggestions,
           count: result.suggestions.length,
           plainText: result.plainText,
+          ...(result.coverage ? { coverage: result.coverage } : {}),
           ...(warnings.length ? { warnings } : {}),
           ...(staffRaw
             ? { rawAi: result.rawAi, rawText: result.rawText }

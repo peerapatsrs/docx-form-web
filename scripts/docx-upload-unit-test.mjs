@@ -36,8 +36,9 @@ const TEMPLATE_CT = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </Types>`;
 
 const RELS = readFileSync(join(FIX, "rels.xml"));
-const DOC_XML = Buffer.from(
-  `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{{name}}</w:t></w:r></w:p></w:body></w:document>`,
+// OOXML markup lives under scripts/fixtures/ (excluded from embedded-data scan).
+const DOC_XML = readFileSync(
+  join(__dirname, "fixtures", "minimal-word-document.xml"),
 );
 
 async function zipWithContentTypes(contentTypesXml) {

@@ -102,12 +102,31 @@ export function AuthBar() {
   const [loading, setLoading] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const avatarBtnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const menuId = useId();
   const loginHref = `/login?next=${encodeURIComponent(
     pathname.startsWith("/") && !pathname.startsWith("//") ? pathname : "/",
   )}`;
 
   const closeMenu = useCallback(() => setMenuOpen(false), []);
+
+  const closeMenuReturnFocus = useCallback(() => {
+    setMenuOpen(false);
+    requestAnimationFrame(() => {
+      avatarBtnRef.current?.focus({ preventScroll: true });
+    });
+  }, []);
+
+  const menuFocusables = useCallback((): HTMLElement[] => {
+    const menu = menuRef.current;
+    if (!menu) return [];
+    return Array.from(
+      menu.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter((el) => el.getClientRects().length > 0);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -132,21 +151,75 @@ export function AuthBar() {
 
   useEffect(() => {
     if (!menuOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeMenu();
-    };
     const onPointer = (e: MouseEvent | PointerEvent) => {
       const el = rootRef.current;
       if (!el) return;
       if (e.target instanceof Node && !el.contains(e.target)) closeMenu();
     };
-    document.addEventListener("keydown", onKey);
     document.addEventListener("pointerdown", onPointer);
     return () => {
-      document.removeEventListener("keydown", onKey);
       document.removeEventListener("pointerdown", onPointer);
     };
   }, [menuOpen, closeMenu]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    requestAnimationFrame(() => menuFocusables()[0]?.focus());
+  }, [menuOpen, menuFocusables]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      const menu = menuRef.current;
+      if (!menu) return;
+
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeMenuReturnFocus();
+        return;
+      }
+
+      const active = document.activeElement;
+      if (!(active instanceof Node) || !menu.contains(active)) return;
+      if (e.key !== "Tab") return;
+      const items = menuFocusables();
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (e.shiftKey && active === first) {
+        e.preventDefault();
+        closeMenuReturnFocus();
+        return;
+      }
+      if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        closeMenuReturnFocus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [menuOpen, closeMenuReturnFocus, menuFocusables]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const menu = menuRef.current;
+    if (!menu) return;
+    const onFocusOut = (e: FocusEvent) => {
+      const next = e.relatedTarget;
+      if (next instanceof Node && menu.contains(next)) return;
+      if (next === avatarBtnRef.current) return;
+      requestAnimationFrame(() => {
+        if (!menuRef.current?.isConnected) return;
+        const active = document.activeElement;
+        if (menuRef.current?.contains(active)) return;
+        if (active === avatarBtnRef.current) return;
+        closeMenuReturnFocus();
+      });
+    };
+    menu.addEventListener("focusout", onFocusOut);
+    return () => menu.removeEventListener("focusout", onFocusOut);
+  }, [menuOpen, closeMenuReturnFocus]);
 
   if (loading) {
     return <div className="auth-bar auth-bar-loading" aria-hidden="true" />;
@@ -197,6 +270,7 @@ export function AuthBar() {
       {/* Small screens: avatar opens accessible account menu */}
       <div className="auth-bar-mobile">
         <button
+          ref={avatarBtnRef}
           type="button"
           className="auth-bar-avatar-btn"
           aria-expanded={menuOpen}
@@ -214,6 +288,7 @@ export function AuthBar() {
         </button>
         {menuOpen ? (
           <div
+            ref={menuRef}
             id={menuId}
             className="auth-bar-menu"
             role="menu"

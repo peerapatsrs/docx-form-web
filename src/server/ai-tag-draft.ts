@@ -22,6 +22,11 @@ import {
   getAnthropicApiBase,
   getGeminiApiBase,
 } from "./ai-providers";
+import {
+  isAiTimeoutError,
+  isRetryableAiError,
+  logAiCall,
+} from "./ai-request";
 import { VAR_NAME_RE as NAME_RE } from "./field-names";
 import {
   extractTaggerPlainText,
@@ -268,10 +273,18 @@ export function stripJunkNumericSuffix(name: string): string {
  * or a token repeated inside a part (near-duplication).
  */
 export function looksLikeGarbledName(name: string): boolean {
-  const s = String(name || "").normalize("NFC").trim();
+  const s = String(name || "").normalize("NFC").trim().replace(/^\++/, "");
   if (!s) return true;
+  // Checkbox arm words / glyphs alone are never field names.
+  if (/^[✓√✔☑☐□☒×✖]+$/u.test(s)) return true;
+  if (/^(true|false|yes|no|on|off)$/i.test(s)) return true;
+  // Stable hash fallback from englishNameFromLabel — not a readable field name.
+  if (/^lbl_[a-z0-9]+$/i.test(s)) return true;
+  // Long full-header copies (joined multi-column captions).
+  if (s.length > 24) return true;
   const parts = s.split(/[_/-]+/u).filter(Boolean);
   if (!parts.length) return true;
+  if (parts.length >= 4) return true; // full-header join dumps
   // Many tiny parts that are near-duplicates of each other.
   const short = parts.filter((p) => p.length <= 2);
   if (parts.length >= 3 && short.length >= parts.length - 1) return true;
@@ -280,9 +293,11 @@ export function looksLikeGarbledName(name: string): boolean {
     const uniq = new Set([...joined]);
     if (uniq.size <= 2) return true;
   }
-  // Exact or near-duplicate tokens across parts (e.g. foo_foo, ที่_ทัที่).
+  // Exact or near-duplicate tokens across parts (e.g. A_A_..., foo_foo).
   for (let i = 0; i < parts.length; i += 1) {
     const a = parts[i]!;
+    // Cut off mid-word: trailing single letter/syllable junk.
+    if (i === parts.length - 1 && a.length === 1 && !/^\d$/.test(a)) return true;
     for (let j = i + 1; j < parts.length; j += 1) {
       const b = parts[j]!;
       if (a === b && a.length >= 2) return true;
@@ -297,6 +312,17 @@ export function looksLikeGarbledName(name: string): boolean {
         if (chunk && a.slice(n, n + n) === chunk) return true;
       }
     }
+  }
+  // OCR-cut Thai label: short token ending in ที่ whose stem looks truncated
+  // (missing a vowel letter relative to a typical 4–6 char stem).
+  for (const p of parts) {
+    const m = /^([\u0E00-\u0E7F]{3,5})ที่$/u.exec(p);
+    if (!m) continue;
+    const stem = m[1]!;
+    // Truncation heuristic: stem has a consonant cluster of 3+ with only one vowel mark.
+    const vowels = stem.match(/[ะาิีึืุูเแโใไำ]/gu) || [];
+    const chars = [...stem];
+    if (chars.length >= 3 && vowels.length <= 1) return true;
   }
   return false;
 }
@@ -1009,7 +1035,7 @@ function buildSuggestPrompt(opts: {
       ? '{"plainText":"1","name":"code","kind":"text","mode":"replace"}'
       : '{"plainText":"1","name":"รหัส","kind":"text","mode":"replace"}';
   const emptyNameExample =
-    opts.nameLanguage === "en" ? "col_value" : "ค่าคอลัมน์";
+    opts.nameLanguage === "en" ? "blank_field" : "ช่องว่าง";
   const truncNotes = [
     opts.plainTruncated
       ? `TAGGER_PLAIN was truncated to ${PLAIN_PROMPT_MAX} chars (safety cap).`
@@ -1562,6 +1588,25 @@ function inferSampleFieldKind(
   return "text";
 }
 
+/** Clean stem borrowed from a parent loop name when a cell has no header. */
+function parentNameStem(
+  parentName: string | null | undefined,
+  lang: AiTagNameLanguage,
+): string | null {
+  const raw = String(parentName || "").trim();
+  if (!raw) return null;
+  const parts = raw.split(/[_/-]+/u).filter((p) => p.length >= 2);
+  // Prefer shorter parts (e.g. rows over defendant) for readable auto/cell names.
+  const ordered = [...parts].sort((a, b) => a.length - b.length || a.localeCompare(b));
+  for (const p of ordered) {
+    const n = resolveVarName(p, lang);
+    if (n && !looksLikeGarbledName(n) && n.length <= 16) return n;
+  }
+  const whole = resolveVarName(raw.slice(0, 16), lang);
+  if (whole && !looksLikeGarbledName(whole)) return whole;
+  return null;
+}
+
 /**
  * Prefer a readable list name from column headers only (never sample cell text).
  * Skip the first header when multiple exist — it is often an ordinal / typo that
@@ -1588,18 +1633,17 @@ function inventListTableName(
     .slice(0, 2);
   if (lang === "en") {
     if (fromHeaders.length) {
-      const joined = sanitizeNameAscii(fromHeaders.join("_")).slice(0, 40);
+      const joined = sanitizeNameAscii(fromHeaders.join("_")).slice(0, 24);
       if (joined && !looksLikeGarbledName(joined)) return joined;
     }
-    return "rows";
+    return `rows_${tableIndex + 1}`;
   }
   if (fromHeaders.length) {
-    const joined = sanitizeName(fromHeaders.join("_")).slice(0, 40);
+    const joined = sanitizeName(fromHeaders.join("_")).slice(0, 24);
     if (joined && !looksLikeGarbledName(joined)) return joined;
   }
-  // Structural fallback only — no cell content, no numbered suffixes.
-  void tableIndex;
-  return "รายการ";
+  // Structural index only when no usable header context exists.
+  return `loop_${tableIndex + 1}`;
 }
 
 /** True when [start,end) lies fully inside a first-data/prototype table row. */
@@ -1717,32 +1761,55 @@ export function countFilledCells(
   return cells.filter((c) => String(c.text ?? "").trim().length > 0).length;
 }
 
+function cellLooksLikeAmount(text: string): boolean {
+  const t = String(text || "").trim();
+  if (!t) return false;
+  if (/^\d{1,3}([.,]\d{3})+([.,]\d+)?$/.test(t)) return true;
+  if (/^\d{4,}$/.test(t)) return true;
+  if (/^\d+$/.test(t) && Number(t) >= 100) return true;
+  return false;
+}
+
 /**
- * Summary-like row: fewer filled cells and a spanning/merged label, at table end.
+ * Summary-like row: fewer filled cells and a spanning/merged label, near table end.
  * Keyword-free structural test (no totals word lists).
  */
 export function isSummaryLikeRow(
   proto: ReadonlyArray<{ text: string }>,
   row: ReadonlyArray<{ text: string }>,
-  opts: { isAtTableEnd: boolean },
+  opts: { isAtTableEnd: boolean; isNearEnd?: boolean },
 ): boolean {
-  if (!opts.isAtTableEnd) return false;
+  // Last or second-to-last data row may host subtotals / totals.
+  if (!opts.isAtTableEnd && !opts.isNearEnd) return false;
   const pf = countFilledCells(proto);
   const rf = countFilledCells(row);
   if (!(rf > 0 && rf < pf) && !(row.length > 0 && row.length < proto.length)) {
     return false;
   }
   const filled = row.filter((c) => String(c.text ?? "").trim());
-  // Merged/spanning label: one dominant label cell, or label + amount only.
+  const hasLabel = filled.some((c) => {
+    const t = String(c.text ?? "").trim();
+    return t.length >= 2 && !/^\d[\d,.\s]*$/.test(t) && !/^[✓√✔☑☐□☒×✖]$/u.test(t);
+  });
+  const hasAmount = filled.some((c) => cellLooksLikeAmount(String(c.text ?? "")));
+  // Leading ordinal only — short ints that are NOT amounts (totals often use 3+ digit figures).
+  const hasLeadOrd = filled.some((c) => {
+    const t = String(c.text ?? "").trim();
+    return /^\d{1,3}$/.test(t) && !cellLooksLikeAmount(t);
+  });
+  // Sample clones keep a leading ordinal; summary rows usually do not.
+  if (hasLeadOrd) return false;
+  // Merged/spanning label, or label + amount (classic totals / baht line).
   return (
     filled.length === 1 ||
-    (filled.length <= 2 && rf <= Math.max(1, pf - 1))
+    (filled.length <= 2 && rf <= Math.max(1, pf - 1)) ||
+    (hasLabel && hasAmount && rf <= 3)
   );
 }
 
 /**
- * True when a later row still looks like a sample clone (shared values, continuing
- * ordinals, or similar fill density with digits) — even if the coarse shape differs.
+ * True when a later row still looks like a sample clone (shared non-amount values
+ * or continuing ordinals). Amount-only digits on a totals line are NOT sample-like.
  */
 export function rowHasSampleLikeValues(
   proto: ReadonlyArray<{ text: string }>,
@@ -1751,18 +1818,10 @@ export function rowHasSampleLikeValues(
   const protoVals = new Set(
     proto.map((c) => String(c.text ?? "").trim()).filter((t) => t.length > 0),
   );
-  let digitLike = 0;
   for (const c of row) {
     const t = String(c.text ?? "").trim();
     if (!t) continue;
     if (protoVals.has(t)) return true;
-    if (
-      /^\d{1,4}$/.test(t) ||
-      /^\d{1,3}([.,]\d{3})+([.,]\d+)?$/.test(t) ||
-      /^\d{4,}$/.test(t)
-    ) {
-      digitLike += 1;
-    }
   }
   const protoDig = proto.find((c) => /^\d{1,4}$/.test(String(c.text ?? "").trim()));
   const rowDig = row.find((c) => /^\d{1,4}$/.test(String(c.text ?? "").trim()));
@@ -1770,12 +1829,6 @@ export function rowHasSampleLikeValues(
     const a = Number(String(protoDig.text).trim());
     const b = Number(String(rowDig.text).trim());
     if (Number.isFinite(a) && Number.isFinite(b) && a !== b) return true;
-  }
-  if (
-    countFilledCells(row) >= Math.max(2, countFilledCells(proto) - 1) &&
-    digitLike >= 1
-  ) {
-    return true;
   }
   return tableRowsSameSampleShape(proto, row);
 }
@@ -1787,7 +1840,7 @@ export function rowHasSampleLikeValues(
 export function shouldDeleteLaterSampleRow(
   proto: ReadonlyArray<{ text: string }>,
   row: ReadonlyArray<{ text: string }>,
-  opts: { isAtTableEnd: boolean },
+  opts: { isAtTableEnd: boolean; isNearEnd?: boolean },
 ): boolean {
   if (isSummaryLikeRow(proto, row, opts)) return false;
   if (
@@ -1830,6 +1883,7 @@ function isDistinctNonSampleTableField(
   // Tagable when we would KEEP the row (not delete it).
   return !shouldDeleteLaterSampleRow(protoRow.cells, hit.cells, {
     isAtTableEnd: hit.rowIndexInTable === maxRi,
+    isNearEnd: hit.rowIndexInTable >= maxRi - 1,
   });
 }
 
@@ -2407,7 +2461,7 @@ export function validateAiTagSuggestions(
       if (!parent) continue;
       const baseName =
         nameFromHeaderOrLabel(hint.header, null, lang, null) ||
-        (parent.name ? (lang === "en" ? "value" : "ค่า") : null);
+        parentNameStem(parent.name, lang);
       if (!baseName) continue;
       const name = uniqueName(
         baseName,
@@ -2464,24 +2518,46 @@ export function validateAiTagSuggestions(
         cellIndex: hint.cellIndex,
         isRunColumn: isRunCol(hint.tableIndex, hint.cellIndex),
       });
-      const baseName =
+      let fieldKindFinal: AiTagDraftKind = fieldKind;
+      let nameBase =
         nameFromHeaderOrLabel(hint.header, null, lang, hint.cellText) ||
-        (parent.name ? (lang === "en" ? "value" : "ค่า") : null);
-      if (!baseName) continue;
+        parentNameStem(parent.name, lang);
+      if (!nameBase) {
+        nameBase =
+          lang === "en"
+            ? `col_${hint.cellIndex + 1}`
+            : `คอลัมน์_${hint.cellIndex + 1}`;
+      }
+      // Auto/ordinal: keep {{+}} but swap long/garbled labels for a short stem.
+      if (fieldKindFinal === "auto") {
+        if (looksLikeGarbledName(nameBase) || nameBase.length > 6) {
+          const stem = parentNameStem(parent.name, lang);
+          if (stem && !looksLikeGarbledName(stem) && stem.length <= 6) {
+            nameBase = stem;
+          } else {
+            nameBase =
+              lang === "en"
+                ? `col_${hint.cellIndex + 1}`
+                : `คอลัมน์_${hint.cellIndex + 1}`;
+          }
+        }
+      }
+      if (looksLikeGarbledName(nameBase)) continue;
       const name = uniqueName(
-        baseName,
+        nameBase,
         usedNames,
         [hint.header, parent.name].filter(Boolean),
         lang,
       );
       if (!name || nameEqualsSourceValue(name, hint.cellText)) continue;
+      if (looksLikeGarbledName(name)) continue;
       const boolArms =
-        fieldKind === "bool"
+        fieldKindFinal === "bool"
           ? normalizeBoolArms(hint.cellText || DEFAULT_BOOL_TRUE_TEXT, "")
           : { trueText: "", falseText: "" };
       const trueText = boolArms.trueText;
       const falseText = boolArms.falseText;
-      const tag = buildTag(fieldKind, name, trueText, falseText);
+      const tag = buildTag(fieldKindFinal, name, trueText, falseText);
       if (validateTag(tag)) continue;
 
       // Prefer plain replace when the sample span is unique/safe; else set by cell index
@@ -2495,7 +2571,7 @@ export function validateAiTagSuggestions(
           occurrence: loc.occurrence,
           plainStart: loc.start,
           name,
-          kind: fieldKind,
+          kind: fieldKindFinal,
           tag,
           mode: "replace",
           wrapTag: parent.wrapTag,
@@ -2504,7 +2580,7 @@ export function validateAiTagSuggestions(
           tableIndex: hint.tableIndex,
           rowIndexInTable: hint.rowIndexInTable,
           headerHint: hint.header,
-          ...(fieldKind === "bool" ? { trueText, falseText } : {}),
+          ...(fieldKindFinal === "bool" ? { trueText, falseText } : {}),
         });
         continue;
       }
@@ -2516,7 +2592,7 @@ export function validateAiTagSuggestions(
         occurrence: hint.occurrence,
         plainStart: hint.plainStart,
         name,
-        kind: fieldKind,
+        kind: fieldKindFinal,
         tag,
         mode: "fill-empty-tc",
         cellIndex: hint.cellIndex,
@@ -2525,7 +2601,7 @@ export function validateAiTagSuggestions(
         wrapTag: parent.wrapTag,
         wrapOccurrence: parent.wrapOccurrence,
         headerHint: hint.header,
-        ...(fieldKind === "bool" ? { trueText, falseText } : {}),
+        ...(fieldKindFinal === "bool" ? { trueText, falseText } : {}),
       });
     }
   }
@@ -2556,10 +2632,29 @@ export function validateAiTagSuggestions(
               isRunColumn: isRunCol(hint.tableIndex, hint.cellIndex),
             })
           : "text";
-        const baseName =
+        let fieldKindFinal: AiTagDraftKind = fieldKind;
+        let baseName =
           nameFromHeaderOrLabel(hint.header, null, lang, sampleText || null) ||
-          (parent.name ? (lang === "en" ? "value" : "ค่า") : null);
-        if (!baseName) continue;
+          parentNameStem(parent.name, lang);
+        if (!baseName) {
+          baseName =
+            lang === "en"
+              ? `col_${hint.cellIndex + 1}`
+              : `คอลัมน์_${hint.cellIndex + 1}`;
+        }
+        if (
+          fieldKindFinal === "auto" &&
+          (looksLikeGarbledName(baseName) || baseName.length > 6)
+        ) {
+          const stem = parentNameStem(parent.name, lang);
+          baseName =
+            stem && !looksLikeGarbledName(stem) && stem.length <= 6
+              ? stem
+              : lang === "en"
+                ? `col_${hint.cellIndex + 1}`
+                : `คอลัมน์_${hint.cellIndex + 1}`;
+        }
+        if (looksLikeGarbledName(baseName)) continue;
         const name = uniqueName(
           baseName,
           usedNames,
@@ -2567,11 +2662,12 @@ export function validateAiTagSuggestions(
           lang,
         );
         if (!name || (sampleText && nameEqualsSourceValue(name, sampleText))) continue;
+        if (looksLikeGarbledName(name)) continue;
         const boolArms =
-          fieldKind === "bool"
+          fieldKindFinal === "bool"
             ? normalizeBoolArms(sampleText || DEFAULT_BOOL_TRUE_TEXT, "")
             : { trueText: "", falseText: "" };
-        const tag = buildTag(fieldKind, name, boolArms.trueText, boolArms.falseText);
+        const tag = buildTag(fieldKindFinal, name, boolArms.trueText, boolArms.falseText);
         if (validateTag(tag)) continue;
         usedNames.add(name);
         usedCells.add(key);
@@ -2589,7 +2685,7 @@ export function validateAiTagSuggestions(
               occurrence: loc.occurrence,
               plainStart: loc.start,
               name,
-              kind: fieldKind,
+              kind: fieldKindFinal,
               tag,
               mode: "replace",
               wrapTag: parent.wrapTag,
@@ -2598,7 +2694,7 @@ export function validateAiTagSuggestions(
               tableIndex: hint.tableIndex,
               rowIndexInTable: hint.rowIndexInTable,
               headerHint: hint.header,
-              ...(fieldKind === "bool"
+              ...(fieldKindFinal === "bool"
                 ? { trueText: boolArms.trueText, falseText: boolArms.falseText }
                 : {}),
             });
@@ -2610,7 +2706,7 @@ export function validateAiTagSuggestions(
           occurrence: hint.occurrence,
           plainStart: hint.plainStart,
           name,
-          kind: fieldKind,
+          kind: fieldKindFinal,
           tag,
           mode: "fill-empty-tc",
           cellIndex: hint.cellIndex,
@@ -2619,7 +2715,7 @@ export function validateAiTagSuggestions(
           wrapTag: parent.wrapTag,
           wrapOccurrence: parent.wrapOccurrence,
           headerHint: hint.header,
-          ...(fieldKind === "bool"
+          ...(fieldKindFinal === "bool"
             ? { trueText: boolArms.trueText, falseText: boolArms.falseText }
             : {}),
         });
@@ -2648,6 +2744,7 @@ export function validateAiTagSuggestions(
       if (
         !shouldDeleteLaterSampleRow(protoRow.cells, row.cells, {
           isAtTableEnd: row.rowIndexInTable === maxRi,
+          isNearEnd: row.rowIndexInTable >= maxRi - 1,
         })
       ) {
         continue;
@@ -2691,6 +2788,7 @@ export function validateAiTagSuggestions(
       if (
         shouldDeleteLaterSampleRow(protoRow.cells, row.cells, {
           isAtTableEnd: row.rowIndexInTable === maxRi,
+          isNearEnd: row.rowIndexInTable >= maxRi - 1,
         })
       ) {
         continue;
@@ -2707,22 +2805,48 @@ export function validateAiTagSuggestions(
           row.plainEnd,
         );
         if (!loc || !fieldSpanAllowed(loc.start, loc.end, occupied)) continue;
-        const header = row.headers[ci] || "";
-        // Prefer this column header; if empty, a non-empty sibling header on the row.
-        const labelFallback =
-          row.headers.find((h) => String(h || "").trim()) || "";
-        let baseName = nameFromHeaderOrLabel(header, labelFallback, lang, cellText);
-        // Structural disambiguation when two cells share one header: digits vs letters.
-        if (baseName && /^\d[\d,.\s]*$/.test(cellText)) {
-          /* keep header name for amount */
-        } else if (baseName && !/\d/.test(cellText) && cellText.length >= 8) {
-          const alt = uniqueName(
-            lang === "en" ? `${baseName}_text` : `${baseName}_ข้อความ`,
-            usedNames,
-            [header, labelFallback].filter(Boolean),
-            lang,
+        // Prefer prototype/table headers — later rows often inherit prior body
+        // cells as "headers" which must not become field names (e.g. GammaWidget).
+        const header =
+          protoRow.headers[ci] || row.headers[ci] || "";
+        // Label from column header, else a non-amount sibling cell on this row
+        // (totals label / baht-text sitting beside the amount).
+        const siblingLabel = row.cells
+          .map((c) => String(c.text || "").trim())
+          .find(
+            (t) =>
+              t &&
+              t !== cellText &&
+              !cellLooksLikeAmount(t) &&
+              !/^\d{1,4}$/.test(t),
           );
-          if (alt && !nameEqualsSourceValue(alt, cellText)) baseName = alt;
+        const labelFallback =
+          siblingLabel ||
+          protoRow.headers.find((h) => String(h || "").trim()) ||
+          "";
+        // Caption cells beside an amount (e.g. "Total") stay fixed; tag the amount.
+        const hasAmountSibling = row.cells.some(
+          (c, j) => j !== ci && cellLooksLikeAmount(String(c.text || "")),
+        );
+        if (
+          hasAmountSibling &&
+          !cellLooksLikeAmount(cellText) &&
+          !/\d/.test(cellText)
+        ) {
+          continue;
+        }
+        let baseName = nameFromHeaderOrLabel(header, labelFallback, lang, cellText);
+        // Amount / baht-text: prefer the sibling caption over a colliding column header.
+        if (cellLooksLikeAmount(cellText) && siblingLabel) {
+          const fromSibling = nameFromHeaderOrLabel(
+            siblingLabel,
+            header,
+            lang,
+            cellText,
+          );
+          if (fromSibling && !nameEqualsSourceValue(fromSibling, cellText)) {
+            baseName = fromSibling;
+          }
         }
         if (!baseName) continue;
         if (nameEqualsSourceValue(baseName, cellText)) continue;
@@ -2761,6 +2885,142 @@ export function validateAiTagSuggestions(
 
   // One checkbox glyph pair per document.
   unifyDocumentBoolArms(out);
+
+  // Never emit a list/list-table wrap with zero inner fields: build inners from
+  // the loop row's cells first; only drop the wrap if that still yields nothing.
+  {
+    const emptyWraps = out.filter((s) => {
+      if (s.mode !== "wrap" && s.mode !== "wrap-row") return false;
+      const key = `${s.tag}|${s.occurrence}`;
+      return !out.some(
+        (inner) =>
+          inner.wrapTag === s.tag &&
+          (inner.wrapOccurrence ?? 0) === s.occurrence,
+      );
+    });
+    for (const wrap of emptyWraps) {
+      const cellPool = [...sampleHints, ...emptyHints].filter((h) => {
+        const parent = findParentWrap(softWraps, h.plainStart, h.plainEnd);
+        return (
+          !!parent &&
+          parent.wrapTag === wrap.tag &&
+          parent.wrapOccurrence === wrap.occurrence
+        );
+      });
+      for (const hint of cellPool) {
+        if (out.length >= MAX_SUGGESTIONS + CONTACT_ENRICH_SLACK) break;
+        const key = cellKey(hint.tableIndex, hint.rowIndexInTable, hint.cellIndex);
+        if (usedCells.has(key)) continue;
+        const sampleText =
+          "cellText" in hint
+            ? String((hint as TableSampleCellHint).cellText || "")
+            : "";
+        const header = String(hint.header || "").trim();
+        let baseName =
+          nameFromHeaderOrLabel(header, null, lang, sampleText || null) ||
+          parentNameStem(wrap.name, lang) ||
+          (lang === "en"
+            ? `col_${hint.cellIndex + 1}`
+            : `คอลัมน์_${hint.cellIndex + 1}`);
+        if (looksLikeGarbledName(baseName)) {
+          baseName =
+            lang === "en"
+              ? `col_${hint.cellIndex + 1}`
+              : `คอลัมน์_${hint.cellIndex + 1}`;
+        }
+        const name = uniqueName(
+          baseName,
+          usedNames,
+          [header, wrap.name].filter(Boolean),
+          lang,
+        );
+        if (!name) continue;
+        if (sampleText && nameEqualsSourceValue(name, sampleText)) continue;
+        const fieldKind = sampleText
+          ? inferSampleFieldKind(sampleText, {
+              header,
+              cellIndex: hint.cellIndex,
+              isRunColumn: isRunCol(hint.tableIndex, hint.cellIndex),
+            })
+          : "text";
+        const boolArms =
+          fieldKind === "bool"
+            ? normalizeBoolArms(sampleText || DEFAULT_BOOL_TRUE_TEXT, "")
+            : { trueText: "", falseText: "" };
+        const tag = buildTag(
+          fieldKind,
+          name,
+          boolArms.trueText,
+          boolArms.falseText,
+        );
+        if (validateTag(tag)) continue;
+        usedNames.add(name);
+        usedCells.add(key);
+        if (sampleText) {
+          const loc = findCellTextInRow(
+            plainText,
+            sampleText,
+            hint.plainStart,
+            hint.plainEnd,
+          );
+          if (loc && fieldSpanAllowed(loc.start, loc.end, occupied)) {
+            occupied.push({ start: loc.start, end: loc.end });
+            out.push({
+              plainText: sampleText,
+              occurrence: loc.occurrence,
+              plainStart: loc.start,
+              name,
+              kind: fieldKind,
+              tag,
+              mode: "replace",
+              wrapTag: wrap.tag,
+              wrapOccurrence: wrap.occurrence,
+              cellIndex: hint.cellIndex,
+              tableIndex: hint.tableIndex,
+              rowIndexInTable: hint.rowIndexInTable,
+              headerHint: header || undefined,
+              ...(fieldKind === "bool"
+                ? {
+                    trueText: boolArms.trueText,
+                    falseText: boolArms.falseText,
+                  }
+                : {}),
+            });
+            continue;
+          }
+        }
+        out.push({
+          plainText: hint.rowAnchor,
+          occurrence: hint.occurrence,
+          plainStart: hint.plainStart,
+          name,
+          kind: fieldKind,
+          tag,
+          mode: "fill-empty-tc",
+          cellIndex: hint.cellIndex,
+          tableIndex: hint.tableIndex,
+          rowIndexInTable: hint.rowIndexInTable,
+          wrapTag: wrap.tag,
+          wrapOccurrence: wrap.occurrence,
+          headerHint: header || undefined,
+          ...(fieldKind === "bool"
+            ? { trueText: boolArms.trueText, falseText: boolArms.falseText }
+            : {}),
+        });
+      }
+    }
+    // Drop any wrap that still has zero inners after structural fill.
+    for (let i = out.length - 1; i >= 0; i -= 1) {
+      const s = out[i]!;
+      if (s.mode !== "wrap" && s.mode !== "wrap-row") continue;
+      const hasInner = out.some(
+        (inner) =>
+          inner.wrapTag === s.tag &&
+          (inner.wrapOccurrence ?? 0) === s.occurrence,
+      );
+      if (!hasInner) out.splice(i, 1);
+    }
+  }
 
   out.sort((a, b) => {
     // Apply deletes after wraps/fields at the same locus; stable by plainStart.
@@ -2969,10 +3229,55 @@ export function countLabelFollowedFillables(plainText: string): number {
   return n;
 }
 
-/** 0 disables chunking. Smaller default cuts 90s timeouts on large docs. */
+/** 0 disables chunking. Small chunks finish within provider time budgets. */
 export const AI_SUGGEST_CHUNK_CHARS_ENV = "DOCX_FORM_AI_SUGGEST_CHUNK_CHARS";
-export const DEFAULT_AI_SUGGEST_CHUNK_CHARS = 40_000;
-export const AI_SUGGEST_CHUNK_CONCURRENCY = 2;
+export const DEFAULT_AI_SUGGEST_CHUNK_CHARS = 16_000;
+/** Serial by default — concurrent chunk calls throttle/timeout on Cursor. */
+export const AI_SUGGEST_CHUNK_CONCURRENCY_ENV =
+  "DOCX_FORM_AI_SUGGEST_CHUNK_CONCURRENCY";
+export const DEFAULT_AI_SUGGEST_CHUNK_CONCURRENCY = 1;
+export const AI_SUGGEST_CHUNK_RETRY_ENV = "DOCX_FORM_AI_SUGGEST_CHUNK_RETRY";
+export const DEFAULT_AI_SUGGEST_CHUNK_RETRY = 2;
+
+export function getAiSuggestChunkConcurrency(): number {
+  return Math.max(
+    1,
+    Math.min(
+      3,
+      Number(
+        String(process.env[AI_SUGGEST_CHUNK_CONCURRENCY_ENV] || "").trim() ||
+          DEFAULT_AI_SUGGEST_CHUNK_CONCURRENCY,
+      ) || DEFAULT_AI_SUGGEST_CHUNK_CONCURRENCY,
+    ),
+  );
+}
+
+export function getAiSuggestChunkRetry(): number {
+  const raw = String(process.env[AI_SUGGEST_CHUNK_RETRY_ENV] || "").trim();
+  if (!raw) return DEFAULT_AI_SUGGEST_CHUNK_RETRY;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_AI_SUGGEST_CHUNK_RETRY;
+  return Math.min(4, Math.floor(n));
+}
+
+/** Per-chunk timeout: prefer longer than the global default so chunks finish. */
+export function getAiSuggestChunkTimeoutMs(baseTimeoutMs?: number): number {
+  const base =
+    typeof baseTimeoutMs === "number" && Number.isFinite(baseTimeoutMs)
+      ? Math.floor(baseTimeoutMs)
+      : 90_000;
+  // Cap at 180s per chunk; floor at base.
+  return Math.min(180_000, Math.max(base, Math.floor(base * 1.5)));
+}
+
+export type ChunkCallOutcome = {
+  index: number;
+  chars: number;
+  ok: boolean;
+  attempts: number;
+  durationMs: number;
+  errorClass?: string;
+};
 
 export function getAiSuggestChunkChars(): number {
   const raw = String(process.env[AI_SUGGEST_CHUNK_CHARS_ENV] || "").trim();
@@ -3095,19 +3400,34 @@ export function estimateSuggestCoverage(
   const emptyHints = xml ? listEmptyTableCellHints(xml) : [];
   const paraHints = xml ? listParagraphListHints(xml) : [];
   const prototypes = xml ? listPrototypeTableRowSpans(xml) : [];
-  // Whole document: tables + paragraph lists + label-followed static runs + contacts.
+  // Every sample/empty cell, prototype wrap, party unit, contact, amount, label-follow.
   let expected =
     sampleHints.length + emptyHints.length + prototypes.length + paraHints.length;
   for (const h of paraHints) {
-    expected += Math.min(4, Math.max(1, Math.floor(String(h.plainText || "").length / 48)));
+    // Inner fields inside the first unit (name/id/address…), not just the wrap.
+    expected += Math.min(
+      6,
+      Math.max(2, Math.floor(String(h.plainText || "").length / 36)),
+    );
   }
   const phoneHits = String(plainText || "").match(/\d{2,3}[-\s]?\d{3}[-\s]?\d{3,4}/g);
-  if (phoneHits) expected += Math.min(8, phoneHits.length);
+  if (phoneHits) expected += phoneHits.length;
   const emailHits = String(plainText || "").match(
     /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g,
   );
-  if (emailHits) expected += Math.min(4, emailHits.length);
-  expected += Math.min(16, countLabelFollowedFillables(plainText));
+  if (emailHits) expected += emailHits.length;
+  // Thai/Latin ID-like tokens (13-digit / mixed).
+  const idHits = String(plainText || "").match(
+    /\b\d{5,13}\b|\d{1,2}-\d{4}-\d{5}-\d{2}-\d/g,
+  );
+  if (idHits) expected += idHits.length;
+  // Amount-like figures with thousand separators (avoids double-counting phones/IDs).
+  const amountHits = String(plainText || "").match(
+    /\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?/g,
+  );
+  if (amountHits) expected += amountHits.length;
+  // Count every label-followed fillable — no artificial cap.
+  expected += countLabelFollowedFillables(plainText);
   // Kept later rows (summary / distinct fixed) — at least one fill per such row.
   if (xml) {
     const allRows = listAllDataTableRows(xml);
@@ -3123,6 +3443,7 @@ export function estimateSuggestCoverage(
         if (
           shouldDeleteLaterSampleRow(proto.cells, row.cells, {
             isAtTableEnd: row.rowIndexInTable === maxRi,
+            isNearEnd: row.rowIndexInTable >= maxRi - 1,
           })
         ) {
           continue;
@@ -3233,6 +3554,116 @@ export async function suggestTemplateTags(
       callOpts,
     );
 
+  const chunkOutcomes: ChunkCallOutcome[] = [];
+  const failedChunkIndexes: number[] = [];
+
+  const runOneChunk = async (
+    i: number,
+    chunk: string,
+    chunkChars: number,
+  ): Promise<{
+    rows: Record<string, unknown>[];
+    rawText: string;
+    parsed: Record<string, unknown> | null;
+  }> => {
+    const retries = getAiSuggestChunkRetry();
+    const chunkTimeout = getAiSuggestChunkTimeoutMs(callOpts.timeoutMs);
+    // Slim prompts: only hints overlapping this chunk; no full XML on chunks.
+    const c0 = plainText.indexOf(chunk);
+    const cStart = c0 >= 0 ? c0 : 0;
+    const cEnd = cStart + chunk.length;
+    const overlap = (start: number, end: number) =>
+      end > cStart && start < cEnd;
+    const slimPrompt = buildSuggestPrompt({
+      filename,
+      plainText: chunk,
+      xmlSnippet: "",
+      includeXmlInline: false,
+      emptyCellHints: emptyCellHints.filter((h) =>
+        overlap(h.plainStart, h.plainEnd),
+      ),
+      sampleCellHints: sampleCellHints.filter((h) =>
+        overlap(h.plainStart, h.plainEnd),
+      ),
+      paragraphListHints: paragraphListHints.filter((h) =>
+        overlap(h.plainStart, h.groupEnd || h.plainEnd),
+      ),
+      nameLanguage,
+      plainTruncated: chunk.length >= chunkChars,
+      xmlTruncated: false,
+      docxAttached: false,
+    });
+    let lastErr: unknown = null;
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      if (opts?.signal?.aborted) break;
+      const t0 = Date.now();
+      try {
+        const part = await callSuggestProvider(slimPrompt, xml, buffer, {
+          ...callOpts,
+          attachDocx: false,
+          timeoutMs: chunkTimeout,
+        });
+        const durationMs = Date.now() - t0;
+        chunkOutcomes.push({
+          index: i,
+          chars: chunk.length,
+          ok: true,
+          attempts: attempt + 1,
+          durationMs,
+        });
+        logAiCall({
+          route: "template/suggest-tags/chunk",
+          provider: provider.id,
+          model,
+          durationMs,
+          outcome: "ok",
+          phase: `chunk_${i + 1}_attempt_${attempt + 1}`,
+        });
+        return {
+          rows: normalizeRawSuggestions(part.parsed),
+          rawText: part.rawText || "",
+          parsed: part.parsed,
+        };
+      } catch (err) {
+        lastErr = err;
+        const durationMs = Date.now() - t0;
+        const timedOut = isAiTimeoutError(err);
+        const retryable = timedOut || isRetryableAiError(err);
+        logAiCall({
+          route: "template/suggest-tags/chunk",
+          provider: provider.id,
+          model,
+          durationMs,
+          outcome: timedOut ? "timeout" : "error",
+          errorClass: timedOut
+            ? "AI_TIMEOUT"
+            : err instanceof Error
+              ? err.name
+              : "Error",
+          phase: `chunk_${i + 1}_attempt_${attempt + 1}`,
+        });
+        if (!retryable || attempt >= retries) break;
+        await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+      }
+    }
+    const errClass =
+      lastErr && isAiTimeoutError(lastErr)
+        ? "AI_TIMEOUT"
+        : lastErr instanceof Error
+          ? lastErr.name
+          : "Error";
+    chunkOutcomes.push({
+      index: i,
+      chars: chunk.length,
+      ok: false,
+      attempts: retries + 1,
+      durationMs: 0,
+      errorClass: errClass,
+    });
+    failedChunkIndexes.push(i);
+    return { rows: [], rawText: `/* chunk_${i + 1}_failed:${errClass} */`, parsed: null };
+  };
+
   const runChunked = async (): Promise<SuggestCallResult> => {
     const chunkChars = getAiSuggestChunkChars() || DEFAULT_AI_SUGGEST_CHUNK_CHARS;
     const chunks = splitPlainTextChunks(plainText, chunkChars);
@@ -3241,36 +3672,48 @@ export async function suggestTemplateTags(
       .fill(null)
       .map(() => []);
     let lastParsed: Record<string, unknown> | null = null;
-    const { isAiTimeoutError, isRetryableAiError } = await import("./ai-request");
+    const overallBudgetMs = Math.min(
+      900_000,
+      Math.max(
+        (callOpts.timeoutMs || 90_000) * 3,
+        getAiSuggestChunkTimeoutMs(callOpts.timeoutMs) * chunks.length + 30_000,
+      ),
+    );
+    const budgetDeadline = Date.now() + overallBudgetMs;
     let next = 0;
     const worker = async () => {
       while (true) {
         if (opts?.signal?.aborted) return;
+        if (Date.now() > budgetDeadline) return;
         const i = next;
         next += 1;
         if (i >= chunks.length) return;
-        const chunk = chunks[i]!;
-        try {
-          const part = await callSuggestProvider(
-            buildPromptForPlain(chunk, chunk.length >= chunkChars),
-            xml,
-            buffer,
-            {
-              ...callOpts,
-              attachDocx: attachDocx && i === 0,
-            },
-          );
-          rawParts[i] = part.rawText || "";
-          lastParsed = part.parsed;
-          batchRows[i] = normalizeRawSuggestions(part.parsed);
-        } catch (err) {
-          if (!isRetryableAiError(err) && !isAiTimeoutError(err)) throw err;
-          rawParts[i] = `/* chunk_${i + 1}_skipped */`;
-        }
+        const result = await runOneChunk(i, chunks[i]!, chunkChars);
+        rawParts[i] = result.rawText;
+        if (result.parsed) lastParsed = result.parsed;
+        batchRows[i] = result.rows;
       }
     };
-    const pool = Math.min(AI_SUGGEST_CHUNK_CONCURRENCY, Math.max(1, chunks.length));
+    const pool = Math.min(
+      getAiSuggestChunkConcurrency(),
+      Math.max(1, chunks.length),
+    );
     await Promise.all(Array.from({ length: pool }, () => worker()));
+    // Any chunk never started (budget) counts as failed.
+    for (let i = 0; i < chunks.length; i += 1) {
+      if (!chunkOutcomes.some((o) => o.index === i)) {
+        failedChunkIndexes.push(i);
+        chunkOutcomes.push({
+          index: i,
+          chars: chunks[i]!.length,
+          ok: false,
+          attempts: 0,
+          durationMs: 0,
+          errorClass: "BUDGET",
+        });
+        rawParts[i] = `/* chunk_${i + 1}_failed:BUDGET */`;
+      }
+    }
     const merged = mergeSuggestionRowsByPosition(...batchRows);
     return {
       parsed: { ...(lastParsed || {}), suggestions: merged },
@@ -3279,22 +3722,22 @@ export async function suggestTemplateTags(
   };
 
   const chunkChars = getAiSuggestChunkChars();
+  // Prefer chunks early — full-doc prompts are the main timeout source.
   const preferChunkFirst =
-    chunkChars > 0 && plainText.length > chunkChars * 1.25;
+    chunkChars > 0 && plainText.length > chunkChars;
 
   let callResult: SuggestCallResult | null = null;
   if (preferChunkFirst) {
     callResult = await runChunked();
   } else if (provider.apiFamily === "cursor") {
-    // Cursor has no temperature API — stability from dual-pass union + validate.
+    // Cursor has no temperature API — dual-pass union when the doc fits one call.
     const passes: SuggestCallResult[] = [];
     try {
       passes.push(await runFull());
     } catch (err) {
-      const { isAiTimeoutError, isRetryableAiError } = await import("./ai-request");
       if (
         chunkChars > 0 &&
-        plainText.length >= Math.min(20_000, chunkChars) &&
+        plainText.length >= Math.min(12_000, chunkChars) &&
         (isAiTimeoutError(err) || isRetryableAiError(err))
       ) {
         callResult = await runChunked();
@@ -3320,10 +3763,9 @@ export async function suggestTemplateTags(
     try {
       callResult = await runFull();
     } catch (err) {
-      const { isAiTimeoutError, isRetryableAiError } = await import("./ai-request");
       if (
         chunkChars > 0 &&
-        plainText.length >= Math.min(20_000, chunkChars) &&
+        plainText.length >= Math.min(12_000, chunkChars) &&
         (isAiTimeoutError(err) || isRetryableAiError(err))
       ) {
         callResult = await runChunked();
@@ -3384,9 +3826,33 @@ export async function suggestTemplateTags(
     coverage: estimateSuggestCoverage(finalized.suggestions, plainText, xml),
   };
 
-  const warning = finalized.coverage.thin
-    ? `AI tag coverage still thin (${finalized.coverage.actual}/${finalized.coverage.expected}) — review letterhead, parties, tables, and totals`
-    : undefined;
+  const warnParts: string[] = [];
+  if (failedChunkIndexes.length) {
+    const regions = [...new Set(failedChunkIndexes)]
+      .sort((a, b) => a - b)
+      .map((i) => `chunk ${i + 1}`)
+      .join(", ");
+    warnParts.push(
+      `Partial AI result — failed regions: ${regions} (${failedChunkIndexes.length} chunk(s) after retries)`,
+    );
+  }
+  if (finalized.coverage.thin) {
+    warnParts.push(
+      `AI tag coverage still thin (${finalized.coverage.actual}/${finalized.coverage.expected}) — review letterhead, parties, tables, and totals`,
+    );
+  }
+  const warning = warnParts.length ? warnParts.join(" · ") : undefined;
+
+  if (chunkOutcomes.length) {
+    const okN = chunkOutcomes.filter((o) => o.ok).length;
+    logAiCall({
+      route: "template/suggest-tags/chunk-summary",
+      provider: provider.id,
+      model,
+      outcome: failedChunkIndexes.length ? "error" : "ok",
+      phase: `chunks_ok_${okN}_of_${chunkOutcomes.length}`,
+    });
+  }
 
   return {
     suggestions: finalized.suggestions,

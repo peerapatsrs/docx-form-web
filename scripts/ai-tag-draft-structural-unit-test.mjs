@@ -197,6 +197,68 @@ await check("garbled near-duplicate token names rejected", async () => {
   assert.equal(looksLikeGarbledName("pass_pass_status"), true);
   assert.equal(looksLikeGarbledName("abababxx"), true);
   assert.equal(looksLikeGarbledName("item_amount"), false);
+  assert.equal(looksLikeGarbledName("จำลยที่"), true, "OCR-cut typo header");
+  assert.equal(looksLikeGarbledName("+จำลยที่"), true);
+  assert.equal(looksLikeGarbledName("☐"), true, "checkbox arm alone");
+  assert.equal(looksLikeGarbledName("lbl_27qmif"), true, "hash fallback name");
+  assert.equal(looksLikeGarbledName("จำเลยที่"), false);
+});
+
+await check("coverage warns when ~27 tags on ~50 expected", async () => {
+  const { estimateSuggestCoverage } = await loadDraft();
+  // Synthetic large-doc that structurally expects ~50 fillables.
+  const parts = [];
+  for (let i = 1; i <= 32; i += 1) {
+    parts.push(`FieldCaption${i}\t\tSampleFillValue${i}Extra`);
+  }
+  for (let i = 0; i < 8; i += 1) {
+    parts.push(`02-10${i}-222${i}`);
+  }
+  parts.push(
+    "user@example.com",
+    "other@example.org",
+    "ops@example.org",
+  );
+  parts.push(
+    "1234567890123",
+    "9876543210987",
+    "1-2345-67890-12-1",
+    "5555566666777",
+  );
+  parts.push("1,116.00", "2,500.50", "10,000");
+  const plain = parts.join("\n");
+  const fakeSuggestions = Array.from({ length: 27 }, (_, i) => ({
+    plainText: `SampleFillValue${(i % 32) + 1}Extra`,
+    occurrence: 0,
+    plainStart: i,
+    name: `field_${i}`,
+    kind: "text",
+    tag: `{{field_${i}}}`,
+    mode: "replace",
+  }));
+  const cov = estimateSuggestCoverage(fakeSuggestions, plain, null);
+  assert.ok(cov.expected >= 50, `expected>=50 got ${cov.expected}`);
+  assert.ok(cov.actual === 27, `actual=27 got ${cov.actual}`);
+  assert.ok(cov.score < 0.55, `score<0.55 got ${cov.score}`);
+  assert.equal(cov.thin, true, "27-on-~50 output must warn thin");
+});
+
+await check("chunk helpers: smaller default + timeout floor", async () => {
+  const {
+    DEFAULT_AI_SUGGEST_CHUNK_CHARS,
+    DEFAULT_AI_SUGGEST_CHUNK_RETRY,
+    getAiSuggestChunkConcurrency,
+    getAiSuggestChunkRetry,
+    getAiSuggestChunkTimeoutMs,
+    splitPlainTextChunks,
+  } = await loadDraft();
+  assert.ok(DEFAULT_AI_SUGGEST_CHUNK_CHARS <= 20_000);
+  assert.equal(getAiSuggestChunkConcurrency(), 1);
+  assert.equal(getAiSuggestChunkRetry(), DEFAULT_AI_SUGGEST_CHUNK_RETRY);
+  assert.ok(DEFAULT_AI_SUGGEST_CHUNK_RETRY >= 1);
+  assert.ok(getAiSuggestChunkTimeoutMs(90_000) >= 90_000);
+  const chunks = splitPlainTextChunks("x".repeat(50_000), 16_000);
+  assert.ok(chunks.length >= 3, `expected >=3 chunks got ${chunks.length}`);
 });
 
 await check("no banned hardcoding markers in ai-tag-draft source", async () => {
@@ -208,6 +270,11 @@ await check("no banned hardcoding markers in ai-tag-draft source", async () => {
   assert.doesNotMatch(src, /\\bno\\.\\?\\b/);
   assert.doesNotMatch(src, /resolveVarName\(.*cellText/);
   assert.doesNotMatch(src, /resolveVarName\(sampleText/);
+  // Removed fixed fallbacks that produced junk names / empty loops.
+  assert.doesNotMatch(src, /return\s+["']รายการ["']/);
+  assert.doesNotMatch(src, /lang\s*===\s*["']en["']\s*\?\s*["']value["']/);
+  assert.doesNotMatch(src, /\?\s*["']ค่า["']/);
+  assert.doesNotMatch(src, /_ข้อความ/);
 });
 
 if (failed) {

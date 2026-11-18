@@ -135,9 +135,27 @@ await check("skewed-shape sample rows still deleted; summary kept", async () => 
     "fixed title-deed row without sample-like values kept mid-table",
   );
   assert.equal(
-    shouldDeleteLaterSampleRow(proto, total, { isAtTableEnd: true }),
+    shouldDeleteLaterSampleRow(proto, total, {
+      isAtTableEnd: true,
+      isNearEnd: true,
+    }),
     false,
     "summary-like total at end kept",
+  );
+  // Near-end subtotal (not absolute last) must also be kept and taggable.
+  const subtotal = [
+    { text: "" },
+    { text: "Subtotal" },
+    { text: "900" },
+    { text: "" },
+  ];
+  assert.equal(
+    shouldDeleteLaterSampleRow(proto, subtotal, {
+      isAtTableEnd: false,
+      isNearEnd: true,
+    }),
+    false,
+    "near-end subtotal kept",
   );
 
   const out = validateAiTagSuggestions(

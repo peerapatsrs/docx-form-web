@@ -44,12 +44,15 @@ export function escapeHtmlAttr(value: string): string {
  * A 303 Location to Keycloak after a form POST is blocked when the document
  * CSP has `form-action 'self'` (and when multiple CSPs AND together). Returning
  * 200 HTML to the same origin completes the form POST under form-action, then
- * meta-refresh / link / location.replace perform a top-level GET to end_session
- * (not subject to form-action). Same pattern intent as qr: browser must navigate.
+ * meta-refresh / link / optional DOM-based location.replace perform a top-level
+ * GET to end_session (not subject to form-action).
+ *
+ * The end_session URL must never be interpolated into a `<script>` literal —
+ * a raw `</script>` in the URL would end the script early (XSS). Meta + `<a href>`
+ * use HTML attribute escaping; any script only reads the URL from the anchor.
  */
 export function buildEndSessionContinueHtml(endSessionUrl: string): string {
   const href = escapeHtmlAttr(endSessionUrl);
-  const jsUrl = JSON.stringify(endSessionUrl);
   return `<!DOCTYPE html>
 <html lang="th">
 <head>
@@ -60,8 +63,13 @@ export function buildEndSessionContinueHtml(endSessionUrl: string): string {
 </head>
 <body>
 <p>กำลังออกจากระบบ Keycloak…</p>
-<p><a href="${href}">ดำเนินการต่อ</a></p>
-<script>location.replace(${jsUrl});</script>
+<p><a id="oidc-end-session-continue" href="${href}">ดำเนินการต่อ</a></p>
+<script>
+(function () {
+  var a = document.getElementById("oidc-end-session-continue");
+  if (a && a.href) location.replace(a.href);
+})();
+</script>
 </body>
 </html>`;
 }

@@ -95,6 +95,79 @@ await check("validate emits delete-tr for leftover sample rows", async () => {
   assert.ok(!out.some((s) => s.plainText === "GammaWidget" && s.mode === "replace"));
 });
 
+await check("skewed-shape sample rows still deleted; summary kept", async () => {
+  const { validateAiTagSuggestions, shouldDeleteLaterSampleRow } = await load();
+  const skewedXml = readFileSync(join(fixturesDir, "skewed-sample-rows.xml"), "utf8");
+  const skewedPlain =
+    "NoItemAmtNote1AlphaWidget100ok2BetaWidget200title-deed-Total300";
+  const proto = [
+    { text: "1" },
+    { text: "AlphaWidget" },
+    { text: "100" },
+    { text: "ok" },
+  ];
+  const skewedSample = [
+    { text: "2" },
+    { text: "BetaWidget" },
+    { text: "200" },
+    { text: "" },
+  ];
+  const spare = [
+    { text: "" },
+    { text: "title-deed" },
+    { text: "-" },
+    { text: "" },
+  ];
+  const total = [
+    { text: "" },
+    { text: "Total" },
+    { text: "300" },
+    { text: "" },
+  ];
+  assert.equal(
+    shouldDeleteLaterSampleRow(proto, skewedSample, { isAtTableEnd: false }),
+    true,
+    "skewed sample must delete",
+  );
+  assert.equal(
+    shouldDeleteLaterSampleRow(proto, spare, { isAtTableEnd: false }),
+    false,
+    "fixed title-deed row without sample-like values kept mid-table",
+  );
+  assert.equal(
+    shouldDeleteLaterSampleRow(proto, total, { isAtTableEnd: true }),
+    false,
+    "summary-like total at end kept",
+  );
+
+  const out = validateAiTagSuggestions(
+    skewedPlain,
+    [
+      {
+        plainText: "1AlphaWidget100ok",
+        name: "item_rows",
+        kind: "list-table",
+        mode: "wrap-row",
+      },
+    ],
+    skewedXml,
+    "en",
+  );
+  const deletes = out.filter((s) => s.mode === "delete-tr");
+  assert.ok(
+    deletes.some((d) => String(d.plainText || "").includes("BetaWidget")),
+    "skewed Beta sample row deleted",
+  );
+  assert.ok(
+    !deletes.some((d) => String(d.plainText || "").includes("Total")),
+    "total not deleted",
+  );
+  assert.ok(
+    !deletes.some((d) => String(d.plainText || "").includes("title-deed")),
+    "fixed title-deed not deleted",
+  );
+});
+
 await check("looksLikeRunSequence uses isRunColumn, not Thai keywords", async () => {
   const { looksLikeRunSequence } = await load();
   assert.equal(

@@ -137,6 +137,68 @@ await check("estimateSuggestCoverage marks sparse output thin", async () => {
   assert.ok(cov.actual >= 3, `seeded actual ${cov.actual}`);
 });
 
+await check("whole-doc label-followed expected raises thin when empty", async () => {
+  const { estimateSuggestCoverage, countLabelFollowedFillables } = await loadDraft();
+  const plain =
+    "Company\t\tAcme Holdings Ltd\nTel\t\t02-000-0000\nAddress\t\t123 Main Road";
+  assert.ok(countLabelFollowedFillables(plain) >= 2);
+  const cov = estimateSuggestCoverage([], plain, null);
+  assert.ok(cov.expected >= 2, `expected>=2 got ${cov.expected}`);
+  assert.equal(cov.thin, true);
+});
+
+await check("never name from cell value; reject equals source", async () => {
+  const { nameFromHeaderOrLabel, nameEqualsSourceValue, validateAiTagSuggestions } =
+    await loadDraft();
+  assert.equal(nameEqualsSourceValue("ผ่าน", "ผ่าน"), true);
+  assert.equal(nameFromHeaderOrLabel(null, null, "th", "ผ่าน"), null);
+  assert.equal(nameFromHeaderOrLabel("สถานะ", null, "th", "ผ่าน"), "สถานะ");
+  const xml = readFileSync(join(fixturesDir, "leftover-sample-rows.xml"), "utf8");
+  const plain =
+    "NoItemAmt1AlphaWidget1002BetaWidget2003GammaWidget300Total600";
+  const out = validateAiTagSuggestions(
+    plain,
+    [
+      {
+        plainText: "1AlphaWidget100",
+        name: "rows",
+        kind: "list-table",
+        mode: "wrap-row",
+      },
+      {
+        plainText: "AlphaWidget",
+        name: "AlphaWidget",
+        kind: "text",
+        mode: "replace",
+        label: "Item",
+      },
+    ],
+    xml,
+    "en",
+  );
+  assert.ok(
+    !out.some((s) => s.mode === "replace" && s.name === "AlphaWidget"),
+    "name equal to cell value must be rejected or replaced",
+  );
+  assert.ok(
+    out.some(
+      (s) =>
+        s.plainText === "AlphaWidget" &&
+        s.mode === "replace" &&
+        s.name !== "AlphaWidget",
+    ),
+    "cell still tagged from header",
+  );
+});
+
+await check("garbled near-duplicate token names rejected", async () => {
+  const { looksLikeGarbledName } = await loadDraft();
+  assert.equal(looksLikeGarbledName("foo_foo"), true);
+  assert.equal(looksLikeGarbledName("pass_pass_status"), true);
+  assert.equal(looksLikeGarbledName("abababxx"), true);
+  assert.equal(looksLikeGarbledName("item_amount"), false);
+});
+
 await check("no banned hardcoding markers in ai-tag-draft source", async () => {
   const src = readFileSync(join(root, "src/server/ai-tag-draft.ts"), "utf8");
   assert.doesNotMatch(src, /TH_HEADER_EN/);
@@ -144,6 +206,8 @@ await check("no banned hardcoding markers in ai-tag-draft source", async () => {
   assert.doesNotMatch(src, /จำลยที่/);
   assert.doesNotMatch(src, /table_loop_/);
   assert.doesNotMatch(src, /\\bno\\.\\?\\b/);
+  assert.doesNotMatch(src, /resolveVarName\(.*cellText/);
+  assert.doesNotMatch(src, /resolveVarName\(sampleText/);
 });
 
 if (failed) {

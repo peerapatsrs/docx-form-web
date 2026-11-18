@@ -313,17 +313,8 @@ export function looksLikeGarbledName(name: string): boolean {
       }
     }
   }
-  // OCR-cut Thai label: short token ending in ที่ whose stem looks truncated
-  // (missing a vowel letter relative to a typical 4–6 char stem).
-  for (const p of parts) {
-    const m = /^([\u0E00-\u0E7F]{3,5})ที่$/u.exec(p);
-    if (!m) continue;
-    const stem = m[1]!;
-    // Truncation heuristic: stem has a consonant cluster of 3+ with only one vowel mark.
-    const vowels = stem.match(/[ะาิีึืุูเแโใไำ]/gu) || [];
-    const chars = [...stem];
-    if (chars.length >= 3 && vowels.length <= 1) return true;
-  }
+  // Names that embed long digit runs are sample/amount copies, not labels.
+  if (/\d{3,}/.test(s)) return true;
   return false;
 }
 
@@ -877,7 +868,8 @@ function resolveFieldPlainHits(
 
 /**
  * Claim a unique variable name. Never invent `_2` / `_3` / `_ก` / `_a`
- * disambiguators — prefer contextual suffixes from labels/headers/parent wraps.
+ * disambiguators — prefer contextual suffixes from labels/headers.
+ * Never reuse a reserved loop/wrap name for a scalar field.
  * If no contextual candidate is free, drop the suggestion (return null).
  */
 function uniqueName(
@@ -885,27 +877,36 @@ function uniqueName(
   usedNames: Set<string>,
   contextParts: string[] = [],
   lang: AiTagNameLanguage = "th",
+  reservedLoopNames: ReadonlySet<string> = new Set(),
 ): string | null {
   const cleaned = stripJunkNumericSuffix(base);
   if (!cleaned || !NAME_RE.test(cleaned) || looksLikeGarbledName(cleaned)) return null;
-  if (!usedNames.has(cleaned)) return cleaned;
+  const blocked = (n: string) =>
+    usedNames.has(n) || reservedLoopNames.has(n) || looksLikeGarbledName(n);
+  if (!blocked(cleaned)) return cleaned;
 
   const ctxNames: string[] = [];
   for (const raw of contextParts) {
+    // Never treat sample/fill values as naming context.
+    if (looksLikeFillValue(String(raw || ""))) continue;
     const n = resolveVarName(String(raw || ""), lang);
-    if (!n || n === cleaned) continue;
+    if (!n || n === cleaned || looksLikeGarbledName(n)) continue;
+    if (reservedLoopNames.has(n)) continue;
     if (!ctxNames.includes(n)) ctxNames.push(n);
   }
   const candidates: string[] = [];
   for (const ctx of ctxNames) {
     const last = ctx.split(/[_/-]/u).filter(Boolean).pop() || ctx;
-    for (const cand of [`${cleaned}_${ctx}`, `${ctx}_${cleaned}`, `${cleaned}_${last}`, ctx]) {
+    // Do not offer bare `ctx` alone — that reuses another field/loop's name.
+    for (const cand of [`${cleaned}_${ctx}`, `${ctx}_${cleaned}`, `${cleaned}_${last}`]) {
       const s = (lang === "en" ? sanitizeNameAscii(cand) : sanitizeName(cand)).slice(0, 40);
-      if (s && NAME_RE.test(s) && !candidates.includes(s)) candidates.push(s);
+      if (s && NAME_RE.test(s) && !candidates.includes(s) && !looksLikeGarbledName(s)) {
+        candidates.push(s);
+      }
     }
   }
   for (const cand of candidates) {
-    if (!usedNames.has(cand)) return cand;
+    if (!blocked(cand)) return cand;
   }
   // No opaque letter/digit suffixes — skip rather than invent junk.
   return null;
@@ -1034,8 +1035,6 @@ function buildSuggestPrompt(opts: {
     opts.nameLanguage === "en"
       ? '{"plainText":"1","name":"code","kind":"text","mode":"replace"}'
       : '{"plainText":"1","name":"รหัส","kind":"text","mode":"replace"}';
-  const emptyNameExample =
-    opts.nameLanguage === "en" ? "blank_field" : "ช่องว่าง";
   const truncNotes = [
     opts.plainTruncated
       ? `TAGGER_PLAIN was truncated to ${PLAIN_PROMPT_MAX} chars (safety cap).`
@@ -1076,7 +1075,7 @@ Kinds / modes (schema the app understands — pick what fits the document):
 - "bool" — checkbox-like √/✓/☑ → always emit BOTH arms: {{name?√,☐}} (true glyph, unchecked glyph). Never leave falseText empty. Unchecked must render ☐ (or ×), never √.
 - "auto" — ONLY a running sequence number INSIDE an accepted list/list-table wrap when the column's body values are sequential integers (1,2,3…) → {{+name}}. Forbidden for prices, rates, quantities, page refs, amounts, and other non-sequence numbers. Digits outside loops are never auto.
 - "list" — repeating prose OUTSIDE tables: wrap the FIRST unit only (mode "wrap"). Name like "${listNameExample}". MUST also emit inner replace fields for every fill-in inside that first unit (name, address, ids, …). Leave later units untagged.
-- "list-table" — repeating TABLE rows: wrap ONLY the first body/data row (mode "wrap-row"). Skip headers and later sample rows. MUST emit replace/auto/bool for each non-empty sample cell on that prototype row (incl. first column), e.g. ${nameExample}. Empty meaningful cells → fill-empty-tc with cellIndex (name e.g. ${emptyNameExample}).
+- "list-table" — repeating TABLE rows: wrap ONLY the first body/data row (mode "wrap-row"). Skip headers and later sample rows. MUST emit replace/auto/bool for each non-empty sample cell on that prototype row (incl. first column), e.g. ${nameExample}. Empty meaningful cells → fill-empty-tc with cellIndex (name from the column header only — never from cell sample text).
 - Prefer sample fill-in spots over headings/boilerplate as the replaced span (captions go in "label").
 - Distinct meanings → distinct names even when values look alike: role A vs role B address/tax id/phone, document date vs document number. Derive names from the nearby label/role. NEVER disambiguate with _2/_3/_ก letter/digit suffixes — use role/context words instead. Never emit bare one-word names when a nearby caption gives more context.
 - Leave fixed logos/seals as plain text, BUT DO tag fillable letterhead/header values: document numbers, party names, phones, emails, addresses, and dates when they are user-fillable samples.
@@ -1600,11 +1599,27 @@ function parentNameStem(
   const ordered = [...parts].sort((a, b) => a.length - b.length || a.localeCompare(b));
   for (const p of ordered) {
     const n = resolveVarName(p, lang);
-    if (n && !looksLikeGarbledName(n) && n.length <= 16) return n;
+    // Never return the whole loop name as a scalar stem.
+    if (n && n !== raw && !looksLikeGarbledName(n) && n.length <= 16) return n;
   }
-  const whole = resolveVarName(raw.slice(0, 16), lang);
-  if (whole && !looksLikeGarbledName(whole)) return whole;
   return null;
+}
+
+/**
+ * Structural inner-field name when no header exists: parent stem + cell index.
+ * Use dot+index (not `_N`) so stripJunkNumericSuffix cannot peel the index.
+ * Never uses fixed vocabulary words or sample cell text.
+ */
+function structuralCellName(
+  parentName: string | null | undefined,
+  cellIndex: number,
+  lang: AiTagNameLanguage,
+): string | null {
+  const stem = parentNameStem(parentName, lang);
+  if (!stem) return null;
+  const n = `${stem}.${cellIndex + 1}`;
+  if (looksLikeGarbledName(n) || !NAME_RE.test(n)) return null;
+  return n;
 }
 
 /**
@@ -1767,6 +1782,9 @@ function cellLooksLikeAmount(text: string): boolean {
   if (/^\d{1,3}([.,]\d{3})+([.,]\d+)?$/.test(t)) return true;
   if (/^\d{4,}$/.test(t)) return true;
   if (/^\d+$/.test(t) && Number(t) >= 100) return true;
+  // Small money / VAT figures (e.g. 63) — not 1–9 lone runnos.
+  if (/^\d{2,3}$/.test(t) && Number(t) >= 10) return true;
+  if (/^\d+[.,]\d+$/.test(t)) return true;
   return false;
 }
 
@@ -1779,11 +1797,11 @@ export function isSummaryLikeRow(
   row: ReadonlyArray<{ text: string }>,
   opts: { isAtTableEnd: boolean; isNearEnd?: boolean },
 ): boolean {
-  // Last or second-to-last data row may host subtotals / totals.
+  // Trailing block (totals / VAT / notes) — caller marks isNearEnd for the whole trailer.
   if (!opts.isAtTableEnd && !opts.isNearEnd) return false;
   const pf = countFilledCells(proto);
   const rf = countFilledCells(row);
-  if (!(rf > 0 && rf < pf) && !(row.length > 0 && row.length < proto.length)) {
+  if (!(rf > 0 && rf <= pf) && !(row.length > 0 && row.length < proto.length)) {
     return false;
   }
   const filled = row.filter((c) => String(c.text ?? "").trim());
@@ -1799,12 +1817,46 @@ export function isSummaryLikeRow(
   });
   // Sample clones keep a leading ordinal; summary rows usually do not.
   if (hasLeadOrd) return false;
-  // Merged/spanning label, or label + amount (classic totals / baht line).
+  // Merged/spanning label, label + amount, or sparse note row in the trailer.
   return (
     filled.length === 1 ||
     (filled.length <= 2 && rf <= Math.max(1, pf - 1)) ||
-    (hasLabel && hasAmount && rf <= 3)
+    (hasLabel && hasAmount && rf <= 4) ||
+    (hasLabel && rf <= Math.max(2, pf - 1) && !tableRowsSameSampleShape(proto, row))
   );
+}
+
+/**
+ * Index of the first trailing fixed row (subtotal/VAT/total/note block) after the
+ * last sample-shaped clone. Returns Infinity when there is no trailing block.
+ */
+export function findTrailingFixedRowStart(
+  proto: ReadonlyArray<{ text: string }>,
+  laterRows: ReadonlyArray<{ rowIndexInTable: number; cells: ReadonlyArray<{ text: string }> }>,
+): number {
+  if (!laterRows.length) return Number.POSITIVE_INFINITY;
+  const ordered = [...laterRows].sort(
+    (a, b) => a.rowIndexInTable - b.rowIndexInTable,
+  );
+  let startIdx = ordered.length;
+  for (let i = ordered.length - 1; i >= 0; i -= 1) {
+    const row = ordered[i]!;
+    const opts = {
+      isAtTableEnd: i === ordered.length - 1,
+      isNearEnd: true,
+    };
+    const summary = isSummaryLikeRow(proto, row.cells, opts);
+    const sampleLike =
+      rowHasSampleLikeValues(proto, row.cells) ||
+      tableRowsSameSampleShape(proto, row.cells);
+    if (summary || !sampleLike) {
+      startIdx = i;
+      continue;
+    }
+    break;
+  }
+  if (startIdx >= ordered.length) return Number.POSITIVE_INFINITY;
+  return ordered[startIdx]!.rowIndexInTable;
 }
 
 /**
@@ -1823,8 +1875,15 @@ export function rowHasSampleLikeValues(
     if (!t) continue;
     if (protoVals.has(t)) return true;
   }
-  const protoDig = proto.find((c) => /^\d{1,4}$/.test(String(c.text ?? "").trim()));
-  const rowDig = row.find((c) => /^\d{1,4}$/.test(String(c.text ?? "").trim()));
+  // Ordinal continuation only for small run numbers (not VAT/amounts like 63/900).
+  const isOrd = (raw: string) => {
+    const t = String(raw || "").trim();
+    if (!/^\d{1,2}$/.test(t) || cellLooksLikeAmount(t)) return false;
+    const n = Number(t);
+    return Number.isFinite(n) && n >= 1 && n <= 40;
+  };
+  const protoDig = proto.find((c) => isOrd(String(c.text ?? "")));
+  const rowDig = row.find((c) => isOrd(String(c.text ?? "")));
   if (protoDig && rowDig) {
     const a = Number(String(protoDig.text).trim());
     const b = Number(String(rowDig.text).trim());
@@ -1881,10 +1940,20 @@ function isDistinctNonSampleTableField(
   const tableRows = allDataRows.filter((r) => r.tableIndex === hit.tableIndex);
   const maxRi = Math.max(...tableRows.map((r) => r.rowIndexInTable));
   // Tagable when we would KEEP the row (not delete it).
-  return !shouldDeleteLaterSampleRow(protoRow.cells, hit.cells, {
-    isAtTableEnd: hit.rowIndexInTable === maxRi,
-    isNearEnd: hit.rowIndexInTable >= maxRi - 1,
-  });
+  const later = allDataRows.filter(
+    (r) =>
+      r.tableIndex === hit.tableIndex &&
+      r.rowIndexInTable > proto.rowIndexInTable,
+  );
+  const trailStart = findTrailingFixedRowStart(protoRow.cells, later);
+  const inTrailer = hit.rowIndexInTable >= trailStart;
+  return (
+    inTrailer ||
+    !shouldDeleteLaterSampleRow(protoRow.cells, hit.cells, {
+      isAtTableEnd: hit.rowIndexInTable === maxRi,
+      isNearEnd: inTrailer || hit.rowIndexInTable >= maxRi - 1,
+    })
+  );
 }
 
 /**
@@ -1925,6 +1994,8 @@ export function validateAiTagSuggestions(
 ): AiTagSuggestion[] {
   const occupied = collectExistingTagRanges(plainText);
   const usedNames = new Set<string>();
+  /** Loop/wrap names — scalars must never share these (avoids [object Object] fills). */
+  const reservedLoopNames = new Set<string>();
   const out: AiTagSuggestion[] = [];
   const softWraps: SoftWrapSpan[] = [];
   const usedCells = new Set<string>();
@@ -1934,6 +2005,27 @@ export function validateAiTagSuggestions(
   const prototypes = xml ? listPrototypeTableRowSpans(xml) : [];
   const paraListHints = xml ? listParagraphListHints(xml) : [];
   const allDataRows = xml ? listAllDataTableRows(xml) : [];
+  /** tableIndex → first trailing fixed row index (subtotal/VAT/total/note). */
+  const trailingFixedStart = new Map<number, number>();
+  {
+    const byTable = new Map<number, DataTableRowInfo[]>();
+    for (const row of allDataRows) {
+      const list = byTable.get(row.tableIndex) || [];
+      list.push(row);
+      byTable.set(row.tableIndex, list);
+    }
+    for (const [ti, rows] of byTable) {
+      const proto = prototypes.find((p) => p.tableIndex === ti);
+      if (!proto) continue;
+      const protoRow = rows.find((r) => r.rowIndexInTable === proto.rowIndexInTable);
+      if (!protoRow) continue;
+      const later = rows.filter((r) => r.rowIndexInTable > proto.rowIndexInTable);
+      trailingFixedStart.set(
+        ti,
+        findTrailingFixedRowStart(protoRow.cells, later),
+      );
+    }
+  }
   /** tableIndex → column indexes whose body values are sequential integers. */
   const runColsByTable = new Map<number, Set<number>>();
   {
@@ -2096,24 +2188,45 @@ export function validateAiTagSuggestions(
     const headerHintEarly = String(
       row.headerHint ?? row.header ?? row.columnHeader ?? "",
     ).trim();
+    // Prefer header/label for stable cross-run naming; keep a longer model name
+    // when it extends that label (disambiguates amount vs baht-text, etc.).
+    // Never derive scalar names from sample/fill cell text.
+    const fromHeaderOrLabel = nameFromHeaderOrLabel(
+      headerHintEarly,
+      anchorLabel,
+      lang,
+      isListKind(kind) ? null : plain,
+    );
     const nameSource = preferContextualNameSource(
       String(row.name ?? "").trim(),
       anchorLabel,
       [headerHintEarly].filter(Boolean),
     );
-    // Prefer contextual model/label names; never keep a name that equals the
-    // fill-in VALUE (use header/label instead). Short captions may equal name.
-    let baseName = resolveVarName(nameSource || anchorLabel || headerHintEarly, lang);
-    if (!baseName || looksLikeGarbledName(baseName)) {
-      baseName =
-        nameFromHeaderOrLabel(headerHintEarly, anchorLabel, lang, plain) || "";
+    const modelResolved =
+      resolveVarName(String(row.name ?? "").trim(), lang) ||
+      resolveVarName(nameSource, lang) ||
+      "";
+    let baseName = fromHeaderOrLabel || modelResolved || "";
+    if (
+      fromHeaderOrLabel &&
+      modelResolved &&
+      modelResolved !== fromHeaderOrLabel &&
+      !looksLikeGarbledName(modelResolved) &&
+      (modelResolved.includes(fromHeaderOrLabel) ||
+        modelResolved.startsWith(fromHeaderOrLabel))
+    ) {
+      baseName = modelResolved;
     }
+    if (baseName && looksLikeGarbledName(baseName)) baseName = fromHeaderOrLabel || "";
     if (!isListKind(kind) && looksLikeFillValue(plain)) {
       if (baseName && nameEqualsSourceValue(baseName, plain)) {
-        baseName =
-          nameFromHeaderOrLabel(headerHintEarly, anchorLabel, lang, plain) || "";
+        baseName = fromHeaderOrLabel || "";
       }
       if (!baseName || nameEqualsSourceValue(baseName, plain)) continue;
+    }
+    // Reject names that embed sample digit runs (not long label-derived ids).
+    if (!isListKind(kind) && baseName && /\d{3,}/.test(baseName)) {
+      baseName = fromHeaderOrLabel || "";
     }
     if (!baseName || looksLikeGarbledName(baseName)) continue;
     const name = uniqueName(
@@ -2121,6 +2234,7 @@ export function validateAiTagSuggestions(
       usedNames,
       [anchorLabel, headerHintEarly].filter(Boolean),
       lang,
+      isListKind(kind) ? undefined : reservedLoopNames,
     );
     if (!name) continue;
     if (
@@ -2130,6 +2244,7 @@ export function validateAiTagSuggestions(
     ) {
       continue;
     }
+    if (!isListKind(kind) && reservedLoopNames.has(name)) continue;
 
     const boolArms =
       kind === "bool"
@@ -2448,6 +2563,7 @@ export function validateAiTagSuggestions(
     }
     if (!accepted) continue;
     usedNames.add(name);
+    if (isListKind(kind)) reservedLoopNames.add(name);
     out.push(accepted);
   }
 
@@ -2461,15 +2577,16 @@ export function validateAiTagSuggestions(
       if (!parent) continue;
       const baseName =
         nameFromHeaderOrLabel(hint.header, null, lang, null) ||
-        parentNameStem(parent.name, lang);
+        structuralCellName(parent.name, hint.cellIndex, lang);
       if (!baseName) continue;
       const name = uniqueName(
         baseName,
         usedNames,
-        [hint.header, parent.name].filter(Boolean),
+        [hint.header].filter(Boolean),
         lang,
+        reservedLoopNames,
       );
-      if (!name) continue;
+      if (!name || reservedLoopNames.has(name)) continue;
       const tag = buildTag("text", name, "", "");
       if (validateTag(tag)) continue;
       usedNames.add(name);
@@ -2521,13 +2638,8 @@ export function validateAiTagSuggestions(
       let fieldKindFinal: AiTagDraftKind = fieldKind;
       let nameBase =
         nameFromHeaderOrLabel(hint.header, null, lang, hint.cellText) ||
-        parentNameStem(parent.name, lang);
-      if (!nameBase) {
-        nameBase =
-          lang === "en"
-            ? `col_${hint.cellIndex + 1}`
-            : `คอลัมน์_${hint.cellIndex + 1}`;
-      }
+        structuralCellName(parent.name, hint.cellIndex, lang);
+      if (!nameBase) continue;
       // Auto/ordinal: keep {{+}} but swap long/garbled labels for a short stem.
       if (fieldKindFinal === "auto") {
         if (looksLikeGarbledName(nameBase) || nameBase.length > 6) {
@@ -2536,20 +2648,20 @@ export function validateAiTagSuggestions(
             nameBase = stem;
           } else {
             nameBase =
-              lang === "en"
-                ? `col_${hint.cellIndex + 1}`
-                : `คอลัมน์_${hint.cellIndex + 1}`;
+              structuralCellName(parent.name, hint.cellIndex, lang) || "";
           }
         }
       }
-      if (looksLikeGarbledName(nameBase)) continue;
+      if (!nameBase || looksLikeGarbledName(nameBase)) continue;
       const name = uniqueName(
         nameBase,
         usedNames,
-        [hint.header, parent.name].filter(Boolean),
+        [hint.header].filter(Boolean),
         lang,
+        reservedLoopNames,
       );
-      if (!name || nameEqualsSourceValue(name, hint.cellText)) continue;
+      if (!name || reservedLoopNames.has(name)) continue;
+      if (nameEqualsSourceValue(name, hint.cellText)) continue;
       if (looksLikeGarbledName(name)) continue;
       const boolArms =
         fieldKindFinal === "bool"
@@ -2635,13 +2747,8 @@ export function validateAiTagSuggestions(
         let fieldKindFinal: AiTagDraftKind = fieldKind;
         let baseName =
           nameFromHeaderOrLabel(hint.header, null, lang, sampleText || null) ||
-          parentNameStem(parent.name, lang);
-        if (!baseName) {
-          baseName =
-            lang === "en"
-              ? `col_${hint.cellIndex + 1}`
-              : `คอลัมน์_${hint.cellIndex + 1}`;
-        }
+          structuralCellName(parent.name, hint.cellIndex, lang);
+        if (!baseName) continue;
         if (
           fieldKindFinal === "auto" &&
           (looksLikeGarbledName(baseName) || baseName.length > 6)
@@ -2650,18 +2757,18 @@ export function validateAiTagSuggestions(
           baseName =
             stem && !looksLikeGarbledName(stem) && stem.length <= 6
               ? stem
-              : lang === "en"
-                ? `col_${hint.cellIndex + 1}`
-                : `คอลัมน์_${hint.cellIndex + 1}`;
+              : structuralCellName(parent.name, hint.cellIndex, lang) || "";
         }
-        if (looksLikeGarbledName(baseName)) continue;
+        if (!baseName || looksLikeGarbledName(baseName)) continue;
         const name = uniqueName(
           baseName,
           usedNames,
-          [hint.header, parent.name].filter(Boolean),
+          [hint.header].filter(Boolean),
           lang,
+          reservedLoopNames,
         );
-        if (!name || (sampleText && nameEqualsSourceValue(name, sampleText))) continue;
+        if (!name || reservedLoopNames.has(name)) continue;
+        if (sampleText && nameEqualsSourceValue(name, sampleText)) continue;
         if (looksLikeGarbledName(name)) continue;
         const boolArms =
           fieldKindFinal === "bool"
@@ -2723,8 +2830,8 @@ export function validateAiTagSuggestions(
     }
   }
 
-  // After list-table wraps: delete every later row except summary-like / distinct
-  // fixed rows with no sample-like values (a91af7a behavior, structural).
+  // After list-table wraps: delete every later row except the trailing fixed
+  // block (subtotal / VAT / total / note) and other distinct non-sample rows.
   if (xml && usedPrototypeTables.size) {
     const protoRowByTable = new Map(
       prototypes.map((pr) => [pr.tableIndex, pr.rowIndexInTable]),
@@ -2741,14 +2848,19 @@ export function validateAiTagSuggestions(
       if (!protoRow) continue;
       const tableRows = allDataRows.filter((r) => r.tableIndex === row.tableIndex);
       const maxRi = Math.max(...tableRows.map((r) => r.rowIndexInTable));
+      const trailStart =
+        trailingFixedStart.get(row.tableIndex) ?? Number.POSITIVE_INFINITY;
+      const inTrailer = row.rowIndexInTable >= trailStart;
       if (
         !shouldDeleteLaterSampleRow(protoRow.cells, row.cells, {
           isAtTableEnd: row.rowIndexInTable === maxRi,
-          isNearEnd: row.rowIndexInTable >= maxRi - 1,
+          isNearEnd: inTrailer || row.rowIndexInTable >= maxRi - 1,
         })
       ) {
         continue;
       }
+      // Never delete the trailing totals/VAT/note block.
+      if (inTrailer) continue;
       const rowText = plainText.slice(row.plainStart, row.plainEnd);
       out.push({
         plainText: row.rowAnchor || rowText.slice(0, 80) || `row_${row.rowIndexInTable}`,
@@ -2785,11 +2897,15 @@ export function validateAiTagSuggestions(
       if (!protoRow) continue;
       const tableRows = allDataRows.filter((r) => r.tableIndex === row.tableIndex);
       const maxRi = Math.max(...tableRows.map((r) => r.rowIndexInTable));
+      const trailStart =
+        trailingFixedStart.get(row.tableIndex) ?? Number.POSITIVE_INFINITY;
+      const inTrailer = row.rowIndexInTable >= trailStart;
       if (
         shouldDeleteLaterSampleRow(protoRow.cells, row.cells, {
           isAtTableEnd: row.rowIndexInTable === maxRi,
-          isNearEnd: row.rowIndexInTable >= maxRi - 1,
-        })
+          isNearEnd: inTrailer || row.rowIndexInTable >= maxRi - 1,
+        }) &&
+        !inTrailer
       ) {
         continue;
       }
@@ -2818,12 +2934,9 @@ export function validateAiTagSuggestions(
               t &&
               t !== cellText &&
               !cellLooksLikeAmount(t) &&
-              !/^\d{1,4}$/.test(t),
+              !/\d/.test(t),
           );
-        const labelFallback =
-          siblingLabel ||
-          protoRow.headers.find((h) => String(h || "").trim()) ||
-          "";
+        const labelFallback = siblingLabel || "";
         // Caption cells beside an amount (e.g. "Total") stay fixed; tag the amount.
         const hasAmountSibling = row.cells.some(
           (c, j) => j !== ci && cellLooksLikeAmount(String(c.text || "")),
@@ -2835,28 +2948,35 @@ export function validateAiTagSuggestions(
         ) {
           continue;
         }
-        let baseName = nameFromHeaderOrLabel(header, labelFallback, lang, cellText);
-        // Amount / baht-text: prefer the sibling caption over a colliding column header.
-        if (cellLooksLikeAmount(cellText) && siblingLabel) {
-          const fromSibling = nameFromHeaderOrLabel(
-            siblingLabel,
-            header,
-            lang,
-            cellText,
-          );
-          if (fromSibling && !nameEqualsSourceValue(fromSibling, cellText)) {
-            baseName = fromSibling;
-          }
+        // Prefer free sibling totals/VAT caption for amounts; else column header.
+        // Never sample text. If the sibling name is already taken (baht-text field),
+        // fall back so the amount still gets a distinct name.
+        const fromHeader = nameFromHeaderOrLabel(header, null, lang, cellText);
+        const fromSibling =
+          siblingLabel
+            ? nameFromHeaderOrLabel(siblingLabel, header, lang, cellText)
+            : null;
+        let baseName = fromHeader || fromSibling || null;
+        if (
+          cellLooksLikeAmount(cellText) &&
+          fromSibling &&
+          !usedNames.has(fromSibling) &&
+          !reservedLoopNames.has(fromSibling)
+        ) {
+          baseName = fromSibling;
         }
         if (!baseName) continue;
         if (nameEqualsSourceValue(baseName, cellText)) continue;
+        if (looksLikeFillValue(baseName) || /\d{3,}/.test(baseName)) continue;
         const name = uniqueName(
           baseName,
           usedNames,
-          [header, labelFallback].filter(Boolean),
+          [header, labelFallback].filter((x) => x && !looksLikeFillValue(x)),
           lang,
+          reservedLoopNames,
         );
-        if (!name || nameEqualsSourceValue(name, cellText)) continue;
+        if (!name || reservedLoopNames.has(name)) continue;
+        if (nameEqualsSourceValue(name, cellText)) continue;
         const tag = buildTag("text", name, "", "");
         if (validateTag(tag)) continue;
         usedNames.add(name);
@@ -2918,23 +3038,16 @@ export function validateAiTagSuggestions(
         const header = String(hint.header || "").trim();
         let baseName =
           nameFromHeaderOrLabel(header, null, lang, sampleText || null) ||
-          parentNameStem(wrap.name, lang) ||
-          (lang === "en"
-            ? `col_${hint.cellIndex + 1}`
-            : `คอลัมน์_${hint.cellIndex + 1}`);
-        if (looksLikeGarbledName(baseName)) {
-          baseName =
-            lang === "en"
-              ? `col_${hint.cellIndex + 1}`
-              : `คอลัมน์_${hint.cellIndex + 1}`;
-        }
+          structuralCellName(wrap.name, hint.cellIndex, lang);
+        if (!baseName || looksLikeGarbledName(baseName)) continue;
         const name = uniqueName(
           baseName,
           usedNames,
-          [header, wrap.name].filter(Boolean),
+          [header].filter(Boolean),
           lang,
+          reservedLoopNames,
         );
-        if (!name) continue;
+        if (!name || reservedLoopNames.has(name)) continue;
         if (sampleText && nameEqualsSourceValue(name, sampleText)) continue;
         const fieldKind = sampleText
           ? inferSampleFieldKind(sampleText, {
@@ -3019,6 +3132,40 @@ export function validateAiTagSuggestions(
           (inner.wrapOccurrence ?? 0) === s.occurrence,
       );
       if (!hasInner) out.splice(i, 1);
+    }
+  }
+
+  // Scalars must never share a loop name; drop colliding scalars.
+  {
+    const loopNames = new Set(
+      out
+        .filter((s) => s.mode === "wrap" || s.mode === "wrap-row")
+        .map((s) => s.name),
+    );
+    for (let i = out.length - 1; i >= 0; i -= 1) {
+      const s = out[i]!;
+      if (s.mode === "wrap" || s.mode === "wrap-row" || s.mode === "delete-tr") {
+        continue;
+      }
+      if (loopNames.has(s.name)) out.splice(i, 1);
+    }
+  }
+
+  // Different fill values must not reuse one variable name (keep earliest).
+  {
+    const firstPlainByName = new Map<string, string>();
+    for (let i = 0; i < out.length; i += 1) {
+      const s = out[i]!;
+      if (s.mode === "wrap" || s.mode === "wrap-row" || s.mode === "delete-tr") {
+        continue;
+      }
+      const prev = firstPlainByName.get(s.name);
+      if (prev !== undefined && prev !== s.plainText) {
+        out.splice(i, 1);
+        i -= 1;
+        continue;
+      }
+      if (prev === undefined) firstPlainByName.set(s.name, s.plainText);
     }
   }
 
@@ -3260,14 +3407,30 @@ export function getAiSuggestChunkRetry(): number {
   return Math.min(4, Math.floor(n));
 }
 
-/** Per-chunk timeout: prefer longer than the global default so chunks finish. */
+/** Overall wall budget for one suggest request (under 5 minutes). */
+export const DEFAULT_AI_SUGGEST_OVERALL_MS = 300_000;
+
+/** Per-call timeout for suggest (single-call and chunk paths share this). */
 export function getAiSuggestChunkTimeoutMs(baseTimeoutMs?: number): number {
   const base =
     typeof baseTimeoutMs === "number" && Number.isFinite(baseTimeoutMs)
       ? Math.floor(baseTimeoutMs)
       : 90_000;
-  // Cap at 180s per chunk; floor at base.
-  return Math.min(180_000, Math.max(base, Math.floor(base * 1.5)));
+  // Cap at 180s per call; floor at max(base, 120s) so small docs aren't stuck at 90s.
+  return Math.min(180_000, Math.max(base, 120_000, Math.floor(base * 1.5)));
+}
+
+/** Alias — same longer timeout applies to the single-call (<16k) path. */
+export function getAiSuggestCallTimeoutMs(baseTimeoutMs?: number): number {
+  return getAiSuggestChunkTimeoutMs(baseTimeoutMs);
+}
+
+export function getAiSuggestOverallBudgetMs(baseTimeoutMs?: number): number {
+  const perCall = getAiSuggestCallTimeoutMs(baseTimeoutMs);
+  return Math.min(
+    DEFAULT_AI_SUGGEST_OVERALL_MS,
+    Math.max(perCall + 30_000, Math.floor(perCall * 1.5)),
+  );
 }
 
 export type ChunkCallOutcome = {
@@ -3520,6 +3683,10 @@ export async function suggestTemplateTags(
     buffer.byteLength > 0 &&
     buffer.byteLength <= DOCX_ATTACH_MAX_BYTES;
 
+  const suggestCallTimeoutMs = getAiSuggestCallTimeoutMs(opts?.timeoutMs);
+  const overallBudgetMs = getAiSuggestOverallBudgetMs(opts?.timeoutMs);
+  const budgetDeadline = Date.now() + overallBudgetMs;
+  const remainingBudgetMs = () => Math.max(0, budgetDeadline - Date.now());
   const callOpts = {
     providerId: provider.id,
     apiFamily: provider.apiFamily,
@@ -3528,7 +3695,7 @@ export async function suggestTemplateTags(
     filename,
     attachDocx,
     signal: opts?.signal,
-    timeoutMs: opts?.timeoutMs,
+    timeoutMs: suggestCallTimeoutMs,
   };
 
   const buildPromptForPlain = (plainSlice: string, truncated: boolean) =>
@@ -3546,13 +3713,22 @@ export async function suggestTemplateTags(
       docxAttached: attachDocx,
     });
 
-  const runFull = () =>
+  const runFull = (timeoutMs?: number) =>
     callSuggestProvider(
       buildPromptForPlain(plainText, plainTruncated),
       xml,
       buffer,
-      callOpts,
+      {
+        ...callOpts,
+        timeoutMs: Math.min(
+          timeoutMs ?? suggestCallTimeoutMs,
+          Math.max(5_000, remainingBudgetMs()),
+        ),
+      },
     );
+
+  let singleCallTimedOut = false;
+  let singleCallPartial = false;
 
   const chunkOutcomes: ChunkCallOutcome[] = [];
   const failedChunkIndexes: number[] = [];
@@ -3672,19 +3848,11 @@ export async function suggestTemplateTags(
       .fill(null)
       .map(() => []);
     let lastParsed: Record<string, unknown> | null = null;
-    const overallBudgetMs = Math.min(
-      900_000,
-      Math.max(
-        (callOpts.timeoutMs || 90_000) * 3,
-        getAiSuggestChunkTimeoutMs(callOpts.timeoutMs) * chunks.length + 30_000,
-      ),
-    );
-    const budgetDeadline = Date.now() + overallBudgetMs;
     let next = 0;
     const worker = async () => {
       while (true) {
         if (opts?.signal?.aborted) return;
-        if (Date.now() > budgetDeadline) return;
+        if (remainingBudgetMs() < 5_000) return;
         const i = next;
         next += 1;
         if (i >= chunks.length) return;
@@ -3729,52 +3897,44 @@ export async function suggestTemplateTags(
   let callResult: SuggestCallResult | null = null;
   if (preferChunkFirst) {
     callResult = await runChunked();
-  } else if (provider.apiFamily === "cursor") {
-    // Cursor has no temperature API — dual-pass union when the doc fits one call.
-    const passes: SuggestCallResult[] = [];
-    try {
-      passes.push(await runFull());
-    } catch (err) {
-      if (
-        chunkChars > 0 &&
-        plainText.length >= Math.min(12_000, chunkChars) &&
-        (isAiTimeoutError(err) || isRetryableAiError(err))
-      ) {
-        callResult = await runChunked();
-      } else {
-        throw err;
-      }
-    }
-    if (!callResult && passes.length) {
-      try {
-        if (!opts?.signal?.aborted) passes.push(await runFull());
-      } catch {
-        /* keep first pass */
-      }
-      const merged = mergeSuggestionRowsByPosition(
-        ...passes.map((p) => normalizeRawSuggestions(p.parsed)),
-      );
-      callResult = {
-        parsed: { ...(passes[passes.length - 1]?.parsed || {}), suggestions: merged },
-        rawText: passes.map((p) => p.rawText || "").filter(Boolean).join("\n\n"),
-      };
-    }
   } else {
+    // Single-call path (< chunk size, often <16k): longer timeout + budget;
+    // on timeout return partial (deterministic enrich) instead of failing thrice.
     try {
-      callResult = await runFull();
+      callResult = await runFull(suggestCallTimeoutMs);
     } catch (err) {
-      if (
-        chunkChars > 0 &&
-        plainText.length >= Math.min(12_000, chunkChars) &&
-        (isAiTimeoutError(err) || isRetryableAiError(err))
-      ) {
-        callResult = await runChunked();
+      if (isAiTimeoutError(err) || isRetryableAiError(err)) {
+        singleCallTimedOut = isAiTimeoutError(err);
+        singleCallPartial = true;
+        logAiCall({
+          route: "template/suggest-tags/single",
+          provider: provider.id,
+          model,
+          outcome: singleCallTimedOut ? "timeout" : "error",
+          errorClass: singleCallTimedOut
+            ? "AI_TIMEOUT"
+            : err instanceof Error
+              ? err.name
+              : "Error",
+          phase: "single_call_partial",
+        });
+        // Empty AI rows → validate still seeds wraps/contacts/totals.
+        callResult = {
+          parsed: { suggestions: [] },
+          rawText: `/* single_call_partial:${singleCallTimedOut ? "AI_TIMEOUT" : "ERROR"} */`,
+        };
       } else {
         throw err;
       }
     }
   }
-  if (!callResult) throw new Error("AI suggest produced no provider response");
+  if (!callResult) {
+    callResult = {
+      parsed: { suggestions: [] },
+      rawText: "/* no_provider_response */",
+    };
+    singleCallPartial = true;
+  }
 
   const finalize = (parsed: Record<string, unknown> | null, rawText: string) => {
     const suggestions = validateAiTagSuggestions(
@@ -3790,15 +3950,25 @@ export async function suggestTemplateTags(
   let { parsed, rawText } = callResult;
   let finalized = finalize(parsed, rawText);
 
-  // Thin: real retry, then deterministic validate/enrich already applied in finalize.
-  if (finalized.coverage.thin && !opts?.signal?.aborted) {
+  // Thin: repair within remaining budget, then keep the denser result.
+  if (
+    finalized.coverage.thin &&
+    !opts?.signal?.aborted &&
+    remainingBudgetMs() >= 20_000
+  ) {
     try {
       const repairPrompt =
         buildPromptForPlain(plainText, plainTruncated) +
         "\n\nREPAIR PASS: prior suggestions were too thin. Emit EVERY missing fill-in " +
         "(letterhead, numbers, parties, all prototype table cells, distinct-row totals, " +
         "label-followed blanks). Same determinism rules. Return full JSON suggestions array.";
-      const retry = await callSuggestProvider(repairPrompt, xml, buffer, callOpts);
+      const retry = await callSuggestProvider(repairPrompt, xml, buffer, {
+        ...callOpts,
+        timeoutMs: Math.min(
+          suggestCallTimeoutMs,
+          Math.max(10_000, remainingBudgetMs() - 5_000),
+        ),
+      });
       const mergedRaw = mergeSuggestionRowsByPosition(
         normalizeRawSuggestions(parsed),
         normalizeRawSuggestions(retry.parsed),
@@ -3830,15 +4000,22 @@ export async function suggestTemplateTags(
   if (failedChunkIndexes.length) {
     const regions = [...new Set(failedChunkIndexes)]
       .sort((a, b) => a - b)
-      .map((i) => `chunk ${i + 1}`)
+      .map((i) => `ช่วงที่ ${i + 1}`)
       .join(", ");
     warnParts.push(
-      `Partial AI result — failed regions: ${regions} (${failedChunkIndexes.length} chunk(s) after retries)`,
+      `ผล AI บางส่วน — ช่วงที่ล้มเหลว: ${regions} (${failedChunkIndexes.length} ช่วง หลังลองใหม่)`,
+    );
+  }
+  if (singleCallPartial) {
+    warnParts.push(
+      singleCallTimedOut
+        ? "ผล AI บางส่วน — การเรียกครั้งเดียวหมดเวลา ใช้การเติมโครงสร้างแทน"
+        : "ผล AI บางส่วน — การเรียกครั้งเดียวล้มเหลว ใช้การเติมโครงสร้างแทน",
     );
   }
   if (finalized.coverage.thin) {
     warnParts.push(
-      `AI tag coverage still thin (${finalized.coverage.actual}/${finalized.coverage.expected}) — review letterhead, parties, tables, and totals`,
+      `ความครอบคลุมแท็กยังบาง (${finalized.coverage.actual}/${finalized.coverage.expected}) — ตรวจหัวจดหมาย ภาคี ตาราง และยอดรวม`,
     );
   }
   const warning = warnParts.length ? warnParts.join(" · ") : undefined;

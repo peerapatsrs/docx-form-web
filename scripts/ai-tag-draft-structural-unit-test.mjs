@@ -197,11 +197,10 @@ await check("garbled near-duplicate token names rejected", async () => {
   assert.equal(looksLikeGarbledName("pass_pass_status"), true);
   assert.equal(looksLikeGarbledName("abababxx"), true);
   assert.equal(looksLikeGarbledName("item_amount"), false);
-  assert.equal(looksLikeGarbledName("จำลยที่"), true, "OCR-cut typo header");
-  assert.equal(looksLikeGarbledName("+จำลยที่"), true);
   assert.equal(looksLikeGarbledName("☐"), true, "checkbox arm alone");
   assert.equal(looksLikeGarbledName("lbl_27qmif"), true, "hash fallback name");
-  assert.equal(looksLikeGarbledName("จำเลยที่"), false);
+  assert.equal(looksLikeGarbledName("จำนวน_รวมทั้งสิ้น_1116"), true, "sample+digits");
+  assert.equal(looksLikeGarbledName("amt_total"), false);
 });
 
 await check("coverage warns when ~27 tags on ~50 expected", async () => {
@@ -247,18 +246,104 @@ await check("chunk helpers: smaller default + timeout floor", async () => {
   const {
     DEFAULT_AI_SUGGEST_CHUNK_CHARS,
     DEFAULT_AI_SUGGEST_CHUNK_RETRY,
+    DEFAULT_AI_SUGGEST_OVERALL_MS,
     getAiSuggestChunkConcurrency,
     getAiSuggestChunkRetry,
     getAiSuggestChunkTimeoutMs,
+    getAiSuggestCallTimeoutMs,
+    getAiSuggestOverallBudgetMs,
     splitPlainTextChunks,
   } = await loadDraft();
   assert.ok(DEFAULT_AI_SUGGEST_CHUNK_CHARS <= 20_000);
   assert.equal(getAiSuggestChunkConcurrency(), 1);
   assert.equal(getAiSuggestChunkRetry(), DEFAULT_AI_SUGGEST_CHUNK_RETRY);
   assert.ok(DEFAULT_AI_SUGGEST_CHUNK_RETRY >= 1);
-  assert.ok(getAiSuggestChunkTimeoutMs(90_000) >= 90_000);
+  assert.ok(getAiSuggestChunkTimeoutMs(90_000) >= 120_000);
+  assert.equal(getAiSuggestCallTimeoutMs(90_000), getAiSuggestChunkTimeoutMs(90_000));
+  assert.ok(DEFAULT_AI_SUGGEST_OVERALL_MS <= 300_000);
+  assert.ok(getAiSuggestOverallBudgetMs(90_000) <= 300_000);
   const chunks = splitPlainTextChunks("x".repeat(50_000), 16_000);
   assert.ok(chunks.length >= 3, `expected >=3 chunks got ${chunks.length}`);
+  // Small doc (<16k) stays a single chunk — timeout helpers still apply.
+  const small = splitPlainTextChunks("y".repeat(8_000), 16_000);
+  assert.equal(small.length, 1, "doc under 16k is one call");
+  assert.ok(getAiSuggestCallTimeoutMs(90_000) > 90_000, "single-call timeout > 90s");
+});
+
+await check("trailing fixed rows kept (VAT/total/note block)", async () => {
+  const { findTrailingFixedRowStart, shouldDeleteLaterSampleRow, isSummaryLikeRow } =
+    await loadDraft();
+  const proto = [
+    { text: "1" },
+    { text: "AlphaWidget" },
+    { text: "100" },
+  ];
+  const later = [
+    { rowIndexInTable: 2, cells: [{ text: "2" }, { text: "BetaWidget" }, { text: "200" }] },
+    { rowIndexInTable: 3, cells: [{ text: "" }, { text: "Subtotal" }, { text: "900" }] },
+    { rowIndexInTable: 4, cells: [{ text: "" }, { text: "VAT" }, { text: "63" }] },
+    { rowIndexInTable: 5, cells: [{ text: "" }, { text: "Total" }, { text: "963" }] },
+    { rowIndexInTable: 6, cells: [{ text: "" }, { text: "Note line" }, { text: "" }] },
+  ];
+  const start = findTrailingFixedRowStart(proto, later);
+  assert.equal(start, 3, `trailer starts at first summary got ${start}`);
+  for (const row of later.filter((r) => r.rowIndexInTable >= start)) {
+    assert.equal(
+      shouldDeleteLaterSampleRow(proto, row.cells, {
+        isAtTableEnd: row.rowIndexInTable === 6,
+        isNearEnd: true,
+      }),
+      false,
+      `keep trailer row ${row.rowIndexInTable}`,
+    );
+    assert.equal(
+      isSummaryLikeRow(proto, row.cells, {
+        isAtTableEnd: row.rowIndexInTable === 6,
+        isNearEnd: true,
+      }) ||
+        !shouldDeleteLaterSampleRow(proto, row.cells, {
+          isAtTableEnd: row.rowIndexInTable === 6,
+          isNearEnd: true,
+        }),
+      true,
+    );
+  }
+});
+
+await check("scalar never shares loop name", async () => {
+  const { validateAiTagSuggestions } = await loadDraft();
+  const xml = readFileSync(join(fixturesDir, "leftover-sample-rows.xml"), "utf8");
+  const plain = "NoItemAmt1AlphaWidget1002BetaWidget2003GammaWidget300Total600";
+  const out = validateAiTagSuggestions(
+    plain,
+    [
+      {
+        plainText: "1AlphaWidget100",
+        name: "item_rows",
+        kind: "list-table",
+        mode: "wrap-row",
+      },
+      {
+        plainText: "600",
+        name: "item_rows",
+        kind: "text",
+        mode: "replace",
+      },
+    ],
+    xml,
+    "en",
+  );
+  const wrap = out.find((s) => s.mode === "wrap-row");
+  assert.ok(wrap, "wrap present");
+  assert.ok(
+    !out.some(
+      (s) =>
+        s.mode !== "wrap-row" &&
+        s.mode !== "delete-tr" &&
+        s.name === wrap.name,
+    ),
+    "no scalar shares loop name",
+  );
 });
 
 await check("no banned hardcoding markers in ai-tag-draft source", async () => {
@@ -275,6 +360,11 @@ await check("no banned hardcoding markers in ai-tag-draft source", async () => {
   assert.doesNotMatch(src, /lang\s*===\s*["']en["']\s*\?\s*["']value["']/);
   assert.doesNotMatch(src, /\?\s*["']ค่า["']/);
   assert.doesNotMatch(src, /_ข้อความ/);
+  assert.doesNotMatch(src, /blank_field/);
+  assert.doesNotMatch(src, /ช่องว่าง/);
+  assert.doesNotMatch(src, /คอลัมน์_/);
+  assert.doesNotMatch(src, /col_\$\{/);
+  assert.doesNotMatch(src, /return\s+["']จำนวน["']/);
 });
 
 if (failed) {

@@ -2712,9 +2712,12 @@ export function createApi(options: {
 
       const { assertDocxReadable } = await import("./docx-errors");
       await assertDocxReadable(buffer);
-      const { parseAiTagNameLanguage, suggestTemplateTags } = await import(
-        "./ai-tag-draft"
-      );
+      const {
+        parseAiTagNameLanguage,
+        suggestTemplateTags,
+        getAiSuggestCallTimeoutMs,
+        getAiSuggestOverallBudgetMs,
+      } = await import("./ai-tag-draft");
       const nameLanguage = parseAiTagNameLanguage(formNameLanguage);
 
       let staffRaw = false;
@@ -2731,7 +2734,12 @@ export function createApi(options: {
       }
 
       const payloadBytes = buffer.byteLength;
-      const perAttemptTimeoutMs = getAiTimeoutMsForPayload(payloadBytes);
+      // Suggest uses its own longer per-call timeout + <5min overall budget;
+      // do not burn 3×90s retries — partial structural results are preferred.
+      const perAttemptTimeoutMs = getAiSuggestCallTimeoutMs(
+        getAiTimeoutMsForPayload(payloadBytes),
+      );
+      const overallSuggestMs = getAiSuggestOverallBudgetMs(perAttemptTimeoutMs);
 
       const runSuggestOnce = async (
         signal: AbortSignal,
@@ -2781,6 +2789,9 @@ export function createApi(options: {
             signal: outer,
             payloadBytes,
             timeoutMs: perAttemptTimeoutMs,
+            // One attempt at the API layer — suggestTemplateTags handles partials.
+            retryMax: 0,
+            overallTimeoutMs: overallSuggestMs,
             route: "/api/template/suggest-tags",
             provider: clientProvider,
             model: clientModel,

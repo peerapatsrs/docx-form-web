@@ -146,18 +146,28 @@ async function waitWithOptionalAbort<T>(
     if (isAiTimeoutError(signal.reason)) throw new AiTimeoutError();
     throw new Error("CURSOR_AGENT_CANCELLED");
   }
+  // Detach from the provider promise after abort so we never wait past the
+  // AbortSignal (Cursor SDK may ignore cancel and keep running for minutes).
   return new Promise<T>((resolve, reject) => {
+    let settled = false;
     const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
       if (isAiTimeoutError(signal.reason)) reject(new AiTimeoutError());
       else reject(new Error("CURSOR_AGENT_CANCELLED"));
     };
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then(
       (value) => {
+        if (settled) return;
+        settled = true;
         signal.removeEventListener("abort", onAbort);
         resolve(value);
       },
       (err) => {
+        if (settled) return;
+        settled = true;
         signal.removeEventListener("abort", onAbort);
         reject(err);
       },

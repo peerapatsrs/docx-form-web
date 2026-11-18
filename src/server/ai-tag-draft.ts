@@ -23,6 +23,8 @@ import {
   getGeminiApiBase,
 } from "./ai-providers";
 import {
+  AiTimeoutError,
+  createAiTimeoutController,
   isAiTimeoutError,
   isRetryableAiError,
   logAiCall,
@@ -280,6 +282,8 @@ export function looksLikeGarbledName(name: string): boolean {
   if (/^(true|false|yes|no|on|off)$/i.test(s)) return true;
   // Stable hash fallback from englishNameFromLabel — not a readable field name.
   if (/^lbl_[a-z0-9]+$/i.test(s)) return true;
+  // Bare generic stems the model copies from old prompts/fallbacks — never field ids.
+  if (/^(รายการ|ค่า|value|rows|loop)$/iu.test(s)) return true;
   // Long full-header copies (joined multi-column captions).
   if (s.length > 24) return true;
   const parts = s.split(/[_/-]+/u).filter(Boolean);
@@ -301,8 +305,12 @@ export function looksLikeGarbledName(name: string): boolean {
     for (let j = i + 1; j < parts.length; j += 1) {
       const b = parts[j]!;
       if (a === b && a.length >= 2) return true;
+      // Near-duplicate tokens only when lengths are close (โทร vs โทรศัพท์ is OK
+      // for label+model disambiguation; foo vs foofoo still catches OCR junk).
       if (a.length >= 3 && b.length >= 3) {
-        if (a.includes(b) || b.includes(a)) return true;
+        const lo = Math.min(a.length, b.length);
+        const hi = Math.max(a.length, b.length);
+        if (lo >= hi * 0.7 && (a.includes(b) || b.includes(a))) return true;
       }
     }
     // Repeated chunk inside one token (bounded — no catastrophic backtracking).
@@ -1826,6 +1834,31 @@ export function isSummaryLikeRow(
   );
 }
 
+/** Blank / ordinal-only later rows are sample clones, not totals/notes. */
+export function isBlankSampleCloneRow(
+  proto: ReadonlyArray<{ text: string }>,
+  row: ReadonlyArray<{ text: string }>,
+): boolean {
+  const rf = countFilledCells(row);
+  if (rf === 0) return true;
+  const filled = row.filter((c) => String(c.text ?? "").trim());
+  if (
+    filled.length === 1 &&
+    /^\d{1,2}$/.test(String(filled[0]!.text ?? "").trim()) &&
+    !cellLooksLikeAmount(String(filled[0]!.text ?? ""))
+  ) {
+    return true;
+  }
+  // Same column count, all empty or only matching proto empties — blank template clone.
+  if (row.length === proto.length && rf <= 1 && !isSummaryLikeRow(proto, row, {
+    isAtTableEnd: true,
+    isNearEnd: true,
+  })) {
+    return tableRowsSameSampleShape(proto, row) || rf === 0;
+  }
+  return false;
+}
+
 /**
  * Index of the first trailing fixed row (subtotal/VAT/total/note block) after the
  * last sample-shaped clone. Returns Infinity when there is no trailing block.
@@ -1841,6 +1874,8 @@ export function findTrailingFixedRowStart(
   let startIdx = ordered.length;
   for (let i = ordered.length - 1; i >= 0; i -= 1) {
     const row = ordered[i]!;
+    // Blank template clones are deleted with samples — never part of the trailer.
+    if (isBlankSampleCloneRow(proto, row.cells)) break;
     const opts = {
       isAtTableEnd: i === ordered.length - 1,
       isNearEnd: true,
@@ -1901,6 +1936,7 @@ export function shouldDeleteLaterSampleRow(
   row: ReadonlyArray<{ text: string }>,
   opts: { isAtTableEnd: boolean; isNearEnd?: boolean },
 ): boolean {
+  if (isBlankSampleCloneRow(proto, row)) return true;
   if (isSummaryLikeRow(proto, row, opts)) return false;
   if (
     !rowHasSampleLikeValues(proto, row) &&
@@ -1984,7 +2020,7 @@ function resolveParagraphListWrapSpan(
  * Empty cells use mode fill-empty-tc (cellIndex + row anchor); XML hints enrich
  * blanks AND non-empty sample cells under headers inside accepted list-table rows.
  * Table tags (list-table / fill-empty-tc / cell fields) only on the first data row
- * per <w:tbl>. Paragraph lists: first repeating unit only; later units hard-occupied.
+ * per <w:tbl>. Paragraph lists: wrap the first unit; later units stay taggable.
  */
 export function validateAiTagSuggestions(
   plainText: string,
@@ -2096,7 +2132,7 @@ export function validateAiTagSuggestions(
 
   // Seed paragraph-list wraps for consecutive numbered prose blocks.
   // Prepend so first-unit seeds win over over-wide model wraps (stable sort keeps
-  // earlier equal-rank wraps). Soft-occupy prototype + hard-occupy later units.
+  // earlier equal-rank wraps). Later units remain available for fill-in enrich.
   if (xml && paraListHints.length) {
     const paraSeeds: PendingRow[] = [];
     for (const h of paraListHints) {
@@ -2121,7 +2157,9 @@ export function validateAiTagSuggestions(
   // Among scalar replaces: longer VALUE first (list phones before a short prefix),
   // then prefer rows that already have an explicit label (avoid glued-stem rows
   // stealing the locus). Keep wrap/fill order stable.
-  const scalarValueKey = (p: PendingRow): { len: number; labeled: number } => {
+  const scalarValueKey = (
+    p: PendingRow,
+  ): { len: number; labeled: number; amount: number } => {
     const label = String(
       p.raw.label ?? p.raw.fieldLabel ?? p.raw.field_label ?? p.raw.caption ?? "",
     ).trim();
@@ -2138,7 +2176,12 @@ export function validateAiTagSuggestions(
         .replace(new RegExp(`^${PLAIN_SEP_CLASS}*`, "u"), "");
     }
     if (/^[\(（].+[\)）]$/u.test(value)) value = value.slice(1, -1).trim();
-    return { len: value.length, labeled: label ? 1 : 0 };
+    return {
+      len: value.length,
+      labeled: label ? 1 : 0,
+      // Amounts claim the clean label before long baht-text siblings.
+      amount: cellLooksLikeAmount(value) ? 1 : 0,
+    };
   };
   pending.sort((a, b) => {
     const rank = (p: PendingRow) => (p.listLike ? 2 : p.fillEmpty ? 1 : 0);
@@ -2147,6 +2190,7 @@ export function validateAiTagSuggestions(
     if (rank(a) !== 0) return 0;
     const ka = scalarValueKey(a);
     const kb = scalarValueKey(b);
+    if (kb.amount !== ka.amount) return kb.amount - ka.amount;
     if (kb.len !== ka.len) return kb.len - ka.len;
     return kb.labeled - ka.labeled;
   });
@@ -2188,8 +2232,8 @@ export function validateAiTagSuggestions(
     const headerHintEarly = String(
       row.headerHint ?? row.header ?? row.columnHeader ?? "",
     ).trim();
-    // Prefer header/label for stable cross-run naming; keep a longer model name
-    // when it extends that label (disambiguates amount vs baht-text, etc.).
+    // Prefer header/label for stable cross-run naming — never let the model
+    // override a header/label-derived name (Jaccard stability across runs).
     // Never derive scalar names from sample/fill cell text.
     const fromHeaderOrLabel = nameFromHeaderOrLabel(
       headerHintEarly,
@@ -2206,6 +2250,8 @@ export function validateAiTagSuggestions(
       resolveVarName(String(row.name ?? "").trim(), lang) ||
       resolveVarName(nameSource, lang) ||
       "";
+    // Header/label wins for cross-run stability. Allow a model name only when it
+    // is a strict extension of that label (amount vs baht-text disambiguation).
     let baseName = fromHeaderOrLabel || modelResolved || "";
     if (
       fromHeaderOrLabel &&
@@ -2229,10 +2275,18 @@ export function validateAiTagSuggestions(
       baseName = fromHeaderOrLabel || "";
     }
     if (!baseName || looksLikeGarbledName(baseName)) continue;
+    // Never tag rate/caption labels (e.g. text with % that is not an amount).
+    if (
+      !isListKind(kind) &&
+      /%/.test(plain) &&
+      !cellLooksLikeAmount(plain)
+    ) {
+      continue;
+    }
     const name = uniqueName(
       baseName,
       usedNames,
-      [anchorLabel, headerHintEarly].filter(Boolean),
+      [anchorLabel, headerHintEarly, modelResolved].filter(Boolean),
       lang,
       isListKind(kind) ? undefined : reservedLoopNames,
     );
@@ -2369,11 +2423,8 @@ export function validateAiTagSuggestions(
             null;
           if (hint) {
             usedParaListStems.add(hint.stem);
-            // Hard-occupy later sample units so enrichment / stray fields cannot
-            // fight the paragraph list (mirrors leaving later table rows alone).
-            if (hint.groupEnd > hint.plainEnd) {
-              occupied.push({ start: hint.plainEnd, end: hint.groupEnd });
-            }
+            // Do NOT hard-occupy later units — deterministic enrich must still
+            // tag fill-ins in defendants/parties 2…n when AI output is partial.
           }
         }
         break;
@@ -2489,6 +2540,8 @@ export function validateAiTagSuggestions(
         row.occurrence ?? row.occ,
       );
       const orderedHits = [...hits].sort((a, b) => a.start - b.start);
+      /** One claimed name per wrap scope — multi-occ outside wraps share one id. */
+      const nameByWrapScope = new Map<string, string>();
       for (const hit of orderedHits) {
         if (out.length + acceptedMany.length >= MAX_SUGGESTIONS) break;
         const start = hit.start;
@@ -2497,6 +2550,25 @@ export function validateAiTagSuggestions(
         if (!fieldSpanAllowed(start, end, occupied)) continue;
         if (!plainDigitMatchAllowed(plainText, start, matchPlain)) continue;
         if (!plainValueTailOk(plainText, start, matchPlain)) continue;
+        // Reject over-wide AI replaces of whole later paragraph-list units
+        // (stem + ordinal + body). Fill-ins inside those units are enriched later.
+        {
+          let skipLaterUnit = false;
+          for (const h of paraListHints) {
+            if (!(h.groupEnd > h.plainEnd)) continue;
+            if (start < h.plainEnd || start >= h.groupEnd) continue;
+            if (h.stem && matchPlain.includes(h.stem)) {
+              skipLaterUnit = true;
+              break;
+            }
+            // Near-full later span is a unit dump, not a fill-in.
+            if (end - start >= Math.floor((h.groupEnd - h.plainEnd) / Math.max(1, h.unitCount - 1)) * 0.75) {
+              skipLaterUnit = true;
+              break;
+            }
+          }
+          if (skipLaterUnit) continue;
+        }
         const role = tableRowRoleForSpan(xml, start, end, prototypes);
         // Later sample data rows stay blocked. Unique footer/total cells in the
         // same <w:tbl> (e.g. รวมทั้งสิ้น 1,116) may still tag when labeled/row
@@ -2531,7 +2603,25 @@ export function validateAiTagSuggestions(
             ? isRunCol(sampleMeta.tableIndex, sampleMeta.cellIndex)
             : null,
         });
-        const tag = buildTag(fieldKind, name, trueText, falseText);
+        const scopeKey = parent
+          ? `${parent.wrapTag}|${parent.wrapOccurrence}`
+          : "";
+        let hitName = nameByWrapScope.get(scopeKey);
+        if (!hitName) {
+          // Qualify with wrap stem so the same header across loops stays unique.
+          const claimed = uniqueName(
+            name,
+            usedNames,
+            [anchorLabel, headerHintEarly, parent?.name || ""].filter(Boolean),
+            lang,
+            reservedLoopNames,
+          );
+          if (!claimed || reservedLoopNames.has(claimed)) continue;
+          hitName = claimed;
+          nameByWrapScope.set(scopeKey, hitName);
+          usedNames.add(hitName);
+        }
+        const tag = buildTag(fieldKind, hitName, trueText, falseText);
         if (validateTag(tag)) continue;
 
         // occurrence among identical matchPlain spans in document order
@@ -2541,7 +2631,7 @@ export function validateAiTagSuggestions(
           plainText: matchPlain,
           occurrence: occIdx,
           plainStart: start,
-          name,
+          name: hitName,
           kind: fieldKind,
           tag,
           mode: "replace",
@@ -2557,7 +2647,6 @@ export function validateAiTagSuggestions(
     }
 
     if (acceptedMany.length) {
-      usedNames.add(name);
       out.push(...acceptedMany);
       continue;
     }
@@ -2635,7 +2724,7 @@ export function validateAiTagSuggestions(
         cellIndex: hint.cellIndex,
         isRunColumn: isRunCol(hint.tableIndex, hint.cellIndex),
       });
-      let fieldKindFinal: AiTagDraftKind = fieldKind;
+      const fieldKindFinal: AiTagDraftKind = fieldKind;
       let nameBase =
         nameFromHeaderOrLabel(hint.header, null, lang, hint.cellText) ||
         structuralCellName(parent.name, hint.cellIndex, lang);
@@ -2744,7 +2833,7 @@ export function validateAiTagSuggestions(
               isRunColumn: isRunCol(hint.tableIndex, hint.cellIndex),
             })
           : "text";
-        let fieldKindFinal: AiTagDraftKind = fieldKind;
+        const fieldKindFinal: AiTagDraftKind = fieldKind;
         let baseName =
           nameFromHeaderOrLabel(hint.header, null, lang, sampleText || null) ||
           structuralCellName(parent.name, hint.cellIndex, lang);
@@ -2822,6 +2911,121 @@ export function validateAiTagSuggestions(
           wrapTag: parent.wrapTag,
           wrapOccurrence: parent.wrapOccurrence,
           headerHint: hint.header,
+          ...(fieldKindFinal === "bool"
+            ? { trueText: boolArms.trueText, falseText: boolArms.falseText }
+            : {}),
+        });
+      }
+    }
+  }
+
+  // Ensure EVERY prototype cell under an accepted list-table wrap is tagged
+  // (blank templates often lack header hints — walk the row cells directly).
+  if (xml && softWraps.length) {
+    for (const wrap of softWraps) {
+      if (typeof wrap.tableIndex !== "number") continue;
+      const proto = prototypes.find((p) => p.tableIndex === wrap.tableIndex);
+      if (!proto) continue;
+      const protoRow = allDataRows.find(
+        (r) =>
+          r.tableIndex === wrap.tableIndex &&
+          r.rowIndexInTable === proto.rowIndexInTable,
+      );
+      if (!protoRow) continue;
+      for (let ci = 0; ci < protoRow.cells.length; ci += 1) {
+        if (out.length >= MAX_SUGGESTIONS + CONTACT_ENRICH_SLACK) break;
+        const key = cellKey(wrap.tableIndex, proto.rowIndexInTable, ci);
+        if (usedCells.has(key)) continue;
+        const cellText = String(protoRow.cells[ci]?.text || "").trim();
+        const header = String(protoRow.headers[ci] || "").trim();
+        const fieldKind = cellText
+          ? inferSampleFieldKind(cellText, {
+              header,
+              cellIndex: ci,
+              isRunColumn: isRunCol(wrap.tableIndex, ci),
+            })
+          : "text";
+        const fieldKindFinal: AiTagDraftKind = fieldKind;
+        let baseName =
+          nameFromHeaderOrLabel(header, null, lang, cellText || null) ||
+          structuralCellName(wrap.name, ci, lang);
+        if (!baseName) continue;
+        if (
+          fieldKindFinal === "auto" &&
+          (looksLikeGarbledName(baseName) || baseName.length > 6)
+        ) {
+          baseName = structuralCellName(wrap.name, ci, lang) || baseName;
+        }
+        if (looksLikeGarbledName(baseName)) continue;
+        const name = uniqueName(
+          baseName,
+          usedNames,
+          [header].filter(Boolean),
+          lang,
+          reservedLoopNames,
+        );
+        if (!name || reservedLoopNames.has(name)) continue;
+        if (cellText && nameEqualsSourceValue(name, cellText)) continue;
+        const boolArms =
+          fieldKindFinal === "bool"
+            ? normalizeBoolArms(cellText || DEFAULT_BOOL_TRUE_TEXT, "")
+            : { trueText: "", falseText: "" };
+        const tag = buildTag(
+          fieldKindFinal,
+          name,
+          boolArms.trueText,
+          boolArms.falseText,
+        );
+        if (validateTag(tag)) continue;
+        usedNames.add(name);
+        usedCells.add(key);
+        if (cellText) {
+          const loc = findCellTextInRow(
+            plainText,
+            cellText,
+            protoRow.plainStart,
+            protoRow.plainEnd,
+          );
+          if (loc && fieldSpanAllowed(loc.start, loc.end, occupied)) {
+            occupied.push({ start: loc.start, end: loc.end });
+            out.push({
+              plainText: cellText,
+              occurrence: loc.occurrence,
+              plainStart: loc.start,
+              name,
+              kind: fieldKindFinal,
+              tag,
+              mode: "replace",
+              wrapTag: wrap.wrapTag,
+              wrapOccurrence: wrap.wrapOccurrence,
+              cellIndex: ci,
+              tableIndex: wrap.tableIndex,
+              rowIndexInTable: proto.rowIndexInTable,
+              headerHint: header || undefined,
+              ...(fieldKindFinal === "bool"
+                ? {
+                    trueText: boolArms.trueText,
+                    falseText: boolArms.falseText,
+                  }
+                : {}),
+            });
+            continue;
+          }
+        }
+        out.push({
+          plainText: protoRow.rowAnchor || plainText.slice(proto.plainStart, proto.plainEnd),
+          occurrence: protoRow.occurrence >= 0 ? protoRow.occurrence : 0,
+          plainStart: protoRow.plainStart,
+          name,
+          kind: fieldKindFinal,
+          tag,
+          mode: "fill-empty-tc",
+          cellIndex: ci,
+          tableIndex: wrap.tableIndex,
+          rowIndexInTable: proto.rowIndexInTable,
+          wrapTag: wrap.wrapTag,
+          wrapOccurrence: wrap.wrapOccurrence,
+          headerHint: header || undefined,
           ...(fieldKindFinal === "bool"
             ? { trueText: boolArms.trueText, falseText: boolArms.falseText }
             : {}),
@@ -2937,15 +3141,24 @@ export function validateAiTagSuggestions(
               !/\d/.test(t),
           );
         const labelFallback = siblingLabel || "";
-        // Caption cells beside an amount (e.g. "Total") stay fixed; tag the amount.
+        // Caption cells beside an amount stay fixed (Total / VAT label with %).
+        // Never overwrite rate/caption labels — only tag value cells.
         const hasAmountSibling = row.cells.some(
           (c, j) => j !== ci && cellLooksLikeAmount(String(c.text || "")),
         );
-        if (
-          hasAmountSibling &&
+        // Short captions / rate labels stay fixed; long baht-text (no digits) is a value.
+        const looksLikeCaption =
           !cellLooksLikeAmount(cellText) &&
-          !/\d/.test(cellText)
-        ) {
+          (/%/.test(cellText) ||
+            /\(\s*\d/.test(cellText) ||
+            (!/\d/.test(cellText) &&
+              cellText.length >= 2 &&
+              cellText.length <= 24));
+        if (hasAmountSibling && looksLikeCaption) {
+          continue;
+        }
+        // Standalone caption-only cells with a rate marker are never fill values.
+        if (/%/.test(cellText) && !cellLooksLikeAmount(cellText)) {
           continue;
         }
         // Prefer free sibling totals/VAT caption for amounts; else column header.
@@ -2998,6 +3211,131 @@ export function validateAiTagSuggestions(
     }
   }
 
+  // Tag fill-ins in paragraph-list units 2…n (defendants/parties after the wrap).
+  // Keyword-free: tokens shared with the first unit are structural labels; tokens
+  // unique to later units are fill values (names, addresses, ids).
+  if (xml && paraListHints.length) {
+    const wordTokRe = /[\u0E00-\u0E7FA-Za-z]{2,80}/gu;
+    const collectToks = (span: string): string[] => span.match(wordTokRe) || [];
+    const escapeRe = (s: string) =>
+      String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    for (const hint of paraListHints) {
+      if (!(hint.groupEnd > hint.plainEnd)) continue;
+      const firstUnit = plainText.slice(hint.plainStart, hint.plainEnd);
+      const firstTokSet = new Set(collectToks(firstUnit));
+      const stem =
+        parentNameStem(
+          lang === "en" ? hint.suggestedNameEn : hint.suggestedNameTh,
+          lang,
+        ) ||
+        resolveVarName(hint.stem, lang) ||
+        "field";
+
+      // Split the group into unit spans via stem+ordinal anchors (no keywords).
+      const unitStarts: number[] = [hint.plainStart];
+      if (hint.stem) {
+        const anchorRe = new RegExp(
+          `${escapeRe(hint.stem)}\\s*[0-9๐-๙]+`,
+          "gu",
+        );
+        const group = plainText.slice(hint.plainStart, hint.groupEnd);
+        let am: RegExpExecArray | null;
+        while ((am = anchorRe.exec(group)) !== null) {
+          const abs = hint.plainStart + am.index;
+          if (abs > hint.plainStart) unitStarts.push(abs);
+        }
+      }
+      unitStarts.push(hint.groupEnd);
+
+      let laterSlot = 0;
+      for (let ui = 1; ui < unitStarts.length - 1; ui += 1) {
+        const uStart = unitStarts[ui]!;
+        const uEnd = unitStarts[ui + 1]!;
+        if (!(uEnd > uStart)) continue;
+        const unitText = plainText.slice(uStart, uEnd);
+
+        // Digit runs that look like IDs / case numbers (length ≥ 5).
+        const idRe = /\d{1,2}-\d{4}-\d{5}-\d{2}-\d|\d{5,13}/g;
+        let im: RegExpExecArray | null;
+        while ((im = idRe.exec(unitText)) !== null) {
+          if (out.length >= MAX_SUGGESTIONS + CONTACT_ENRICH_SLACK) break;
+          const start = uStart + im.index;
+          const end = start + im[0].length;
+          if (!fieldSpanAllowed(start, end, occupied)) continue;
+          if (!plainDigitMatchAllowed(plainText, start, im[0])) continue;
+          const base = `${stem}.id`;
+          const name = uniqueName(
+            base,
+            usedNames,
+            [hint.stem, stem].filter(Boolean),
+            lang,
+            reservedLoopNames,
+          );
+          if (!name || reservedLoopNames.has(name)) continue;
+          const tag = buildTag("text", name, "", "");
+          if (validateTag(tag)) continue;
+          const allStarts = findOccurrenceStarts(plainText, im[0]);
+          const occIdx = Math.max(0, allStarts.indexOf(start));
+          usedNames.add(name);
+          occupied.push({ start, end });
+          out.push({
+            plainText: im[0],
+            occurrence: occIdx,
+            plainStart: start,
+            name,
+            kind: "text",
+            tag,
+            mode: "replace",
+          });
+        }
+
+        wordTokRe.lastIndex = 0;
+        let tm: RegExpExecArray | null;
+        while ((tm = wordTokRe.exec(unitText)) !== null) {
+          if (out.length >= MAX_SUGGESTIONS + CONTACT_ENRICH_SLACK) break;
+          const tok = tm[0];
+          if (tok.length < 4) continue;
+          // Shared with first unit → structural label, skip.
+          if (firstTokSet.has(tok)) continue;
+          if (hint.stem && (tok === hint.stem || tok.startsWith(hint.stem))) {
+            continue;
+          }
+          const start = uStart + tm.index;
+          const end = start + tok.length;
+          if (!fieldSpanAllowed(start, end, occupied)) continue;
+          laterSlot += 1;
+          const base =
+            structuralCellName(stem, laterSlot - 1, lang) ||
+            `${stem}.${laterSlot}`;
+          const name = uniqueName(
+            base,
+            usedNames,
+            [hint.stem, stem].filter(Boolean),
+            lang,
+            reservedLoopNames,
+          );
+          if (!name || reservedLoopNames.has(name)) continue;
+          if (nameEqualsSourceValue(name, tok)) continue;
+          const tag = buildTag("text", name, "", "");
+          if (validateTag(tag)) continue;
+          const allStarts = findOccurrenceStarts(plainText, tok);
+          const occIdx = Math.max(0, allStarts.indexOf(start));
+          usedNames.add(name);
+          occupied.push({ start, end });
+          out.push({
+            plainText: tok,
+            occurrence: occIdx,
+            plainStart: start,
+            name,
+            kind: "text",
+            tag,
+            mode: "replace",
+          });
+        }
+      }
+    }
+  }
+
   // Enrich: letterhead/footer phones & emails the model often skips.
   enrichContactFieldsFromPlain(plainText, out, occupied, usedNames, lang);
   // Structural label→value pairs (tabs / multi-space), incl. letterhead addresses.
@@ -3006,12 +3344,141 @@ export function validateAiTagSuggestions(
   // One checkbox glyph pair per document.
   unifyDocumentBoolArms(out);
 
+  // Ensure paragraph-list wraps have first-unit fill-ins (digits + unique tokens)
+  // so they are not dropped as empty wraps when the model omitted inners.
+  if (xml && paraListHints.length && softWraps.length) {
+    const wordTokRe = /[\u0E00-\u0E7FA-Za-z]{2,80}/gu;
+    const escapeRe = (s: string) =>
+      String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    for (const hint of paraListHints) {
+      const parent = softWraps.find(
+        (w) => w.start === hint.plainStart && w.end === hint.plainEnd,
+      );
+      if (!parent) continue;
+      const unitStarts: number[] = [hint.plainStart];
+      if (hint.stem) {
+        const anchorRe = new RegExp(
+          `${escapeRe(hint.stem)}\\s*[0-9๐-๙]+`,
+          "gu",
+        );
+        const group = plainText.slice(hint.plainStart, hint.groupEnd);
+        let am: RegExpExecArray | null;
+        while ((am = anchorRe.exec(group)) !== null) {
+          const abs = hint.plainStart + am.index;
+          if (abs > hint.plainStart) unitStarts.push(abs);
+        }
+      }
+      unitStarts.push(hint.groupEnd);
+      const unitTexts = unitStarts.slice(0, -1).map((s, i) =>
+        plainText.slice(s, unitStarts[i + 1]),
+      );
+      if (!unitTexts.length) continue;
+      const shared = new Set<string>();
+      {
+        const sets = unitTexts.map(
+          (t) => new Set(t.match(wordTokRe) || []),
+        );
+        if (sets.length) {
+          for (const tok of sets[0]!) {
+            if (sets.every((s) => s.has(tok))) shared.add(tok);
+          }
+        }
+      }
+      const firstStart = unitStarts[0]!;
+      const firstEnd = unitStarts[1]!;
+      const firstText = plainText.slice(firstStart, firstEnd);
+      // Leading / ordinal digit → auto.
+      const digitRe = /[0-9๐-๙]+/gu;
+      let dm: RegExpExecArray | null;
+      while ((dm = digitRe.exec(firstText)) !== null) {
+        if (out.length >= MAX_SUGGESTIONS + CONTACT_ENRICH_SLACK) break;
+        if (dm[0].length > 2) continue;
+        const start = firstStart + dm.index;
+        const end = start + dm[0].length;
+        if (!fieldSpanAllowed(start, end, occupied)) continue;
+        const base =
+          structuralCellName(parent.name, 0, lang) ||
+          resolveVarName(lang === "en" ? "no" : "ลำดับ", lang) ||
+          `${parent.name}.1`;
+        const name = uniqueName(
+          base,
+          usedNames,
+          [hint.stem, parent.name].filter(Boolean),
+          lang,
+          reservedLoopNames,
+        );
+        if (!name || reservedLoopNames.has(name)) continue;
+        const tag = buildTag("auto", name, "", "");
+        if (validateTag(tag)) continue;
+        const allStarts = findOccurrenceStarts(plainText, dm[0]);
+        const occIdx = Math.max(0, allStarts.indexOf(start));
+        usedNames.add(name);
+        occupied.push({ start, end });
+        out.push({
+          plainText: dm[0],
+          occurrence: occIdx,
+          plainStart: start,
+          name,
+          kind: "auto",
+          tag,
+          mode: "replace",
+          wrapTag: parent.wrapTag,
+          wrapOccurrence: parent.wrapOccurrence,
+        });
+      }
+      wordTokRe.lastIndex = 0;
+      let tm: RegExpExecArray | null;
+      let slot = 0;
+      while ((tm = wordTokRe.exec(firstText)) !== null) {
+        if (out.length >= MAX_SUGGESTIONS + CONTACT_ENRICH_SLACK) break;
+        const tok = tm[0];
+        if (tok.length < 4) continue;
+        if (shared.has(tok)) continue;
+        if (hint.stem && (tok === hint.stem || tok.startsWith(hint.stem))) {
+          continue;
+        }
+        const start = firstStart + tm.index;
+        const end = start + tok.length;
+        if (!fieldSpanAllowed(start, end, occupied)) continue;
+        slot += 1;
+        const base =
+          structuralCellName(parent.name, slot, lang) ||
+          `${parent.name}.${slot + 1}`;
+        const name = uniqueName(
+          base,
+          usedNames,
+          [hint.stem, parent.name].filter(Boolean),
+          lang,
+          reservedLoopNames,
+        );
+        if (!name || reservedLoopNames.has(name)) continue;
+        if (nameEqualsSourceValue(name, tok)) continue;
+        const tag = buildTag("text", name, "", "");
+        if (validateTag(tag)) continue;
+        const allStarts = findOccurrenceStarts(plainText, tok);
+        const occIdx = Math.max(0, allStarts.indexOf(start));
+        usedNames.add(name);
+        occupied.push({ start, end });
+        out.push({
+          plainText: tok,
+          occurrence: occIdx,
+          plainStart: start,
+          name,
+          kind: "text",
+          tag,
+          mode: "replace",
+          wrapTag: parent.wrapTag,
+          wrapOccurrence: parent.wrapOccurrence,
+        });
+      }
+    }
+  }
+
   // Never emit a list/list-table wrap with zero inner fields: build inners from
   // the loop row's cells first; only drop the wrap if that still yields nothing.
   {
     const emptyWraps = out.filter((s) => {
       if (s.mode !== "wrap" && s.mode !== "wrap-row") return false;
-      const key = `${s.tag}|${s.occurrence}`;
       return !out.some(
         (inner) =>
           inner.wrapTag === s.tag &&
@@ -3036,7 +3503,7 @@ export function validateAiTagSuggestions(
             ? String((hint as TableSampleCellHint).cellText || "")
             : "";
         const header = String(hint.header || "").trim();
-        let baseName =
+        const baseName =
           nameFromHeaderOrLabel(header, null, lang, sampleText || null) ||
           structuralCellName(wrap.name, hint.cellIndex, lang);
         if (!baseName || looksLikeGarbledName(baseName)) continue;
@@ -3152,20 +3619,30 @@ export function validateAiTagSuggestions(
   }
 
   // Different fill values must not reuse one variable name (keep earliest).
+  // Same name under different wraps is also a collision (cross-loop reuse).
   {
     const firstPlainByName = new Map<string, string>();
+    const firstWrapByName = new Map<string, string>();
     for (let i = 0; i < out.length; i += 1) {
       const s = out[i]!;
       if (s.mode === "wrap" || s.mode === "wrap-row" || s.mode === "delete-tr") {
         continue;
       }
-      const prev = firstPlainByName.get(s.name);
-      if (prev !== undefined && prev !== s.plainText) {
+      const wrapKey = `${s.wrapTag || ""}|${s.wrapOccurrence ?? ""}`;
+      const prevPlain = firstPlainByName.get(s.name);
+      const prevWrap = firstWrapByName.get(s.name);
+      if (prevPlain !== undefined && prevPlain !== s.plainText) {
         out.splice(i, 1);
         i -= 1;
         continue;
       }
-      if (prev === undefined) firstPlainByName.set(s.name, s.plainText);
+      if (prevWrap !== undefined && prevWrap !== wrapKey) {
+        out.splice(i, 1);
+        i -= 1;
+        continue;
+      }
+      if (prevPlain === undefined) firstPlainByName.set(s.name, s.plainText);
+      if (prevWrap === undefined) firstWrapByName.set(s.name, wrapKey);
     }
   }
 
@@ -3407,30 +3884,33 @@ export function getAiSuggestChunkRetry(): number {
   return Math.min(4, Math.floor(n));
 }
 
-/** Overall wall budget for one suggest request (under 5 minutes). */
+/** Hard wall budget for one suggest request — never exceed 5 minutes. */
 export const DEFAULT_AI_SUGGEST_OVERALL_MS = 300_000;
+/** Per-provider-call cap so main + cheap repair fit under the overall budget. */
+export const DEFAULT_AI_SUGGEST_CALL_TIMEOUT_MS = 120_000;
 
 /** Per-call timeout for suggest (single-call and chunk paths share this). */
 export function getAiSuggestChunkTimeoutMs(baseTimeoutMs?: number): number {
   const base =
     typeof baseTimeoutMs === "number" && Number.isFinite(baseTimeoutMs)
       ? Math.floor(baseTimeoutMs)
-      : 90_000;
-  // Cap at 180s per call; floor at max(base, 120s) so small docs aren't stuck at 90s.
-  return Math.min(180_000, Math.max(base, 120_000, Math.floor(base * 1.5)));
+      : DEFAULT_AI_SUGGEST_CALL_TIMEOUT_MS;
+  // Floor and hard-cap at 120s: raise short opts, never exceed the per-call wall.
+  // Remaining-budget trimming happens at each callSuggestProvider site.
+  return Math.min(
+    DEFAULT_AI_SUGGEST_CALL_TIMEOUT_MS,
+    Math.max(DEFAULT_AI_SUGGEST_CALL_TIMEOUT_MS, Math.max(0, base)),
+  );
 }
 
-/** Alias — same longer timeout applies to the single-call (<16k) path. */
+/** Alias — same timeout applies to the single-call (<16k) path. */
 export function getAiSuggestCallTimeoutMs(baseTimeoutMs?: number): number {
   return getAiSuggestChunkTimeoutMs(baseTimeoutMs);
 }
 
 export function getAiSuggestOverallBudgetMs(baseTimeoutMs?: number): number {
-  const perCall = getAiSuggestCallTimeoutMs(baseTimeoutMs);
-  return Math.min(
-    DEFAULT_AI_SUGGEST_OVERALL_MS,
-    Math.max(perCall + 30_000, Math.floor(perCall * 1.5)),
-  );
+  void baseTimeoutMs;
+  return DEFAULT_AI_SUGGEST_OVERALL_MS;
 }
 
 export type ChunkCallOutcome = {
@@ -3687,6 +4167,18 @@ export async function suggestTemplateTags(
   const overallBudgetMs = getAiSuggestOverallBudgetMs(opts?.timeoutMs);
   const budgetDeadline = Date.now() + overallBudgetMs;
   const remainingBudgetMs = () => Math.max(0, budgetDeadline - Date.now());
+  /** Cap every provider call by per-call wall AND remaining overall budget. */
+  const cappedCallTimeoutMs = (preferred?: number) => {
+    const base = preferred ?? suggestCallTimeoutMs;
+    const left = remainingBudgetMs();
+    if (left < 5_000) return 0;
+    return Math.min(base, left);
+  };
+  // Overall abort fires at the hard 300s wall so in-flight calls detach.
+  const overallGate = createAiTimeoutController(
+    opts?.signal,
+    overallBudgetMs,
+  );
   const callOpts = {
     providerId: provider.id,
     apiFamily: provider.apiFamily,
@@ -3694,7 +4186,7 @@ export async function suggestTemplateTags(
     model,
     filename,
     attachDocx,
-    signal: opts?.signal,
+    signal: overallGate.signal,
     timeoutMs: suggestCallTimeoutMs,
   };
 
@@ -3713,19 +4205,21 @@ export async function suggestTemplateTags(
       docxAttached: attachDocx,
     });
 
-  const runFull = (timeoutMs?: number) =>
-    callSuggestProvider(
+  const runFull = (timeoutMs?: number) => {
+    const ms = cappedCallTimeoutMs(timeoutMs ?? suggestCallTimeoutMs);
+    if (ms < 5_000) {
+      return Promise.reject(new AiTimeoutError());
+    }
+    return callSuggestProvider(
       buildPromptForPlain(plainText, plainTruncated),
       xml,
       buffer,
       {
         ...callOpts,
-        timeoutMs: Math.min(
-          timeoutMs ?? suggestCallTimeoutMs,
-          Math.max(5_000, remainingBudgetMs()),
-        ),
+        timeoutMs: ms,
       },
     );
+  };
 
   let singleCallTimedOut = false;
   let singleCallPartial = false;
@@ -3771,13 +4265,15 @@ export async function suggestTemplateTags(
     });
     let lastErr: unknown = null;
     for (let attempt = 0; attempt <= retries; attempt += 1) {
-      if (opts?.signal?.aborted) break;
+      if (opts?.signal?.aborted || overallGate.signal.aborted) break;
+      const ms = cappedCallTimeoutMs(chunkTimeout);
+      if (ms < 5_000) break;
       const t0 = Date.now();
       try {
         const part = await callSuggestProvider(slimPrompt, xml, buffer, {
           ...callOpts,
           attachDocx: false,
-          timeoutMs: chunkTimeout,
+          timeoutMs: ms,
         });
         const durationMs = Date.now() - t0;
         chunkOutcomes.push({
@@ -3950,40 +4446,84 @@ export async function suggestTemplateTags(
   let { parsed, rawText } = callResult;
   let finalized = finalize(parsed, rawText);
 
-  // Thin: repair within remaining budget, then keep the denser result.
+  // Cheap region repair: only failed/thin slices, short timeout, remaining budget.
+  // Never re-run a full-document pass (that stacked past the 300s wall).
   if (
     finalized.coverage.thin &&
     !opts?.signal?.aborted &&
-    remainingBudgetMs() >= 20_000
+    !overallGate.signal.aborted &&
+    remainingBudgetMs() >= 15_000
   ) {
     try {
-      const repairPrompt =
-        buildPromptForPlain(plainText, plainTruncated) +
-        "\n\nREPAIR PASS: prior suggestions were too thin. Emit EVERY missing fill-in " +
-        "(letterhead, numbers, parties, all prototype table cells, distinct-row totals, " +
-        "label-followed blanks). Same determinism rules. Return full JSON suggestions array.";
-      const retry = await callSuggestProvider(repairPrompt, xml, buffer, {
-        ...callOpts,
-        timeoutMs: Math.min(
-          suggestCallTimeoutMs,
-          Math.max(10_000, remainingBudgetMs() - 5_000),
-        ),
-      });
-      const mergedRaw = mergeSuggestionRowsByPosition(
-        normalizeRawSuggestions(parsed),
-        normalizeRawSuggestions(retry.parsed),
+      const repairMs = cappedCallTimeoutMs(
+        Math.min(45_000, Math.max(15_000, remainingBudgetMs() - 5_000)),
       );
-      const retried = finalize(
-        { ...(retry.parsed || {}), suggestions: mergedRaw },
-        [rawText, retry.rawText || ""].filter(Boolean).join("\n\n"),
-      );
-      if (
-        retried.suggestions.length >= finalized.suggestions.length ||
-        retried.coverage.score >= finalized.coverage.score
-      ) {
-        finalized = retried;
-        parsed = retried.parsed;
-        rawText = retried.rawText;
+      if (repairMs >= 10_000) {
+        const uniqueFailed = [...new Set(failedChunkIndexes)].sort(
+          (a, b) => a - b,
+        );
+        if (preferChunkFirst && uniqueFailed.length) {
+          const chunkChars =
+            getAiSuggestChunkChars() || DEFAULT_AI_SUGGEST_CHUNK_CHARS;
+          const chunks = splitPlainTextChunks(plainText, chunkChars);
+          const repairBatches: Record<string, unknown>[][] = [];
+          for (const i of uniqueFailed.slice(0, 2)) {
+            if (remainingBudgetMs() < 10_000) break;
+            const chunk = chunks[i];
+            if (!chunk) continue;
+            const repaired = await runOneChunk(i, chunk, chunkChars);
+            if (repaired.rows.length) repairBatches.push(repaired.rows);
+          }
+          if (repairBatches.length) {
+            const mergedRaw = mergeSuggestionRowsByPosition(
+              normalizeRawSuggestions(parsed),
+              ...repairBatches,
+            );
+            const retried = finalize(
+              { ...(parsed || {}), suggestions: mergedRaw },
+              rawText,
+            );
+            if (
+              retried.suggestions.length >= finalized.suggestions.length ||
+              retried.coverage.score >= finalized.coverage.score
+            ) {
+              finalized = retried;
+              parsed = retried.parsed;
+              rawText = retried.rawText;
+            }
+          }
+        } else {
+          // Single-call / no failed chunks: short focused repair, not a full re-suggest.
+          const repairPrompt =
+            buildPromptForPlain(
+              plainText.slice(0, Math.min(plainText.length, 8_000)),
+              plainText.length > 8_000,
+            ) +
+            "\n\nCHEAP REPAIR: prior pass was thin. Emit ONLY missing fill-ins " +
+            "(prototype cells, totals values, party id/name). Keep names from headers/labels. " +
+            "Return a compact JSON suggestions array — do not rewrite existing tags.";
+          const retry = await callSuggestProvider(repairPrompt, xml, buffer, {
+            ...callOpts,
+            attachDocx: false,
+            timeoutMs: repairMs,
+          });
+          const mergedRaw = mergeSuggestionRowsByPosition(
+            normalizeRawSuggestions(parsed),
+            normalizeRawSuggestions(retry.parsed),
+          );
+          const retried = finalize(
+            { ...(retry.parsed || {}), suggestions: mergedRaw },
+            [rawText, retry.rawText || ""].filter(Boolean).join("\n\n"),
+          );
+          if (
+            retried.suggestions.length >= finalized.suggestions.length ||
+            retried.coverage.score >= finalized.coverage.score
+          ) {
+            finalized = retried;
+            parsed = retried.parsed;
+            rawText = retried.rawText;
+          }
+        }
       }
     } catch {
       // Keep first pass; surface thin warning below.
@@ -4031,6 +4571,7 @@ export async function suggestTemplateTags(
     });
   }
 
+  overallGate.clear();
   return {
     suggestions: finalized.suggestions,
     plainText,

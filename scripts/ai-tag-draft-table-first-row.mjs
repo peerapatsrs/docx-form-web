@@ -231,10 +231,12 @@ assert.ok(
   ),
   "digit inside paragraph list wrap must stay auto {{+}}",
 );
-assert.ok(
-  !outPara.some((s) => new RegExp(pl.laterUnitRejectPattern).test(s.plainText || "")),
-  "later units must not get their own field tags",
-);
+for (const laterName of pl.laterUnitNames || []) {
+  assert.ok(
+    outPara.some((s) => s.plainText === laterName && s.kind === "text"),
+    `later unit fill-in ${laterName} must be tagged`,
+  );
+}
 assert.equal(
   outPara.filter((s) => s.kind === "list").length,
   1,
@@ -262,8 +264,8 @@ assert.equal(
   "tabbed wrap plain must retain w:tab as \\\\t",
 );
 assert.ok(
-  !outParaTab.some((s) => s.plainText === pt.laterName),
-  "later tabbed unit must stay untagged",
+  outParaTab.some((s) => s.plainText === pt.laterName && s.kind === "text"),
+  "later tabbed unit fill-in must be tagged",
 );
 console.log(`✓ ai-tag-draft paragraph-list tabbed-unit smoke (n=${outParaTab.length})`);
 

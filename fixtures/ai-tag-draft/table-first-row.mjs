@@ -319,7 +319,7 @@ assert.equal(
   "จำเลยที่ 1 ชื่อ นายหนึ่ง ที่อยู่ บ้านหนึ่ง",
   "wrap must be FIRST defendant unit only",
 );
-assert.match(paraWrap.tag, /^\{\{#รายการ_?จำเลย/);
+assert.match(paraWrap.tag, /^\{\{#จำเลย/);
 assert.ok(
   outPara.some(
     (s) => s.plainText === "นายหนึ่ง" && s.kind === "text" && s.wrapTag === paraWrap.tag,
@@ -337,8 +337,12 @@ assert.ok(
   "digit inside paragraph list wrap must stay auto {{+}}",
 );
 assert.ok(
-  !outPara.some((s) => /นายสอง|นายสาม|จำเลย2|จำเลย3/.test(s.plainText || "")),
-  "later defendant units must not get their own field tags",
+  outPara.some((s) => s.plainText === "นายสอง" && s.kind === "text"),
+  "later defendant unit name must be tagged",
+);
+assert.ok(
+  outPara.some((s) => s.plainText === "นายสาม" && s.kind === "text"),
+  "later defendant unit name must be tagged",
 );
 assert.equal(
   outPara.filter((s) => s.kind === "list").length,
@@ -376,8 +380,8 @@ assert.equal(
   "tabbed wrap plain must retain w:tab as \\\\t",
 );
 assert.ok(
-  !outParaTab.some((s) => s.plainText === "นายสอง"),
-  "later tabbed defendant unit must stay untagged",
+  outParaTab.some((s) => s.plainText === "นายสอง" && s.kind === "text"),
+  "later tabbed defendant unit fill-in must be tagged",
 );
 console.log(`✓ ai-tag-draft paragraph-list tabbed-unit smoke (n=${outParaTab.length})`);
 

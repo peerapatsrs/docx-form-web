@@ -247,6 +247,7 @@ await check("chunk helpers: smaller default + timeout floor", async () => {
     DEFAULT_AI_SUGGEST_CHUNK_CHARS,
     DEFAULT_AI_SUGGEST_CHUNK_RETRY,
     DEFAULT_AI_SUGGEST_OVERALL_MS,
+    DEFAULT_AI_SUGGEST_CALL_TIMEOUT_MS,
     getAiSuggestChunkConcurrency,
     getAiSuggestChunkRetry,
     getAiSuggestChunkTimeoutMs,
@@ -258,7 +259,9 @@ await check("chunk helpers: smaller default + timeout floor", async () => {
   assert.equal(getAiSuggestChunkConcurrency(), 1);
   assert.equal(getAiSuggestChunkRetry(), DEFAULT_AI_SUGGEST_CHUNK_RETRY);
   assert.ok(DEFAULT_AI_SUGGEST_CHUNK_RETRY >= 1);
+  assert.equal(DEFAULT_AI_SUGGEST_CALL_TIMEOUT_MS, 120_000);
   assert.ok(getAiSuggestChunkTimeoutMs(90_000) >= 120_000);
+  assert.ok(getAiSuggestChunkTimeoutMs(180_000) <= 120_000, "hard per-call cap 120s");
   assert.equal(getAiSuggestCallTimeoutMs(90_000), getAiSuggestChunkTimeoutMs(90_000));
   assert.ok(DEFAULT_AI_SUGGEST_OVERALL_MS <= 300_000);
   assert.ok(getAiSuggestOverallBudgetMs(90_000) <= 300_000);
@@ -268,6 +271,87 @@ await check("chunk helpers: smaller default + timeout floor", async () => {
   const small = splitPlainTextChunks("y".repeat(8_000), 16_000);
   assert.equal(small.length, 1, "doc under 16k is one call");
   assert.ok(getAiSuggestCallTimeoutMs(90_000) > 90_000, "single-call timeout > 90s");
+});
+
+await check("blank sample clones are deleted not kept as trailer", async () => {
+  const { isBlankSampleCloneRow, findTrailingFixedRowStart, shouldDeleteLaterSampleRow } =
+    await loadDraft();
+  const proto = [
+    { text: "1" },
+    { text: "AlphaWidget" },
+    { text: "100" },
+  ];
+  const blank = [{ text: "" }, { text: "" }, { text: "" }];
+  const ordinalOnly = [{ text: "4" }, { text: "" }, { text: "" }];
+  assert.equal(isBlankSampleCloneRow(proto, blank), true);
+  assert.equal(isBlankSampleCloneRow(proto, ordinalOnly), true);
+  const later = [
+    { rowIndexInTable: 2, cells: [{ text: "2" }, { text: "Beta" }, { text: "200" }] },
+    { rowIndexInTable: 3, cells: blank },
+    { rowIndexInTable: 4, cells: ordinalOnly },
+    { rowIndexInTable: 5, cells: [{ text: "" }, { text: "Total" }, { text: "900" }] },
+  ];
+  // Blank clones must not pull the trailer start earlier (would shrink 5→3 wrongly).
+  const start = findTrailingFixedRowStart(proto, later);
+  assert.equal(start, 5, `trailer at Total got ${start}`);
+  assert.equal(
+    shouldDeleteLaterSampleRow(proto, blank, { isAtTableEnd: false, isNearEnd: true }),
+    true,
+  );
+});
+
+await check("garbled rejects bare รายการ/ค่า fallbacks", async () => {
+  const { looksLikeGarbledName } = await loadDraft();
+  assert.equal(looksLikeGarbledName("รายการ"), true);
+  assert.equal(looksLikeGarbledName("ค่า"), true);
+  assert.equal(looksLikeGarbledName("value"), true);
+  assert.equal(looksLikeGarbledName("รายการค่าใช้จ่าย"), false);
+});
+
+await check("VAT rate caption is never tagged as a field", async () => {
+  const { validateAiTagSuggestions } = await loadDraft();
+  const xml = readFileSync(join(fixturesDir, "leftover-sample-rows.xml"), "utf8");
+  const plain =
+    "NoItemAmt1AlphaWidget1002BetaWidget2003GammaWidget300รวมเงิน1200ภาษีมูลค่าเพิ่ม (7%)84บาทหนึ่งพันสองร้อยบาทถ้วน";
+  const out = validateAiTagSuggestions(
+    plain,
+    [
+      {
+        plainText: "1AlphaWidget100",
+        name: "rows",
+        kind: "list-table",
+        mode: "wrap-row",
+      },
+      {
+        plainText: "ภาษีมูลค่าเพิ่ม (7%)",
+        name: "รายการ",
+        kind: "text",
+        mode: "replace",
+      },
+      {
+        plainText: "1200",
+        name: "รวมเงิน",
+        kind: "text",
+        mode: "replace",
+        label: "รวมเงิน",
+      },
+    ],
+    xml,
+    "th",
+  );
+  assert.ok(
+    !out.some((s) => s.plainText.includes("ภาษีมูลค่าเพิ่ม")),
+    "VAT label stays static",
+  );
+  assert.ok(
+    !out.some(
+      (s) =>
+        s.mode !== "wrap-row" &&
+        s.mode !== "delete-tr" &&
+        s.name === "รายการ",
+    ),
+    "bare รายการ scalar rejected",
+  );
 });
 
 await check("trailing fixed rows kept (VAT/total/note block)", async () => {

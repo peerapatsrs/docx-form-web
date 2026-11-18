@@ -127,6 +127,31 @@ await check("withAiTimeout aborts never-resolving work with AI_TIMEOUT", async (
   assert.ok(Date.now() - t0 < 3_000, "timeout should fire quickly");
 });
 
+await check("withAiTimeout hard-races even when provider ignores abort", async () => {
+  const { withAiTimeout, isAiTimeoutError, AiTimeoutError } = await loadFresh(
+    "src/server/ai-request.ts",
+  );
+  const t0 = Date.now();
+  let threw = null;
+  try {
+    await withAiTimeout(
+      // Provider ignores AbortSignal entirely (Cursor SDK hang case).
+      () => new Promise(() => {}),
+      {
+        route: "test.hang.ignore-abort",
+        provider: "cursor",
+        model: "composer-2.5",
+        timeoutMs: 80,
+      },
+    );
+  } catch (err) {
+    threw = err;
+  }
+  assert.ok(threw instanceof AiTimeoutError);
+  assert.ok(isAiTimeoutError(threw));
+  assert.ok(Date.now() - t0 < 3_000, "hard race must settle without abort listener");
+});
+
 await check("resolveCursorModelId remaps gemini without live catalog", async () => {
   const { resolveCursorModelId, resolveEffectiveModelForProvider } = await loadFresh(
     "src/server/ai-providers.ts",

@@ -1060,11 +1060,12 @@ function inventParagraphListNames(
   let shapeAscii = sanitizeListNameAscii(shapeTok);
   if (!shapeAscii || shapeAscii === "n") shapeAscii = "shape";
   return {
+    // Structural stems only — no fixed vocabulary prefixes.
     th: thStem
-      ? sanitizeListName(`รายการ_${thStem}`) || `รายการ_${shapeTok}`
-      : sanitizeListName(`รายการ_${shapeTok}`) || "รายการ_shape",
+      ? sanitizeListName(thStem) || sanitizeListName(`loop_${shapeTok}`) || "loop"
+      : sanitizeListName(`loop_${shapeTok}`) || "loop",
     en: enStem
-      ? sanitizeListNameAscii(`rows_${enStem}`) || `rows_${shapeAscii}`
+      ? sanitizeListNameAscii(enStem) || `rows_${shapeAscii}`
       : `rows_${shapeAscii}`,
   };
 }

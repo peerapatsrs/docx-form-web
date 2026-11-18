@@ -278,16 +278,32 @@ export async function withAiTimeout<T>(
   const started = Date.now();
   const gate = createAiTimeoutController(opts.signal, timeoutMs);
   try {
-    const result = await run(gate.signal);
-    logAiCall({
-      route: opts.route,
-      provider: opts.provider,
-      model: opts.model,
-      requestId: opts.requestId,
-      durationMs: Date.now() - started,
-      outcome: "ok",
+    // Hard Promise.race deadline: even if the provider ignores AbortSignal
+    // (or hangs after abort), this call still settles at timeoutMs.
+    let raceTimer: ReturnType<typeof setTimeout> | null = null;
+    const deadline = new Promise<never>((_, reject) => {
+      raceTimer = setTimeout(() => {
+        reject(
+          new AiTimeoutError(
+            `AI_TIMEOUT: ผู้ให้บริการ AI ไม่ตอบภายใน ${Math.round(timeoutMs / 1000)} วินาที — ลองใหม่หรือเปลี่ยนโมเดล`,
+          ),
+        );
+      }, Math.max(50, Math.floor(timeoutMs)));
     });
-    return result;
+    try {
+      const result = await Promise.race([run(gate.signal), deadline]);
+      logAiCall({
+        route: opts.route,
+        provider: opts.provider,
+        model: opts.model,
+        requestId: opts.requestId,
+        durationMs: Date.now() - started,
+        outcome: "ok",
+      });
+      return result;
+    } finally {
+      if (raceTimer) clearTimeout(raceTimer);
+    }
   } catch (err) {
     const durationMs = Date.now() - started;
     const timedOut =

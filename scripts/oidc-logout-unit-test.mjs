@@ -70,9 +70,36 @@ await check("logout route converts cross-origin end_session to HTML continue", a
     "https://auth.tps18.space/realms/tps18-dev/protocol/openid-connect/logout?client_id=docx&post_logout_redirect_uri=https%3A%2F%2Fdocx-form-dev.tps18.space%2Flogged-out&id_token_hint=abc.def.ghi";
   const html = buildEndSessionContinueHtml(endSession);
   assert.match(html, /meta http-equiv="refresh"/);
-  assert.match(html, /location\.replace/);
+  assert.match(html, /oidc-end-session-continue/);
+  assert.match(html, /location\.replace\(a\.href\)/);
   assert.match(html, /auth\.tps18\.space/);
+  // URL must not be embedded as a JS string literal in <script>.
+  assert.doesNotMatch(html, /<script>[\s\S]*https:\/\/auth\.tps18\.space/);
   assert.equal(escapeHtmlAttr(`a&b"c`), "a&amp;b&quot;c");
+
+  // DEF-BE-END-SESSION-CONTINUE-SCRIPT-BREAKOUT (QA repro)
+  const breakout =
+    "https://auth.tps18.space/x?</script><script>alert(1)</script>";
+  const breakoutHtml = buildEndSessionContinueHtml(breakout);
+  assert.match(breakoutHtml, /meta http-equiv="refresh"/);
+  assert.match(
+    breakoutHtml,
+    /href="https:\/\/auth\.tps18\.space\/x\?&lt;\/script&gt;&lt;script&gt;alert\(1\)&lt;\/script&gt;"/,
+  );
+  assert.match(
+    breakoutHtml,
+    /content="0;url=https:\/\/auth\.tps18\.space\/x\?&lt;\/script&gt;&lt;script&gt;alert\(1\)&lt;\/script&gt;"/,
+  );
+  // Unescaped </script><script>alert must not appear (would close/open scripts).
+  assert.doesNotMatch(
+    breakoutHtml,
+    /<\/script>\s*<script>\s*alert\s*\(\s*1\s*\)/i,
+  );
+  for (const m of breakoutHtml.matchAll(/<script>([\s\S]*?)<\/script>/gi)) {
+    assert.doesNotMatch(m[1], /alert\s*\(/i);
+    assert.doesNotMatch(m[1], /https?:\/\//i);
+    assert.doesNotMatch(m[1], /<\/script>/i);
+  }
 
   const redirect = new Response(null, {
     status: 303,

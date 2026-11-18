@@ -974,56 +974,115 @@ export type ParagraphListHint = {
   /** Exclusive end of the whole repeating group (later sample units). */
   groupEnd: number;
   unitCount: number;
-  /** Label stem e.g. 「จำเลยที่」. */
+  /** Non-digit stem of the first unit (text before the first digit run). */
   stem: string;
   suggestedNameTh: string;
   suggestedNameEn: string;
 };
 
-const PARA_LIST_STEM_RE =
-  /^(จำเลยที่|จำลยที่|โจทก์ที่|คู่ความที่|ลำดับที่|รายการที่|ข้อที่|ข้อ)\s*[0-9๐-๙]+/u;
-const PARA_LIST_STEM_EN_RE =
-  /^(Defendant|Plaintiff|Party|Item|Clause|Article)\s*(?:No\.?\s*)?[0-9]+/i;
+const DIGIT_RUN_RE = /[0-9๐-๙]+/u;
+const THAI_DIGITS = "๐๑๒๓๔๕๖๗๘๙";
 
-function matchParagraphListStem(text: string): string | null {
-  const t = String(text || "").replace(/^\s+/, "");
-  const th = PARA_LIST_STEM_RE.exec(t);
-  if (th) {
-    const stem = th[1].replace(/จำลยที่/g, "จำเลยที่");
-    return stem;
+/**
+ * Replace digit runs with `#`, collapse whitespace, then take a stable prefix.
+ * Prefer the head through the first `#` (capped at 96) so variable trailing
+ * prose (names, addresses) does not split an otherwise identical list shape.
+ */
+export function shapeSignatureForList(text: string): string {
+  const normalized = String(text || "")
+    .replace(/[0-9๐-๙]+/gu, "#")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return "";
+  const hashAt = normalized.indexOf("#");
+  if (hashAt >= 0) {
+    return normalized.slice(0, Math.min(hashAt + 1, 96));
   }
-  const en = PARA_LIST_STEM_EN_RE.exec(t);
-  if (en) return en[1];
-  return null;
+  return normalized.slice(0, 96);
 }
 
-function inventParagraphListNames(stem: string): {
-  th: string;
-  en: string;
-} {
-  const s = stem.replace(/จำลยที่/g, "จำเลยที่");
-  if (/จำเลย/.test(s) || /defendant/i.test(s)) {
-    return { th: "รายการจำเลย", en: "defendants" };
+/** First integer in the paragraph (Arabic or Thai digits); null if none. */
+export function leadingInteger(text: string): number | null {
+  const m = String(text || "").match(DIGIT_RUN_RE);
+  if (!m) return null;
+  let s = m[0];
+  if (/[๐-๙]/.test(s)) {
+    s = s.replace(/[๐-๙]/g, (d) => String(THAI_DIGITS.indexOf(d)));
   }
-  if (/โจทก์/.test(s) || /plaintiff/i.test(s)) {
-    return { th: "รายการโจทก์", en: "plaintiffs" };
+  const n = Number.parseInt(s, 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Text before the first digit run — the structural label stem. */
+function nonDigitStem(text: string): string {
+  const t = String(text || "").replace(/^\s+/, "");
+  const idx = t.search(/[0-9๐-๙]/u);
+  if (idx < 0) return t.trim();
+  return t.slice(0, idx).trim();
+}
+
+function sanitizeListName(raw: string): string {
+  return String(raw || "")
+    .normalize("NFC")
+    .trim()
+    .replace(/\s+/g, "_")
+    .replace(/[^\w\u0E00-\u0E7F./-]/gu, "")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 40);
+}
+
+function sanitizeListNameAscii(raw: string): string {
+  return String(raw || "")
+    .normalize("NFC")
+    .trim()
+    .replace(/\s+/g, "_")
+    .replace(/[^A-Za-z0-9_./-]/g, "")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 40)
+    .toLowerCase();
+}
+
+/** Shape token for empty-stem fallback (keep `#` as `n`). */
+function shapeNameToken(shape: string): string {
+  return sanitizeListName(String(shape || "").replace(/#/g, "n")) || "shape";
+}
+
+function inventParagraphListNames(
+  stem: string,
+  shape: string,
+): { th: string; en: string } {
+  const thStem = sanitizeListName(stem);
+  const enStem = sanitizeListNameAscii(stem);
+  const shapeTok = shapeNameToken(shape);
+  // Shape often collapses to a bare "n" after stripping non-ASCII — treat as empty.
+  let shapeAscii = sanitizeListNameAscii(shapeTok);
+  if (!shapeAscii || shapeAscii === "n") shapeAscii = "shape";
+  return {
+    th: thStem
+      ? sanitizeListName(`รายการ_${thStem}`) || `รายการ_${shapeTok}`
+      : sanitizeListName(`รายการ_${shapeTok}`) || "รายการ_shape",
+    en: enStem
+      ? sanitizeListNameAscii(`rows_${enStem}`) || `rows_${shapeAscii}`
+      : `rows_${shapeAscii}`,
+  };
+}
+
+function isSequentialLeadingRun(nums: number[]): boolean {
+  if (nums.length < 2) return false;
+  const start = nums[0];
+  if (start !== 0 && start !== 1) return false;
+  for (let i = 1; i < nums.length; i += 1) {
+    if (nums[i] !== start + i) return false;
   }
-  if (/คู่ความ/.test(s) || /party/i.test(s)) {
-    return { th: "รายการคู่ความ", en: "parties" };
-  }
-  if (/ข้อ|clause|article/i.test(s)) {
-    return { th: "รายการข้อ", en: "clauses" };
-  }
-  if (/ลำดับ|รายการ|item/i.test(s)) {
-    return { th: "รายการ", en: "items" };
-  }
-  return { th: "รายการ", en: "items" };
+  return true;
 }
 
 /**
- * Detect consecutive numbered prose blocks outside tables (e.g. จำเลยที่ 1 / 2 / 3).
- * Returns one hint per stem group — prototype = first unit only (may span multiple <w:p>
- * until the next numbered start), matching manual「ลิสต์ (ย่อหน้า)」on the first sample.
+ * Detect consecutive body paragraphs that share a shape signature and whose
+ * leading integers form a sequential run (1,2,3… or 0,1,2…).
+ * Returns one hint per group — prototype = first unit only.
  */
 export function listParagraphListHints(xml: string): ParagraphListHint[] {
   if (!xml) return [];
@@ -1031,52 +1090,66 @@ export function listParagraphListHints(xml: string): ParagraphListHint[] {
   if (paras.length < 2) return [];
   const { plainText: fullPlain } = collectWtNodes(xml);
 
-  type Start = { paraIndex: number; stem: string; plainStart: number; plainEnd: number };
-  const starts: Start[] = [];
-  for (let i = 0; i < paras.length; i += 1) {
-    const stem = matchParagraphListStem(paras[i].text);
-    if (!stem) continue;
-    starts.push({
-      paraIndex: i,
-      stem,
-      plainStart: paras[i].plainStart,
-      plainEnd: paras[i].plainEnd,
-    });
-  }
-  if (starts.length < 2) return [];
-
   const out: ParagraphListHint[] = [];
   let i = 0;
-  while (i < starts.length) {
-    const stem = starts[i].stem;
+  while (i < paras.length) {
+    const sig = shapeSignatureForList(paras[i].text);
+    const firstNum = leadingInteger(paras[i].text);
+    if (!sig || firstNum == null) {
+      i += 1;
+      continue;
+    }
+    // Maximal consecutive same-shape run with a leading integer each.
     let j = i + 1;
-    while (j < starts.length && starts[j].stem === stem) j += 1;
-    const group = starts.slice(i, j);
+    const nums: number[] = [firstNum];
+    while (j < paras.length) {
+      if (shapeSignatureForList(paras[j].text) !== sig) break;
+      const n = leadingInteger(paras[j].text);
+      if (n == null) break;
+      nums.push(n);
+      j += 1;
+    }
+
+    // Within the run, emit each sequential sub-run (handles adjacent lists).
+    let k = i;
+    while (k < j) {
+      const local = nums[k - i];
+      if (local !== 0 && local !== 1) {
+        k += 1;
+        continue;
+      }
+      let end = k + 1;
+      while (end < j && nums[end - i] === local + (end - k)) end += 1;
+      const unitCount = end - k;
+      if (unitCount >= 2 && isSequentialLeadingRun(nums.slice(k - i, end - i))) {
+        const first = paras[k];
+        const second = paras[k + 1];
+        const last = paras[end - 1];
+        const plainStart = first.plainStart;
+        const plainEnd = second.plainStart;
+        if (plainEnd > plainStart) {
+          const resolvedText = fullPlain.slice(plainStart, plainEnd);
+          if (resolvedText.trim()) {
+            const stem = nonDigitStem(first.text);
+            const names = inventParagraphListNames(stem, sig);
+            out.push({
+              plainText: resolvedText,
+              plainStart,
+              plainEnd,
+              groupEnd: last.plainEnd,
+              unitCount,
+              stem,
+              suggestedNameTh: names.th,
+              suggestedNameEn: names.en,
+            });
+          }
+        }
+        k = end;
+        continue;
+      }
+      k += 1;
+    }
     i = j;
-    if (group.length < 2) continue;
-
-    const first = group[0];
-    const second = group[1];
-    const last = group[group.length - 1];
-    // Prototype unit: from first numbered start up to (not including) the next.
-    // Slice TAGGER_PLAIN directly so <w:tab/> between runs stay in plainText.
-    const plainStart = first.plainStart;
-    const plainEnd = second.plainStart;
-    if (!(plainEnd > plainStart)) continue;
-    const resolvedText = fullPlain.slice(plainStart, plainEnd);
-    if (!resolvedText.trim()) continue;
-
-    const names = inventParagraphListNames(stem);
-    out.push({
-      plainText: resolvedText,
-      plainStart,
-      plainEnd,
-      groupEnd: last.plainEnd,
-      unitCount: group.length,
-      stem,
-      suggestedNameTh: names.th,
-      suggestedNameEn: names.en,
-    });
   }
   return out;
 }
@@ -1289,6 +1362,39 @@ function findOrphanLoopOpenBefore(
 }
 
 /**
+ * Prefer a loop name from the first usable header-row cell, else first prototype
+ * cell text. Falls back to `loop_${ti+1}` when nothing sanitizes cleanly.
+ */
+function inventTableLoopNameFromRows(
+  rowXmls: string[],
+  tmplIdx: number,
+  ti: number,
+): string {
+  const tryCell = (trXml: string): string | null => {
+    const tcs = findTopLevelTcSpans(trXml);
+    for (const span of tcs) {
+      const text = normalizeTcPlain(trPlainText(trXml.slice(span.start, span.end)));
+      if (!text) continue;
+      if (/\{\{[^{}]+\}\}/.test(text)) continue;
+      if (isNoiseHeaderLabel(text)) continue;
+      if (/^[0-9๐-๙]+$/u.test(text)) continue;
+      const name = sanitizeListName(text);
+      if (name.length >= 2) return name;
+    }
+    return null;
+  };
+  for (let ri = 0; ri < tmplIdx && ri < rowXmls.length; ri += 1) {
+    const fromHeader = tryCell(rowXmls[ri]);
+    if (fromHeader) return fromHeader;
+  }
+  if (tmplIdx >= 0 && tmplIdx < rowXmls.length) {
+    const fromProto = tryCell(rowXmls[tmplIdx]);
+    if (fromProto) return fromProto;
+  }
+  return `loop_${ti + 1}`;
+}
+
+/**
  * List tables that only have {{/}} (no {{#…}} on the same table) look "headless"
  * in Word. Move a nearby orphan {{#name}} onto the template row (or invent one),
  * and mark rows above as tblHeader.
@@ -1308,13 +1414,19 @@ function ensureTableLoopOpenTags(xml: string): string {
     if (/\{\{#[^{}]*\}\}/.test(trPlainText(tblXml))) continue;
 
     const trRe = /<w:tr[\s>][\s\S]*?<\/w:tr>/g;
-    const rows: { localStart: number; localEnd: number; plain: string }[] = [];
+    const rows: {
+      localStart: number;
+      localEnd: number;
+      plain: string;
+      xml: string;
+    }[] = [];
     let tr: RegExpExecArray | null;
     while ((tr = trRe.exec(tblXml)) !== null) {
       rows.push({
         localStart: tr.index,
         localEnd: tr.index + tr[0].length,
         plain: trPlainText(tr[0]),
+        xml: tr[0],
       });
     }
     const closeIdx = rows.findIndex(
@@ -1335,8 +1447,13 @@ function ensureTableLoopOpenTags(xml: string): string {
       start -= delta;
       end -= delta;
     } else {
-      // Structural fallback — never รายการ1/2/3 (opaque numbered generics).
-      openTag = `{{#table_loop_${ti + 1}}}`;
+      // Prefer header/prototype cell text; only then structural loop_${ti+1}.
+      const loopName = inventTableLoopNameFromRows(
+        rows.map((r) => r.xml),
+        tmplIdx,
+        ti,
+      );
+      openTag = `{{#${loopName}}}`;
     }
 
     const row = rows[tmplIdx];

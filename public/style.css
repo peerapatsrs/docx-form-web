@@ -3982,6 +3982,22 @@ button.danger:hover {
   flex: 0 1 auto;
   min-width: 0;
   max-width: 100%;
+  /* Keep auth controls above the status pill in paint order (no click interception). */
+  isolation: isolate;
+}
+
+.topbar-end .auth-bar {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.topbar-end .status-pill {
+  position: relative;
+  z-index: 1;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .auth-bar {
@@ -4035,11 +4051,15 @@ button.danger:hover {
   align-items: center;
   gap: 0.4rem;
   min-width: 0;
+  min-height: var(--tap-min);
   max-width: 100%;
+  padding: 0.15rem 0.25rem;
+  box-sizing: border-box;
   color: inherit;
   text-decoration: none;
   -webkit-text-decoration: none;
   text-underline-offset: unset;
+  border-radius: 999px;
 }
 
 .auth-bar-user:link,
@@ -5202,8 +5222,8 @@ button.danger:hover {
   }
 }
 
-/* Mobile / small tablet: avatar menu — no header overflow or overlaps */
-@media (max-width: 639.98px) {
+/* Below desktop width: avatar account menu — avoids Admin / pill crowding inline cluster */
+@media (max-width: 1279.98px) {
   .topbar {
     height: auto;
     min-height: 52px;
@@ -5215,22 +5235,30 @@ button.danger:hover {
   .brand {
     flex: 1 1 auto;
     min-width: 0;
-    max-width: calc(100% - 7.5rem);
+    max-width: calc(100% - 9.5rem);
   }
 
   .topbar-end {
     position: relative;
     flex: 0 0 auto;
     gap: 0.35rem;
-    max-width: none;
+    max-width: min(100%, calc(100vw - 5.5rem));
   }
 
   .status-pill {
-    max-width: min(11rem, 58vw);
+    max-width: min(9.5rem, 42vw);
     padding: 0.28rem 0.5rem 0.28rem 0.35rem;
     font-size: 0.7rem;
     height: auto;
     min-height: var(--tap-min);
+  }
+
+  .status-pill #statusText {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: block;
+    min-width: 0;
   }
 
   .auth-bar-desktop {
@@ -5238,22 +5266,35 @@ button.danger:hover {
   }
 
   .auth-bar {
-    /* Climb past this so .auth-bar-menu anchors to .topbar-end. */
-    position: static;
+    display: flex;
+    width: auto;
+    flex: 0 0 auto;
+    justify-content: flex-end;
+    position: relative;
   }
 
   .auth-bar-mobile {
     display: block;
-    position: static;
+    position: relative;
+    width: fit-content;
+    max-width: 100%;
+  }
+
+  .topbar {
+    --topbar-anchor: 52px;
   }
 
   .auth-bar-menu {
-    top: calc(100% + 0.35rem);
-    right: 0;
+    position: fixed;
+    top: calc(var(--topbar-anchor) + 0.35rem);
+    right: max(0.75rem, env(safe-area-inset-right, 0px));
     left: auto;
     width: min(16.5rem, calc(100vw - 1.5rem));
     min-width: 0;
     max-width: calc(100vw - 1.5rem);
+    max-height: min(70vh, 24rem);
+    overflow-y: auto;
+    z-index: 45;
   }
 
   .auth-bar-menu-profile .auth-bar-name {
@@ -5261,10 +5302,15 @@ button.danger:hover {
   }
 }
 
-/* Desktop (≥1024): keep the original inline AuthBar cluster */
-@media (min-width: 1024px) {
+/* Desktop (≥1280): inline AuthBar cluster + compact status pill */
+@media (min-width: 1280px) {
   .auth-bar-desktop {
     display: inline-flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 0.35rem;
+    min-width: 0;
+    max-width: none;
   }
 
   .auth-bar-mobile {
@@ -5279,6 +5325,25 @@ button.danger:hover {
 
   .topbar-end {
     flex: 0 1 auto;
+    gap: 0.5rem;
+    max-width: min(100%, 52vw);
+  }
+
+  .auth-bar-name {
+    max-width: 6.5rem;
+  }
+
+  .status-pill {
+    flex: 0 1 auto;
+    max-width: min(11rem, 22vw);
+  }
+
+  .status-pill #statusText {
+    overflow: visible;
+    text-overflow: unset;
+    white-space: normal;
+    min-width: 0;
+    line-height: 1.25;
   }
 }
 

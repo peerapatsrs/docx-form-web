@@ -1,0 +1,125 @@
+{
+  "base": "http://127.0.0.1:3000",
+  "checks": [
+    {
+      "name": "no pill/auth overlap @360",
+      "ok": true,
+      "detail": "{\"pill\":{\"x\":256.40625,\"y\":7.1875,\"width\":91.59375,\"height\":44},\"user\":{\"x\":0,\"y\":0,\"width\":0,\"height\":0},\"desktopVisible\":false}"
+    },
+    {
+      "name": "avatar menu opener @360 ≥44px",
+      "ok": true,
+      "detail": "{\"w\":44,\"h\":44,\"ok\":true,\"topTag\":\"SPAN\",\"topClass\":\"auth-bar-avatar auth-bar-avatar-fallback\",\"topId\":\"\",\"x\":228.8125,\"y\":29.1875}"
+    },
+    {
+      "name": "account link hit-test @360",
+      "ok": true,
+      "detail": "{\"w\":247.6,\"h\":59.7,\"ok\":true,\"topTag\":\"A\",\"topClass\":\"auth-bar-menu-item auth-bar-menu-profile\",\"topId\":\"\",\"x\":216,\"y\":95.640625}"
+    },
+    {
+      "name": "admin hit-test @360",
+      "ok": true,
+      "detail": "{\"w\":247.6,\"h\":44,\"ok\":true,\"topTag\":\"A\",\"topClass\":\"auth-bar-menu-item\",\"topId\":\"\",\"x\":216,\"y\":149.890625}"
+    },
+    {
+      "name": "logout hit-test @360",
+      "ok": true,
+      "detail": "{\"w\":247.6,\"h\":44,\"ok\":true,\"topTag\":\"BUTTON\",\"topClass\":\"auth-bar-menu-item auth-bar-menu-logout\",\"topId\":\"\",\"x\":216,\"y\":196.28125}"
+    },
+    {
+      "name": "no pill/auth overlap @390",
+      "ok": true,
+      "detail": "{\"pill\":{\"x\":286.40625,\"y\":7.1875,\"width\":91.59375,\"height\":44},\"user\":{\"x\":0,\"y\":0,\"width\":0,\"height\":0},\"desktopVisible\":false}"
+    },
+    {
+      "name": "avatar menu opener @390 ≥44px",
+      "ok": true,
+      "detail": "{\"w\":44,\"h\":44,\"ok\":true,\"topTag\":\"SPAN\",\"topClass\":\"auth-bar-avatar auth-bar-avatar-fallback\",\"topId\":\"\",\"x\":258.8125,\"y\":29.1875}"
+    },
+    {
+      "name": "account link hit-test @390",
+      "ok": true,
+      "detail": "{\"w\":247.6,\"h\":59.7,\"ok\":true,\"topTag\":\"A\",\"topClass\":\"auth-bar-menu-item auth-bar-menu-profile\",\"topId\":\"\",\"x\":246,\"y\":95.640625}"
+    },
+    {
+      "name": "admin hit-test @390",
+      "ok": true,
+      "detail": "{\"w\":247.6,\"h\":44,\"ok\":true,\"topTag\":\"A\",\"topClass\":\"auth-bar-menu-item\",\"topId\":\"\",\"x\":246,\"y\":149.890625}"
+    },
+    {
+      "name": "logout hit-test @390",
+      "ok": true,
+      "detail": "{\"w\":247.6,\"h\":44,\"ok\":true,\"topTag\":\"BUTTON\",\"topClass\":\"auth-bar-menu-item auth-bar-menu-logout\",\"topId\":\"\",\"x\":246,\"y\":196.28125}"
+    },
+    {
+      "name": "no pill/auth overlap @768",
+      "ok": true,
+      "detail": "{\"pill\":{\"x\":664.40625,\"y\":7.1875,\"width\":91.59375,\"height\":44},\"user\":{\"x\":0,\"y\":0,\"width\":0,\"height\":0},\"desktopVisible\":false}"
+    },
+    {
+      "name": "avatar menu opener @768 ≥44px",
+      "ok": true,
+      "detail": "{\"w\":44,\"h\":44,\"ok\":true,\"topTag\":\"SPAN\",\"topClass\":\"auth-bar-avatar auth-bar-avatar-fallback\",\"topId\":\"\",\"x\":636.8125,\"y\":29.1875}"
+    },
+    {
+      "name": "account link hit-test @768",
+      "ok": true,
+      "detail": "{\"w\":247.6,\"h\":63.6,\"ok\":true,\"topTag\":\"A\",\"topClass\":\"auth-bar-menu-item auth-bar-menu-profile\",\"topId\":\"\",\"x\":624,\"y\":97.5859375}"
+    },
+    {
+      "name": "admin hit-test @768",
+      "ok": true,
+      "detail": "{\"w\":247.6,\"h\":44,\"ok\":true,\"topTag\":\"A\",\"topClass\":\"auth-bar-menu-item\",\"topId\":\"\",\"x\":624,\"y\":153.78125}"
+    },
+    {
+      "name": "logout hit-test @768",
+      "ok": true,
+      "detail": "{\"w\":247.6,\"h\":44,\"ok\":true,\"topTag\":\"BUTTON\",\"topClass\":\"auth-bar-menu-item auth-bar-menu-logout\",\"topId\":\"\",\"x\":624,\"y\":200.171875}"
+    },
+    {
+      "name": "no pill/auth overlap @1024",
+      "ok": true,
+      "detail": "{\"pill\":{\"x\":920.40625,\"y\":7.1875,\"width\":91.59375,\"height\":44},\"user\":{\"x\":0,\"y\":0,\"width\":0,\"height\":0},\"desktopVisible\":false}"
+    },
+    {
+      "name": "avatar menu opener @1024 ≥44px",
+      "ok": true,
+      "detail": "{\"w\":44,\"h\":44,\"ok\":true,\"topTag\":\"SPAN\",\"topClass\":\"auth-bar-avatar auth-bar-avatar-fallback\",\"topId\":\"\",\"x\":892.8125,\"y\":29.1875}"
+    },
+    {
+      "name": "account link hit-test @1024",
+      "ok": true,
+      "detail": "{\"w\":247.6,\"h\":63.6,\"ok\":true,\"topTag\":\"A\",\"topClass\":\"auth-bar-menu-item auth-bar-menu-profile\",\"topId\":\"\",\"x\":880,\"y\":97.5859375}"
+    },
+    {
+      "name": "admin hit-test @1024",
+      "ok": true,
+      "detail": "{\"w\":247.6,\"h\":44,\"ok\":true,\"topTag\":\"A\",\"topClass\":\"auth-bar-menu-item\",\"topId\":\"\",\"x\":880,\"y\":153.78125}"
+    },
+    {
+      "name": "logout hit-test @1024",
+      "ok": true,
+      "detail": "{\"w\":247.6,\"h\":44,\"ok\":true,\"topTag\":\"BUTTON\",\"topClass\":\"auth-bar-menu-item auth-bar-menu-logout\",\"topId\":\"\",\"x\":880,\"y\":200.171875}"
+    },
+    {
+      "name": "no pill/auth overlap @1280",
+      "ok": true,
+      "detail": "{\"pill\":{\"x\":1143.203125,\"y\":9.5,\"width\":104.796875,\"height\":44},\"user\":{\"x\":747.9375,\"y\":9.5,\"width\":213.078125,\"height\":44},\"desktopVisible\":true}"
+    },
+    {
+      "name": "account link hit-test @1280",
+      "ok": true,
+      "detail": "{\"w\":213.1,\"h\":44,\"ok\":true,\"topTag\":\"SPAN\",\"topClass\":\"auth-bar-name\",\"topId\":\"\",\"x\":854.4765625,\"y\":31.5}"
+    },
+    {
+      "name": "admin hit-test @1280",
+      "ok": true,
+      "detail": "{\"w\":64,\"h\":44,\"ok\":true,\"topTag\":\"A\",\"topClass\":\"auth-bar-btn auth-bar-ghost\",\"topId\":\"\",\"x\":998.609375,\"y\":31.5}"
+    },
+    {
+      "name": "logout hit-test @1280",
+      "ok": true,
+      "detail": "{\"w\":99,\"h\":44,\"ok\":true,\"topTag\":\"BUTTON\",\"topClass\":\"auth-bar-btn auth-bar-ghost\",\"topId\":\"\",\"x\":1085.703125,\"y\":31.5}"
+    }
+  ]
+}

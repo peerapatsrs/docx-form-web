@@ -168,7 +168,7 @@ export function AuthBar() {
 
   return (
     <div className="auth-bar" ref={rootRef} data-auth-bar="signed-in">
-      {/* Desktop (≥1024px): unchanged inline cluster */}
+      {/* Desktop (≥1280px): inline cluster; narrower viewports use avatar menu */}
       <div className="auth-bar-desktop">
         <Link
           className="auth-bar-user"

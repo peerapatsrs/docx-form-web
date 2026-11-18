@@ -280,14 +280,24 @@ export async function withAiTimeout<T>(
   try {
     // Hard Promise.race deadline: even if the provider ignores AbortSignal
     // (or hangs after abort), this call still settles at timeoutMs.
+    // Always abort the gate controller when the race wins so callers that
+    // listen on signal (Cursor child kill, fetch abort) tear down promptly.
     let raceTimer: ReturnType<typeof setTimeout> | null = null;
     const deadline = new Promise<never>((_, reject) => {
       raceTimer = setTimeout(() => {
-        reject(
-          new AiTimeoutError(
-            `AI_TIMEOUT: ผู้ให้บริการ AI ไม่ตอบภายใน ${Math.round(timeoutMs / 1000)} วินาที — ลองใหม่หรือเปลี่ยนโมเดล`,
-          ),
+        const timeoutErr = new AiTimeoutError(
+          `AI_TIMEOUT: ผู้ให้บริการ AI ไม่ตอบภายใน ${Math.round(timeoutMs / 1000)} วินาที — ลองใหม่หรือเปลี่ยนโมเดล`,
         );
+        try {
+          gate.controller.abort(timeoutErr);
+        } catch {
+          try {
+            gate.controller.abort();
+          } catch {
+            /* ignore */
+          }
+        }
+        reject(timeoutErr);
       }, Math.max(50, Math.floor(timeoutMs)));
     });
     try {

@@ -1,9 +1,15 @@
 /**
  * Cursor BYOK via @cursor/sdk Cloud Agent (no-repo).
  * Not OpenAI-compatible chat — put document text in the prompt and parse JSON from result.result.
+ * Real SDK calls run in a killable child process so a hung gotoReady loop cannot
+ * pin the server event loop after our AbortSignal / Promise.race deadline.
  * @see https://cursor.com/docs/sdk/typescript
  */
 
+import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   Agent,
   AuthenticationError,
@@ -22,6 +28,12 @@ import {
   isAiTimeoutError,
   withAiTimeout,
 } from "./ai-request";
+
+const requireFromHere = createRequire(import.meta.url);
+const CHILD_SCRIPT = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "ai-cursor-agent-child.mjs",
+);
 
 export type CursorAgentImage = {
   mimeType: string;
@@ -306,9 +318,10 @@ async function maybeMockCursorAgentJson(
     .trim()
     .toLowerCase();
   if (!mode) return undefined;
-  if (mode === "hang" || mode === "never") {
-    await waitWithOptionalAbort(new Promise<never>(() => {}), signal);
-    return null;
+  // Hang / never: defer to the killable child (child burns CPU; parent SIGKILLs
+  // on AbortSignal). Never hang in-process — that pins the server event loop.
+  if (mode === "hang" || mode === "never" || mode === "child-hang") {
+    return undefined;
   }
   if (mode === "401" || mode === "auth") {
     throw new AuthenticationError("Invalid API key (mock)", {
@@ -334,9 +347,113 @@ async function maybeMockCursorAgentJson(
 }
 
 /**
+ * Run Cursor Agent.create/send/wait inside a child process. On abort/timeout the
+ * parent SIGKILLs the child so SDK reconnect spin cannot pin this event loop.
+ */
+function runCursorAgentInKillableChild(
+  message: string,
+  opts: {
+    apiKey: string;
+    model: string;
+    images: CursorAgentImage[];
+    signal: AbortSignal;
+  },
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (opts.signal.aborted) {
+      if (isAiTimeoutError(opts.signal.reason)) reject(new AiTimeoutError());
+      else reject(new Error("CURSOR_AGENT_CANCELLED"));
+      return;
+    }
+    const child = spawn(process.execPath, [CHILD_SCRIPT], {
+      stdio: ["pipe", "pipe", "inherit"],
+      env: process.env,
+    });
+    let settled = false;
+    let stdout = "";
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      opts.signal.removeEventListener("abort", onAbort);
+      fn();
+    };
+    const killChild = () => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* ignore */
+      }
+    };
+    const onAbort = () => {
+      killChild();
+      settle(() => {
+        if (isAiTimeoutError(opts.signal.reason)) reject(new AiTimeoutError());
+        else reject(new Error("CURSOR_AGENT_CANCELLED"));
+      });
+    };
+    opts.signal.addEventListener("abort", onAbort, { once: true });
+
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+      if (!stdout.includes("\n")) return;
+      const line = stdout.slice(0, stdout.indexOf("\n"));
+      let parsed: { type?: string; result?: string; message?: string; name?: string };
+      try {
+        parsed = JSON.parse(line) as typeof parsed;
+      } catch {
+        return;
+      }
+      if (parsed.type === "ok") {
+        settle(() => resolve(String(parsed.result || "")));
+        killChild();
+        return;
+      }
+      if (parsed.type === "err") {
+        const err = new Error(String(parsed.message || "Cursor child error"));
+        if (parsed.name) err.name = parsed.name;
+        settle(() => reject(err));
+        killChild();
+      }
+    });
+    child.on("error", (err) => {
+      settle(() => reject(err));
+    });
+    child.on("exit", (code, signal) => {
+      if (settled) return;
+      settle(() => {
+        if (opts.signal.aborted) {
+          if (isAiTimeoutError(opts.signal.reason)) reject(new AiTimeoutError());
+          else reject(new Error("CURSOR_AGENT_CANCELLED"));
+          return;
+        }
+        reject(
+          new Error(
+            `Cursor child exited before result (code=${code}, signal=${signal})`,
+          ),
+        );
+      });
+    });
+
+    const payload = JSON.stringify({
+      type: "run",
+      apiKey: opts.apiKey,
+      model: opts.model,
+      message,
+      images: opts.images.map((img) => ({
+        mimeType: img.mimeType,
+        base64: img.base64,
+      })),
+    });
+    child.stdin?.write(`${payload}\n`);
+    child.stdin?.end();
+  });
+}
+
+/**
  * One-shot cloud no-repo agent → parse assistant text as JSON object.
- * Text-only uses Agent.prompt; images use create + send (vision).
- * Always bounded by DOCX_FORM_AI_TIMEOUT_MS (default 90s).
+ * Real calls run in a killable child; mocks stay in-process for unit tests.
+ * Always bounded by DOCX_FORM_AI_TIMEOUT_MS / caller timeoutMs (suggest: 120s).
  */
 export async function callCursorAgentJson(
   prompt: string,
@@ -355,6 +472,25 @@ export async function callCursorAgentJson(
   try {
     return await withAiTimeout(
       async (signal) => {
+        const mockMode = String(process.env.DOCX_FORM_CURSOR_AGENT_MOCK || "")
+          .trim()
+          .toLowerCase();
+        // Hang mocks must run in the killable child so SIGKILL can reclaim CPU.
+        // Skipping model catalog avoids in-process work before the child starts.
+        if (
+          mockMode === "hang" ||
+          mockMode === "never" ||
+          mockMode === "child-hang"
+        ) {
+          await runCursorAgentInKillableChild(message, {
+            apiKey,
+            model: String(opts.model || "composer-2.5").trim() || "composer-2.5",
+            images,
+            signal,
+          });
+          return null;
+        }
+
         const mocked = await maybeMockCursorAgentJson(signal);
         if (mocked !== undefined) return mocked;
 
@@ -365,24 +501,62 @@ export async function callCursorAgentJson(
         );
         if (!model) throw new Error("ยังไม่ได้เลือกโมเดล");
 
-        const agentOpts = {
-          apiKey,
-          model: { id: model },
-          cloud: { repos: [] as [] },
-        };
-
+        // Force child isolation unless explicitly disabled (debug only).
+        const forceInProcess =
+          String(process.env.DOCX_FORM_CURSOR_AGENT_INPROCESS || "")
+            .trim()
+            .toLowerCase() === "1";
         let resultText = "";
-
-        if (images.length) {
+        if (forceInProcess) {
+          const agentOpts = {
+            apiKey,
+            model: { id: model },
+            cloud: { repos: [] as [] },
+          };
           const agent = await Agent.create(agentOpts);
+          let run: Awaited<ReturnType<typeof agent.send>> | null = null;
+          const onAbort = () => {
+            void (async () => {
+              try {
+                if (run && run.status === "running") await run.cancel();
+              } catch {
+                /* ignore */
+              }
+              try {
+                if (run) {
+                  await Agent.cancelRun(run.id, {
+                    runtime: "cloud",
+                    agentId: run.agentId,
+                    apiKey,
+                  });
+                }
+              } catch {
+                /* ignore */
+              }
+              try {
+                await agent[Symbol.asyncDispose]();
+              } catch {
+                try {
+                  agent.close();
+                } catch {
+                  /* ignore */
+                }
+              }
+            })();
+          };
+          signal.addEventListener("abort", onAbort, { once: true });
           try {
-            const run = await agent.send({
-              text: message,
-              images: images.map((img) => ({
-                data: img.base64,
-                mimeType: img.mimeType,
-              })),
-            });
+            run = await agent.send(
+              images.length
+                ? {
+                    text: message,
+                    images: images.map((img) => ({
+                      data: img.base64,
+                      mimeType: img.mimeType,
+                    })),
+                  }
+                : { text: message },
+            );
             const waited = await waitWithOptionalAbort(run.wait(), signal);
             if (waited.status === "error" || waited.status === "cancelled") {
               const code = waited.error?.code ? ` (${waited.error.code})` : "";
@@ -391,23 +565,26 @@ export async function callCursorAgentJson(
             }
             resultText = String(waited.result || "");
           } finally {
+            signal.removeEventListener("abort", onAbort);
             try {
               await agent[Symbol.asyncDispose]();
             } catch {
-              agent.close();
+              try {
+                agent.close();
+              } catch {
+                /* ignore */
+              }
             }
           }
         } else {
-          const waited = await waitWithOptionalAbort(
-            Agent.prompt(message, agentOpts),
+          // Ensure the child script can resolve @cursor/sdk from this package.
+          void requireFromHere.resolve("@cursor/sdk");
+          resultText = await runCursorAgentInKillableChild(message, {
+            apiKey,
+            model,
+            images,
             signal,
-          );
-          if (waited.status === "error" || waited.status === "cancelled") {
-            const code = waited.error?.code ? ` (${waited.error.code})` : "";
-            const msg = waited.error?.message || waited.status;
-            throw new Error(`${msg}${code}`);
-          }
-          resultText = String(waited.result || "");
+          });
         }
 
         return parseJsonObject(resultText);

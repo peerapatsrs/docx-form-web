@@ -121,23 +121,47 @@ const DOCX_ATTACH_MAX_BYTES = 18 * 1024 * 1024;
  */
 const PLAIN_SEP_CLASS = "[\\t \\u00A0\\u1680\\u2000-\\u200B\\u202F\\u205F\\u3000]";
 const PLAIN_SEP_RE = /[\t \u00A0\u1680\u2000-\u200B\u202F\u205F\u3000]/u;
-const SAMPLE_MARKER_RE =
-  /\s*[\(（]\s*(?:ตัวอย่าง|sample|example|demo)\s*[\)）]\s*$/iu;
 /**
- * Contact-ish stems often glued flush to ANY value (digits OR text):
- * โทร + phone/office name · Tel + Latin token
+ * Trailing parenthetical caption after a value — any short bracketed gloss,
+ * not a fixed vocabulary list (e.g. 「(ตัวอย่าง)」 / 「(sample)」).
  */
-const GLUED_STEM_RE = /^(โทร\.?|tel\.?|t\.|แฟกซ์\.?|fax\.?)/iu;
-const GLUED_STEM_LABELS = [
-  "โทร",
-  "โทร.",
-  "Tel",
-  "tel",
-  "T.",
-  "แฟกซ์",
-  "Fax",
-  "fax",
-] as const;
+const TRAILING_PAREN_CAPTION_RE =
+  /\s*[\(（][^\)）]{1,24}[\)）]\s*$/u;
+/**
+ * Short Latin/Thai stem glued flush onto a DIGIT body (โทร02-… / Tel081…).
+ * Letter-body peels (โทรสำนักงาน) are handled via batch labels in
+ * {@link peelGluedStemUsingBatchLabels} — never by guessing Thai word cuts.
+ */
+const GLUED_STEM_RE =
+  /^([\u0E00-\u0E7FA-Za-z]{1,12})\.?(?=[0-9])/u;
+
+function gluedStemMatch(value: string): RegExpExecArray | null {
+  return GLUED_STEM_RE.exec(value);
+}
+
+/**
+ * When a suggestion omits `label` but its plainText starts with another
+ * suggestion's label from the same batch, peel that label off so the VALUE
+ * body is what gets tagged (keyword-free — labels come from the document/AI).
+ */
+function peelGluedStemUsingBatchLabels(
+  value: string,
+  batchLabels: ReadonlyArray<string>,
+): { stem: string; body: string } | null {
+  const raw = String(value || "").trim();
+  if (!raw || !batchLabels.length) return null;
+  let best: { stem: string; body: string } | null = null;
+  for (const lab of batchLabels) {
+    const stem = String(lab || "").trim();
+    if (!stem || stem.length < 2 || stem.length > 12) continue;
+    if (!raw.startsWith(stem)) continue;
+    const body = raw.slice(stem.length).replace(new RegExp(`^${PLAIN_SEP_CLASS}*`, "u"), "");
+    if (!body || body === raw) continue;
+    if (body.length < 2) continue;
+    if (!best || stem.length > best.stem.length) best = { stem, body };
+  }
+  return best;
+}
 
 type OccupiedSpan = {
   start: number;
@@ -279,9 +303,9 @@ export function stripJunkNumericSuffix(name: string): string {
 export function looksLikeGarbledName(name: string): boolean {
   const s = String(name || "").normalize("NFC").trim().replace(/^\++/, "");
   if (!s) return true;
-  // Checkbox arm words / glyphs alone are never field names.
+  // Checkbox glyphs alone are never field names. (Do not reject short Latin
+  // headers like 「No」/「Yes」 here — those are legitimate column labels.)
   if (/^[✓√✔☑☐□☒×✖]+$/u.test(s)) return true;
-  if (/^(true|false|yes|no|on|off)$/i.test(s)) return true;
   // Stable hash fallback from englishNameFromLabel — not a readable field name.
   if (/^lbl_[a-z0-9]+$/i.test(s)) return true;
   // Structural: single grapheme particle (e.g. "ที่") is never a field id.
@@ -371,8 +395,13 @@ export function looksLikeFillValue(plain: string): boolean {
   if (/\d/.test(t)) return true;
   if (/@/.test(t)) return true;
   if (/\s/.test(t) && t.length >= 8) return true;
-  // CamelCase / mixed Latin sample tokens (e.g. AlphaWidget).
-  if (/[A-Za-z]{3,}/.test(t) && /[a-z]/.test(t) && /[A-Z]/.test(t)) return true;
+  // Parenthetical notes / baht-text glosses: 「(…บาทถ้วน)」.
+  if (/^[\(（][^\)）]{4,}[\)）]$/u.test(t)) return true;
+  // Long Thai-only prose (baht-text) under the 16-char gate — keep short
+  // labels like 「จำเลยที่」(8) as captions, not fill values.
+  if (/^[\u0E00-\u0E7F]{12,}$/u.test(t)) return true;
+  // Interior CamelCase sample tokens (AlphaWidget) — not Title Case labels (Total).
+  if (/[A-Za-z]{3,}/.test(t) && /[a-z][A-Z]/.test(t)) return true;
   return false;
 }
 
@@ -611,8 +640,8 @@ function stripOuterParens(s: string): string {
 }
 
 /**
- * Value variants to try when AI omits/includes 「(ตัวอย่าง)」 / parens / glued stems.
- * Body after a stem may be digits OR arbitrary text (ชื่อบริษัท, ที่อยู่, …).
+ * Value variants to try when AI omits/includes a trailing parenthetical caption,
+ * wrapping parens, or a short stem glued onto the value body.
  */
 function valueMatchVariants(value: string): string[] {
   const raw = String(value || "").trim();
@@ -627,34 +656,40 @@ function valueMatchVariants(value: string): string[] {
     else rest.push(t);
   };
   add(raw);
-  add(raw.replace(SAMPLE_MARKER_RE, ""));
+  add(raw.replace(TRAILING_PAREN_CAPTION_RE, ""));
   add(raw.replace(/\s+/g, " "));
 
   const noParen = stripOuterParens(raw);
   add(noParen);
-  add(noParen.replace(SAMPLE_MARKER_RE, ""));
+  add(noParen.replace(TRAILING_PAREN_CAPTION_RE, ""));
 
-  // โทร02-… / โทรสำนักงานใหญ่ / (TelACME) → prefer the value body (any text).
+  // Stem+body glued flush → prefer the value body (any text/digits).
   for (const base of [raw, noParen]) {
-    const m = GLUED_STEM_RE.exec(base);
+    const m = gluedStemMatch(base);
     if (!m) continue;
     const body = base
       .slice(m[0].length)
       .replace(new RegExp(`^${PLAIN_SEP_CLASS}*`, "u"), "");
-    if (body) add(body, true);
+    if (body && body !== base) add(body, true);
   }
   return [...preferred, ...rest];
 }
 
 /**
- * When the model forgets label but plainText still starts with โทร/Tel/แฟกซ์,
- * also try those stems so the VALUE (digits or text) can be located flush after them.
+ * When the model forgets label but plainText still starts with a short glued
+ * stem, also try that stem so the VALUE can be located flush after it.
  */
 function implicitGluedStemLabels(value: string, explicitLabel: string): string[] {
   if (String(explicitLabel || "").trim()) return [];
   const variants = valueMatchVariants(value);
-  if (!variants.some((v) => GLUED_STEM_RE.test(v))) return [];
-  return [...GLUED_STEM_LABELS];
+  const out: string[] = [];
+  for (const v of variants) {
+    const m = gluedStemMatch(v);
+    if (!m) continue;
+    const stem = m[1] || m[0];
+    if (stem && !out.includes(stem)) out.push(stem);
+  }
+  return out;
 }
 
 /**
@@ -790,7 +825,7 @@ function resolveFieldPlainHits(
     // Avoid exact-matching "โทร02-…" / "โทรสำนักงาน…" when a peeled body variant exists —
     // tag the value body only (digits OR text), keep stem in label.
     const gluedWithBody =
-      GLUED_STEM_RE.test(v) &&
+      !!gluedStemMatch(v) &&
       variants.some((x) => x !== v && v.endsWith(x) && x.length > 0);
     // "-" / punctuation must NEVER exact-scan the whole doc (shatters phone numbers).
     const weakSep = /^[\-–—_.…·•/|,;:]+$/u.test(v);
@@ -912,12 +947,22 @@ function uniqueName(
   contextParts: string[] = [],
   lang: AiTagNameLanguage = "th",
   reservedLoopNames: ReadonlySet<string> = new Set(),
+  /**
+   * When true (loop inners), never emit a bare single-token name even if free —
+   * join with document context so scalars cannot collide with shallow headers
+   * and names stay specific across runs.
+   */
+  requireContextJoin = false,
 ): string | null {
-  const cleaned = stripJunkNumericSuffix(base);
+  const cleaned = stripJunkNumericSuffix(base).replace(/\//g, "_").replace(/_+/g, "_");
   if (!cleaned || !NAME_RE.test(cleaned) || looksLikeGarbledName(cleaned)) return null;
   const blocked = (n: string) =>
-    usedNames.has(n) || reservedLoopNames.has(n) || looksLikeGarbledName(n);
-  if (!blocked(cleaned)) return cleaned;
+    usedNames.has(n) || reservedLoopNames.has(n) || looksLikeGarbledName(n) || /\//.test(n);
+  const shallow =
+    requireContextJoin &&
+    !cleaned.includes("_") &&
+    !cleaned.includes("-") &&
+    cleaned.length <= 16;
 
   const ctxNames: string[] = [];
   for (const raw of contextParts) {
@@ -934,15 +979,20 @@ function uniqueName(
     const last = ctx.split(/[_/-]/u).filter(Boolean).pop() || ctx;
     // Do not offer bare `ctx` alone — that reuses another field/loop's name.
     for (const cand of [`${cleaned}_${ctx}`, `${ctx}_${cleaned}`, `${cleaned}_${last}`]) {
-      const s = (lang === "en" ? sanitizeNameAscii(cand) : sanitizeName(cand)).slice(0, 40);
+      const s = (lang === "en" ? sanitizeNameAscii(cand) : sanitizeName(cand))
+        .replace(/\//g, "_")
+        .slice(0, 40);
       if (s && NAME_RE.test(s) && !candidates.includes(s) && !looksLikeGarbledName(s)) {
         candidates.push(s);
       }
     }
   }
+  // Prefer joined forms first when a shallow loop-inner name needs specificity.
+  if (!shallow && !blocked(cleaned)) return cleaned;
   for (const cand of candidates) {
     if (!blocked(cand)) return cand;
   }
+  if (!shallow && !blocked(cleaned)) return cleaned;
   // No opaque letter/digit suffixes — skip rather than invent junk.
   return null;
 }
@@ -1593,7 +1643,35 @@ function findCellTextInRow(
     const start = starts[i];
     const end = start + cellText.length;
     if (start < rowStart || end > rowEnd) continue;
-    if (!plainDigitMatchAllowed(plainText, start, cellText)) continue;
+    // Table tag-plain concatenates cells/rows with no separator. Phone-style
+    // digit guards and Latin+digit tail checks are too strict here: a name cell
+    // may sit flush against an amount ("AlphaWidget100") and a row-final amount
+    // may sit flush against the next row's runno ("1002…"). Keep only
+    // mid-token shard rejection inside the row.
+    if (/^\d+$/.test(cellText)) {
+      const prev = start > 0 ? plainText[start - 1]! : "";
+      const next = plainText[end] || "";
+      const atRowStart = start === rowStart;
+      const atRowEnd = end === rowEnd;
+      // Reject shards of a longer number inside this row (the "1" in "100").
+      if (!atRowStart && /\d/.test(prev)) continue;
+      if (!atRowEnd && /\d/.test(next)) continue;
+    } else {
+      const prev = start > 0 ? plainText[start - 1]! : "";
+      const next = plainText[end] || "";
+      const first = cellText[0] || "";
+      const last = cellText[cellText.length - 1] || "";
+      // Mid-word Latin only (Alpha|Widget). Digits after a name cell are OK.
+      if (/[A-Za-z]/.test(prev) && /[A-Za-z]/.test(first)) continue;
+      if (/[A-Za-z]/.test(last) && /[A-Za-z]/.test(next)) continue;
+      // Mid-Thai token glue inside the row.
+      if (/[\u0E00-\u0E7F]/u.test(prev) && /[\u0E00-\u0E7F]/u.test(first)) {
+        continue;
+      }
+      if (/[\u0E00-\u0E7F]/u.test(last) && /[\u0E00-\u0E7F]/u.test(next)) {
+        continue;
+      }
+    }
     return { start, end, occurrence: i };
   }
   return null;
@@ -1694,25 +1772,75 @@ function inventListTableName(
   for (const h of headers) {
     if (!unique.includes(h)) unique.push(h);
   }
-  // Prefer headers after the first when several columns exist.
+  // Prefer a single short header after the ordinal column; never keep `/` in loop ids.
   const stemSrc = unique.length > 1 ? unique.slice(1) : unique;
-  const fromHeaders = stemSrc
-    .map((h) => resolveVarName(h, lang))
-    .filter((h) => h && h.length >= 2 && !looksLikeGarbledName(h))
-    .slice(0, 2);
-  if (lang === "en") {
-    if (fromHeaders.length) {
-      const joined = sanitizeNameAscii(fromHeaders.join("_")).slice(0, 24);
-      if (joined && !looksLikeGarbledName(joined)) return joined;
+  const cleaned = stemSrc
+    .map((h) => {
+      const n = resolveVarName(h, lang);
+      if (!n || looksLikeGarbledName(n)) return "";
+      // Drop path-like segments — loop names must be short identifiers.
+      const part = n.split(/[/_-]/u).filter((p) => p.length >= 2)[0] || n;
+      return (lang === "en" ? sanitizeNameAscii(part) : sanitizeName(part)).replace(
+        /\//g,
+        "_",
+      );
+    })
+    .filter((h) => h && h.length >= 2 && h.length <= 16 && !looksLikeGarbledName(h));
+  if (cleaned.length) {
+    for (const pick of cleaned) {
+      if (pick && !reservedLooksLikeScalarHeader(pick, unique)) return pick;
     }
-    return `rows_${tableIndex + 1}`;
+    // Every single header collides with a column — join two stems so the loop
+    // id stays document-derived and never equals a scalar column name.
+    if (cleaned.length >= 2) {
+      const joined = (lang === "en" ? sanitizeNameAscii : sanitizeName)(
+        `${cleaned[0]}_${cleaned[1]}`,
+      )
+        .replace(/\//g, "_")
+        .slice(0, 16);
+      if (
+        joined &&
+        joined.length >= 3 &&
+        !reservedLooksLikeScalarHeader(joined, unique) &&
+        !looksLikeGarbledName(joined)
+      ) {
+        return joined;
+      }
+    }
+    // One colliding header only: extend with a structural role suffix (not a
+    // content keyword list) so the loop id stays distinct from the column.
+    const only = cleaned[0]!;
+    const extended = (lang === "en" ? sanitizeNameAscii : sanitizeName)(
+      `${only}_${lang === "en" ? "rows" : "loop"}`,
+    )
+      .replace(/\//g, "_")
+      .slice(0, 16);
+    if (
+      extended &&
+      !reservedLooksLikeScalarHeader(extended, unique) &&
+      !looksLikeGarbledName(extended)
+    ) {
+      return extended;
+    }
   }
-  if (fromHeaders.length) {
-    const joined = sanitizeName(fromHeaders.join("_")).slice(0, 24);
-    if (joined && !looksLikeGarbledName(joined)) return joined;
+  // Structural short id when no usable header context exists (no numeric
+  // suffix — stripJunkNumericSuffix would peel `_1` anyway).
+  void tableIndex;
+  return lang === "en" ? "rows" : "loop";
+}
+
+/** True when a candidate loop id equals any column header (scalar/loop collision). */
+function reservedLooksLikeScalarHeader(
+  loopName: string,
+  headers: ReadonlyArray<string>,
+): boolean {
+  const n = String(loopName || "").trim();
+  if (!n) return false;
+  for (const h of headers) {
+    const hn = sanitizeName(h).replace(/\//g, "_");
+    if (hn === n || hn.split(/[_/-]/u)[0] === n) return true;
   }
-  // Structural index only when no usable header context exists.
-  return `loop_${tableIndex + 1}`;
+  return false;
 }
 
 /** True when [start,end) lies fully inside a first-data/prototype table row. */
@@ -2219,7 +2347,7 @@ export function validateAiTagSuggestions(
         .slice(label.length)
         .replace(new RegExp(`^${PLAIN_SEP_CLASS}+`, "u"), "");
     }
-    const stem = GLUED_STEM_RE.exec(value);
+    const stem = gluedStemMatch(value);
     if (stem) {
       value = value
         .slice(stem[0].length)
@@ -2266,9 +2394,19 @@ export function validateAiTagSuggestions(
     return null;
   };
 
+  // Labels declared anywhere in this suggestion batch — used to peel glued
+  // stem+value plainText (โทรสำนักงาน) without a fixed vocabulary list.
+  const batchLabels = pending
+    .map(({ raw }) =>
+      String(
+        raw.label ?? raw.fieldLabel ?? raw.field_label ?? raw.caption ?? "",
+      ).trim(),
+    )
+    .filter(Boolean);
+
   for (const { raw: row, kind: kindIn, fillEmpty } of pending) {
     if (out.length >= MAX_SUGGESTIONS) break;
-    const plain = String(row.plainText ?? row.text ?? "").trim();
+    let plain = String(row.plainText ?? row.text ?? "").trim();
     if (!plain) continue;
     const maxPlain = isListKind(kindIn) ? MAX_LIST_PLAIN : MAX_FIELD_PLAIN;
     if (plain.length > maxPlain) continue;
@@ -2276,9 +2414,16 @@ export function validateAiTagSuggestions(
 
     const kind: AiTagDraftKind = kindIn;
     // Prompt schema: `label` = nearby form caption in TAGGER_PLAIN; `name` = variable id.
-    const anchorLabel = String(
+    let anchorLabel = String(
       row.label ?? row.fieldLabel ?? row.field_label ?? row.caption ?? "",
     ).trim();
+    if (!anchorLabel && !isListKind(kind) && !fillEmpty) {
+      const peeled = peelGluedStemUsingBatchLabels(plain, batchLabels);
+      if (peeled) {
+        anchorLabel = peeled.stem;
+        plain = peeled.body;
+      }
+    }
     const headerHintEarly = String(
       row.headerHint ?? row.header ?? row.columnHeader ?? "",
     ).trim();
@@ -2745,15 +2890,32 @@ export function validateAiTagSuggestions(
           rowHeaders,
         );
       if (!baseName) continue;
+      const emptyKind: AiTagDraftKind = hint.cellIndex === 0 ? "auto" : "text";
+      let emptyBase = baseName;
+      if (
+        emptyKind === "auto" &&
+        (looksLikeGarbledName(emptyBase) || emptyBase.length > 6 || /\//.test(emptyBase))
+      ) {
+        const short =
+          String(hint.header || "")
+            .split(/[/\s_]+/u)
+            .map((p) => p.trim())
+            .filter((p) => p.length >= 2 && p.length <= 8)[0] || null;
+        emptyBase =
+          (short ? nameFromHeaderOrLabel(short, null, lang, null) : null) ||
+          parentNameStem(parent.name, lang) ||
+          emptyBase;
+      }
       const name = uniqueName(
-        baseName,
+        emptyBase,
         usedNames,
-        [hint.header, ...rowHeaders].filter(Boolean),
+        [hint.header, parent.name, ...rowHeaders].filter(Boolean),
         lang,
         reservedLoopNames,
+        emptyKind !== "auto",
       );
       if (!name || reservedLoopNames.has(name)) continue;
-      const tag = buildTag("text", name, "", "");
+      const tag = buildTag(emptyKind, name, "", "");
       if (validateTag(tag)) continue;
       usedNames.add(name);
       usedCells.add(key);
@@ -2762,7 +2924,7 @@ export function validateAiTagSuggestions(
         occurrence: hint.occurrence,
         plainStart: hint.plainStart,
         name,
-        kind: "text",
+        kind: emptyKind,
         tag,
         mode: "fill-empty-tc",
         cellIndex: hint.cellIndex,
@@ -2845,9 +3007,10 @@ export function validateAiTagSuggestions(
       const name = uniqueName(
         nameBase,
         usedNames,
-        [hint.header, ...siblingHeaders].filter(Boolean),
+        [hint.header, parent.name, ...siblingHeaders].filter(Boolean),
         lang,
         reservedLoopNames,
+        fieldKindFinal !== "auto",
       );
       if (!name || reservedLoopNames.has(name)) continue;
       if (nameEqualsSourceValue(name, hint.cellText)) continue;
@@ -2929,13 +3092,15 @@ export function validateAiTagSuggestions(
         // Placeholder glyphs in blank templates → treat as empty (fill-empty-tc).
         const sampleText =
           rawSample && !/^[✓√✖×xX\-–—·.•]+$/u.test(rawSample) ? rawSample : "";
-        const fieldKind = sampleText
+        let fieldKind: AiTagDraftKind = sampleText
           ? inferSampleFieldKind(sampleText, {
               header: hint.header,
               cellIndex: hint.cellIndex,
               isRunColumn: isRunCol(hint.tableIndex, hint.cellIndex),
             })
           : "text";
+        // Blank / empty first column → ordinal {{+…}}.
+        if (!sampleText && hint.cellIndex === 0) fieldKind = "auto";
         const fieldKindFinal: AiTagDraftKind = fieldKind;
         const siblingHeaders = [...sampleHints, ...emptyHints]
           .filter(
@@ -2975,9 +3140,10 @@ export function validateAiTagSuggestions(
         const name = uniqueName(
           baseName,
           usedNames,
-          [hint.header, ...siblingHeaders].filter(Boolean),
+          [hint.header, parent.name, ...siblingHeaders].filter(Boolean),
           lang,
           reservedLoopNames,
+          fieldKindFinal !== "auto",
         );
         if (!name || reservedLoopNames.has(name)) continue;
         if (sampleText && nameEqualsSourceValue(name, sampleText)) continue;
@@ -3047,7 +3213,8 @@ export function validateAiTagSuggestions(
   if (xml && softWraps.length) {
     /** Dash / bullet placeholders in blank templates are not real fill values. */
     const cellIsPlaceholder = (t: string) =>
-      !t || /^[✓√✖×xX\-–—·.•]+$/u.test(t);
+      !t || /^[\-–—·.•]+$/u.test(t);
+    const cellIsCheckboxGlyph = (t: string) => /^[✓√✔☑☐□☒✖×xX]$/u.test(t);
     for (const wrap of softWraps) {
       if (typeof wrap.tableIndex !== "number") continue;
       const proto = prototypes.find((p) => p.tableIndex === wrap.tableIndex);
@@ -3059,6 +3226,9 @@ export function validateAiTagSuggestions(
       );
       if (!protoRow) continue;
       const rowHeaders = protoRow.headers.map((h) => String(h || "").trim());
+      const blankTemplate = protoRow.cells.every((c) =>
+        cellIsPlaceholder(String(c.text || "").trim()),
+      );
       /** Never reuse one name for two cells in the same prototype row. */
       const usedInRow = new Set<string>();
       for (let ci = 0; ci < protoRow.cells.length; ci += 1) {
@@ -3067,15 +3237,20 @@ export function validateAiTagSuggestions(
         if (usedCells.has(key)) continue;
         const rawCell = String(protoRow.cells[ci]?.text || "").trim();
         const placeholder = cellIsPlaceholder(rawCell);
+        const checkbox = cellIsCheckboxGlyph(rawCell);
         const cellText = placeholder ? "" : rawCell;
         const header = rowHeaders[ci] || "";
-        const fieldKind = cellText
+        let fieldKind: AiTagDraftKind = cellText
           ? inferSampleFieldKind(cellText, {
               header,
               cellIndex: ci,
               isRunColumn: isRunCol(wrap.tableIndex, ci),
             })
           : "text";
+        // Blank templates: first column is the ordinal run column → {{+…}}.
+        if (blankTemplate && ci === 0 && !checkbox) fieldKind = "auto";
+        // Checkbox glyphs stay bool — never demote to text/auto.
+        if (checkbox) fieldKind = "bool";
         const fieldKindFinal: AiTagDraftKind = fieldKind;
         const siblingHeaders = rowHeaders.filter((h, i) => h && i !== ci);
         let baseName =
@@ -3084,10 +3259,18 @@ export function validateAiTagSuggestions(
         if (!baseName) continue;
         if (
           fieldKindFinal === "auto" &&
-          (looksLikeGarbledName(baseName) || baseName.length > 6)
+          (looksLikeGarbledName(baseName) || baseName.length > 6 || /\//.test(baseName))
         ) {
+          // Ordinal names come from the shortest header segment (column meaning).
+          const short =
+            header
+              .split(/[/\s_]+/u)
+              .map((p) => p.trim())
+              .filter((p) => p.length >= 2 && p.length <= 8)[0] || null;
           baseName =
+            (short ? nameFromHeaderOrLabel(short, null, lang, null) : null) ||
             structuralCellName(wrap.name, ci, lang, header, siblingHeaders) ||
+            parentNameStem(wrap.name, lang) ||
             baseName;
         }
         if (looksLikeGarbledName(baseName)) continue;
@@ -3095,9 +3278,10 @@ export function validateAiTagSuggestions(
         const name = uniqueName(
           baseName,
           rowBlocked,
-          [header, ...siblingHeaders].filter(Boolean),
+          [header, wrap.name, ...siblingHeaders].filter(Boolean),
           lang,
           reservedLoopNames,
+          /* requireContextJoin */ fieldKindFinal !== "auto",
         );
         if (!name || reservedLoopNames.has(name) || usedInRow.has(name)) {
           continue;
@@ -3203,6 +3387,16 @@ export function validateAiTagSuggestions(
       }
       // Never delete the trailing totals/VAT/note block.
       if (inTrailer) continue;
+      // Never emit delete-tr without an accepted list-table wrap for that table.
+      if (
+        !out.some(
+          (s) =>
+            s.mode === "wrap-row" &&
+            s.tableIndex === row.tableIndex,
+        )
+      ) {
+        continue;
+      }
       const rowText = plainText.slice(row.plainStart, row.plainEnd);
       out.push({
         plainText: row.rowAnchor || rowText.slice(0, 80) || `row_${row.rowIndexInTable}`,
@@ -3284,15 +3478,27 @@ export function validateAiTagSuggestions(
         const hasAmountSibling = row.cells.some(
           (c, j) => j !== ci && cellLooksLikeAmount(String(c.text || "")),
         );
-        // Short captions / rate labels stay fixed; long baht-text / notes are values.
+        // Short captions / rate labels stay fixed; fill-like baht-text / notes are values.
         const looksLikeCaption =
           !cellLooksLikeAmount(cellText) &&
+          !looksLikeFillValue(cellText) &&
           (/%/.test(cellText) ||
             /\(\s*\d/.test(cellText) ||
             (!/\d/.test(cellText) &&
               cellText.length >= 2 &&
               cellText.length <= 24));
         if (hasAmountSibling && looksLikeCaption) {
+          continue;
+        }
+        // Solo note / baht-text rows (no amount sibling) are still fill values when
+        // they look like prose amounts or parenthetical notes.
+        if (
+          !hasAmountSibling &&
+          !cellLooksLikeAmount(cellText) &&
+          !looksLikeFillValue(cellText) &&
+          cellText.length <= 12 &&
+          !/\d/.test(cellText)
+        ) {
           continue;
         }
         // Standalone caption-only cells with a rate marker are never fill values.
@@ -3319,11 +3525,17 @@ export function validateAiTagSuggestions(
         }
         if (!baseName) continue;
         if (nameEqualsSourceValue(baseName, cellText)) continue;
-        if (looksLikeFillValue(baseName) || /\d{3,}/.test(baseName)) continue;
+        // Reject names that equal the cell value or are digit-heavy — but do NOT
+        // reject Title Case labels (Total / รวมเงิน) via looksLikeFillValue.
+        if (nameEqualsSourceValue(baseName, cellText) || /\d{3,}/.test(baseName)) {
+          continue;
+        }
         const name = uniqueName(
           baseName,
           usedNames,
-          [header, labelFallback].filter((x) => x && !looksLikeFillValue(x)),
+          [header, labelFallback].filter(
+            (x) => x && !nameEqualsSourceValue(x, cellText),
+          ),
           lang,
           reservedLoopNames,
         );
@@ -3489,6 +3701,7 @@ export function validateAiTagSuggestions(
           [lbl, hint.stem, parent.name].filter(Boolean) as string[],
           lang,
           reservedLoopNames,
+          true,
         );
         if (!name || reservedLoopNames.has(name)) continue;
         if (nameEqualsSourceValue(name, tok)) continue;
@@ -3605,9 +3818,10 @@ export function validateAiTagSuggestions(
           const name = uniqueName(
             base,
             usedNames,
-            [lbl, hint.stem].filter(Boolean) as string[],
+            [lbl, hint.stem, parentWrap?.name].filter(Boolean) as string[],
             lang,
             reservedLoopNames,
+            true,
           );
           if (!name || reservedLoopNames.has(name)) continue;
           const tag = buildTag("text", name, "", "");
@@ -3634,7 +3848,8 @@ export function validateAiTagSuggestions(
         while ((tm = wordScan.exec(unitText)) !== null) {
           if (out.length >= MAX_SUGGESTIONS + CONTACT_ENRICH_SLACK) break;
           const tok = tm[0];
-          if (tok.length < 4) continue;
+          // Allow short unique fill tokens (1–3 graphemes) in later units.
+          if (tok.length < 1) continue;
           if (firstTokSet.has(tok)) continue;
           if (hint.stem && (tok === hint.stem || tok.startsWith(hint.stem))) {
             continue;
@@ -3650,9 +3865,10 @@ export function validateAiTagSuggestions(
           const name = uniqueName(
             base,
             usedNames,
-            [lbl, hint.stem].filter(Boolean) as string[],
+            [lbl, hint.stem, parentWrap?.name].filter(Boolean) as string[],
             lang,
             reservedLoopNames,
+            true,
           );
           if (!name || reservedLoopNames.has(name)) continue;
           if (nameEqualsSourceValue(name, tok)) continue;
@@ -3900,7 +4116,8 @@ export function unifyDocumentBoolArms(suggestions: AiTagSuggestion[]): void {
 }
 
 /**
- * Seed phone/email spans when the model omitted letterhead contacts.
+ * Seed digit/email spans that sit after a short document label when the model
+ * omitted them. Names come from the matched label text (never a fixed glossary).
  * Does not override occupied spans; never shards digits inside a longer number.
  */
 function enrichContactFieldsFromPlain(
@@ -3913,35 +4130,24 @@ function enrichContactFieldsFromPlain(
   if (!plainText) return;
   const softMax = MAX_SUGGESTIONS + CONTACT_ENRICH_SLACK;
 
-  const phoneStemRe =
-    /(?:โทร(?:ศัพท์)?\.?|Tel\.?|เบอร์(?:โทร(?:ศัพท์)?)?)/giu;
+  // Label token (2–24 letters) followed by a multi-digit contact body.
+  const labeledDigitRe =
+    /([\u0E00-\u0E7FA-Za-z][\u0E00-\u0E7FA-Za-z.]{0,23})[\t \u00A0]*([0-9][0-9\-\/.,\u00A0 ]{5,}[0-9])/gu;
   let stem: RegExpExecArray | null;
-  while ((stem = phoneStemRe.exec(plainText)) !== null) {
+  while ((stem = labeledDigitRe.exec(plainText)) !== null) {
     if (out.length >= softMax) break;
-    const label = stem[0];
-    let after = skipPlainSeparators(plainText, stem.index + label.length);
-    // OCR/typo noise between stem and digits (e.g. เบอร์โทรศัทย์ 02-…).
-    if (!/[0-9]/.test(plainText[after] || "")) {
-      const window = plainText.slice(after, after + 24);
-      const nearby = window.search(/[0-9]{1,3}[\-\s]?[0-9]/);
-      if (nearby < 0) continue;
-      after += nearby;
-    }
-    // Phone / comma-list body: digits with optional separators.
-    const bodyMatch = plainText
-      .slice(after)
-      .match(/^([0-9][0-9\-\/.,\u00A0 ]{5,}[0-9])/);
-    if (!bodyMatch) continue;
-    let body = bodyMatch[1]!.replace(/[\u00A0]+/g, " ").trimEnd();
+    const label = stem[1]!;
+    let body = stem[2]!.replace(/[\u00A0]+/g, " ").trimEnd();
     body = body.replace(/[\s.]+$/u, "");
     if (!/[0-9].*[0-9]/.test(body)) continue;
-    const start = after;
-    const end = after + body.length;
+    // Skip when the "label" is just more digits/noise.
+    if (/^\d+$/.test(label) || looksLikeFillValue(label)) continue;
+    const start = stem.index + stem[0].length - stem[2]!.length;
+    const end = start + body.length;
     if (!fieldSpanAllowed(start, end, occupied)) continue;
     if (!plainValueTailOk(plainText, start, body)) continue;
-    const base =
-      resolveVarName(lang === "en" ? "phone" : "โทรศัพท์", lang) ||
-      (lang === "en" ? "phone" : "โทรศัพท์");
+    const base = nameFromHeaderOrLabel(label, null, lang, body);
+    if (!base) continue;
     const name = uniqueName(base, usedNames, [label], lang);
     if (!name) continue;
     const tag = buildTag("text", name, "", "");
@@ -3958,7 +4164,7 @@ function enrichContactFieldsFromPlain(
       kind: "text",
       tag,
       mode: "replace",
-      labelHint: label.replace(/ศัทย์.*$/u, "").trim() || label,
+      labelHint: label,
     });
   }
 
@@ -3970,10 +4176,15 @@ function enrichContactFieldsFromPlain(
     const start = em.index;
     const end = start + email.length;
     if (!fieldSpanAllowed(start, end, occupied)) continue;
-    const base =
-      resolveVarName(lang === "en" ? "email" : "อีเมล", lang) ||
-      (lang === "en" ? "email" : "อีเมล");
-    const name = uniqueName(base, usedNames, ["Email"], lang);
+    // Prefer a short label immediately before the address; else a stable local-part stem.
+    const before = plainText.slice(Math.max(0, start - 48), start);
+    const labelTok = before.match(
+      /([\u0E00-\u0E7FA-Za-z][\u0E00-\u0E7FA-Za-z.]{1,23})[\t \u00A0]*$/u,
+    );
+    const label = labelTok?.[1] || email.split("@")[0] || email;
+    const base = nameFromHeaderOrLabel(label, null, lang, email);
+    if (!base) continue;
+    const name = uniqueName(base, usedNames, [label], lang);
     if (!name) continue;
     const tag = buildTag("text", name, "", "");
     if (validateTag(tag)) continue;
@@ -3989,7 +4200,7 @@ function enrichContactFieldsFromPlain(
       kind: "text",
       tag,
       mode: "replace",
-      labelHint: "Email",
+      labelHint: label,
     });
   }
 }
@@ -4122,11 +4333,11 @@ export function getAiSuggestChunkTimeoutMs(baseTimeoutMs?: number): number {
     typeof baseTimeoutMs === "number" && Number.isFinite(baseTimeoutMs)
       ? Math.floor(baseTimeoutMs)
       : DEFAULT_AI_SUGGEST_CALL_TIMEOUT_MS;
-  // Floor and hard-cap at 120s: raise short opts, never exceed the per-call wall.
-  // Remaining-budget trimming happens at each callSuggestProvider site.
+  // Hard-cap at 120s. Shorter preferred values (cheap repair) are honored;
+  // remaining-budget trimming happens at each callSuggestProvider site.
   return Math.min(
     DEFAULT_AI_SUGGEST_CALL_TIMEOUT_MS,
-    Math.max(DEFAULT_AI_SUGGEST_CALL_TIMEOUT_MS, Math.max(0, base)),
+    Math.max(5_000, Math.max(0, base)),
   );
 }
 

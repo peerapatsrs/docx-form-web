@@ -261,7 +261,7 @@ await check("chunk helpers: smaller default + timeout floor", async () => {
   assert.equal(getAiSuggestChunkRetry(), DEFAULT_AI_SUGGEST_CHUNK_RETRY);
   assert.ok(DEFAULT_AI_SUGGEST_CHUNK_RETRY >= 1);
   assert.equal(DEFAULT_AI_SUGGEST_CALL_TIMEOUT_MS, 120_000);
-  assert.ok(getAiSuggestChunkTimeoutMs(90_000) >= 120_000);
+  assert.equal(getAiSuggestChunkTimeoutMs(90_000), 90_000, "shorter preferred honored");
   assert.ok(getAiSuggestChunkTimeoutMs(180_000) <= 120_000, "hard per-call cap 120s");
   assert.equal(getAiSuggestCallTimeoutMs(90_000), getAiSuggestChunkTimeoutMs(90_000));
   assert.ok(DEFAULT_AI_SUGGEST_OVERALL_MS <= 300_000);
@@ -271,7 +271,7 @@ await check("chunk helpers: smaller default + timeout floor", async () => {
   // Small doc (<16k) stays a single chunk — timeout helpers still apply.
   const small = splitPlainTextChunks("y".repeat(8_000), 16_000);
   assert.equal(small.length, 1, "doc under 16k is one call");
-  assert.ok(getAiSuggestCallTimeoutMs(90_000) > 90_000, "single-call timeout > 90s");
+  assert.equal(getAiSuggestCallTimeoutMs(), 120_000, "default per-call is 120s");
 });
 
 await check("blank sample clones are deleted not kept as trailer", async () => {
@@ -329,6 +329,11 @@ await check("blank template table wraps prototype row with fill-empty cells", as
     "prototype cells must have unique names",
   );
   assert.ok(
+    fills.some((s) => s.cellIndex === 0 && (s.kind === "auto" || String(s.tag || "").includes("+"))),
+    "blank first column must be ordinal {{+…}}",
+  );
+  assert.ok(!/\//.test(String(wrap.name || "")), "loop name must not contain /");
+  assert.ok(
     !out.some((s) => looksLikeGarbledName(String(s.name || ""))),
     "no degenerate field names",
   );
@@ -341,6 +346,17 @@ await check("no keyword denylist or ลำดับ default in ai-tag-draft sour
     /\/\^\(รายการ\|ค่า\|value\|rows\|loop\)\$\/iu/,
   );
   assert.doesNotMatch(src, /resolveVarName\(\s*lang\s*===\s*["']en["']\s*\?\s*["']no["']\s*:\s*["']ลำดับ["']/);
+  assert.doesNotMatch(src, /SAMPLE_MARKER_RE/);
+  assert.doesNotMatch(src, /GLUED_STEM_LABELS/);
+  assert.doesNotMatch(
+    src,
+    /resolveVarName\(\s*lang\s*===\s*["']en["']\s*\?\s*["']phone["']\s*:\s*["']โทรศัพท์["']/,
+  );
+  assert.doesNotMatch(
+    src,
+    /resolveVarName\(\s*lang\s*===\s*["']en["']\s*\?\s*["']email["']\s*:\s*["']อีเมล["']/,
+  );
+  assert.doesNotMatch(src, /ตัวอย่าง\|sample\|example\|demo/);
 });
 
 await check("VAT rate caption is never tagged as a field", async () => {
@@ -386,6 +402,44 @@ await check("VAT rate caption is never tagged as a field", async () => {
         s.name === "รายการ",
     ),
     "bare รายการ scalar rejected",
+  );
+});
+
+await check("totals/baht/note values are tagged; rate captions stay static", async () => {
+  const { validateAiTagSuggestions, looksLikeFillValue } = await loadDraft();
+  const xml = readFileSync(join(fixturesDir, "leftover-sample-rows.xml"), "utf8");
+  const plain = "NoItemAmt1AlphaWidget1002BetaWidget2003GammaWidget300Total600";
+  assert.equal(looksLikeFillValue("Total"), false, "Title Case label is not a fill value");
+  assert.equal(looksLikeFillValue("หนึ่งพันสองร้อยบาท"), true, "baht-text is fill");
+  assert.equal(looksLikeFillValue("(บาทถ้วน)"), true, "parenthetical note is fill");
+  const out = validateAiTagSuggestions(
+    plain,
+    [
+      {
+        plainText: "1AlphaWidget100",
+        name: "rows",
+        kind: "list-table",
+        mode: "wrap-row",
+      },
+    ],
+    xml,
+    "th",
+  );
+  assert.ok(
+    out.some((s) => s.mode === "replace" && s.plainText === "600" && s.name === "Total"),
+    "Total amount 600 tagged from sibling label",
+  );
+  assert.ok(
+    out.some((s) => s.mode === "replace" && s.plainText === "1" && s.kind === "auto"),
+    "one-char runno cell tagged as auto",
+  );
+  assert.ok(
+    out.some((s) => s.mode === "replace" && s.plainText === "AlphaWidget"),
+    "name cell tagged",
+  );
+  assert.ok(
+    out.some((s) => s.mode === "replace" && s.plainText === "100"),
+    "amount cell tagged",
   );
 });
 

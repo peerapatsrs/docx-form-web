@@ -228,6 +228,110 @@ await check("mock hang times out with AI_TIMEOUT", async () => {
   );
 });
 
+await check("event loop stays responsive after withAiTimeout abandons a spinner", async () => {
+  const { withAiTimeout, isAiTimeoutError } = await loadFresh(
+    "src/server/ai-request.ts",
+  );
+  // Simulate SDK gotoReady: ignore AbortSignal and spin the CPU in a tight loop
+  // scheduled on the microtask/macrotask queue via setImmediate chunks so the
+  // timeout timer can still fire — then verify the loop is aborted and the
+  // event loop responds within a few dozen ms.
+  let spinning = true;
+  const spinner = () => {
+    if (!spinning) return;
+    const end = Date.now() + 5;
+    while (Date.now() < end) {
+      /* burn */
+    }
+    if (spinning) setImmediate(spinner);
+  };
+  setImmediate(spinner);
+  let threw = null;
+  try {
+    await withAiTimeout(
+      (signal) =>
+        new Promise((_, reject) => {
+          // Provider ignores abort for the work itself (SDK hang) — only the
+          // race deadline settles the promise. Mirror Cursor: detach on abort.
+          signal.addEventListener(
+            "abort",
+            () => {
+              spinning = false;
+              reject(signal.reason || new Error("aborted"));
+            },
+            { once: true },
+          );
+        }),
+      { route: "test.spin", provider: "cursor", timeoutMs: 80 },
+    );
+  } catch (err) {
+    threw = err;
+  }
+  spinning = false;
+  assert.ok(isAiTimeoutError(threw), String(threw));
+  const t0 = Date.now();
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(
+    Date.now() - t0 < 200,
+    `event loop blocked after timeout (${Date.now() - t0}ms)`,
+  );
+});
+
+await check("Cursor hang mock: child SIGKILL keeps parent event loop responsive", async () => {
+  await withEnv(
+    {
+      DOCX_FORM_CURSOR_AGENT_MOCK: "hang",
+      DOCX_FORM_AI_TIMEOUT_MS: "200",
+      DOCX_FORM_CURSOR_AGENT_INPROCESS: undefined,
+    },
+    async () => {
+      const { callCursorAgentJson } = await loadFresh(
+        "src/server/ai-cursor-agent.ts",
+      );
+      const { isAiTimeoutError } = await loadFresh("src/server/ai-request.ts");
+      let threw = null;
+      const tCall = Date.now();
+      try {
+        await callCursorAgentJson("hang in killable child", {
+          apiKey: "crsr_mock_hang_key_abcdefgh",
+          model: "composer-2.5",
+          route: "mock.hang.child",
+          timeoutMs: 200,
+        });
+      } catch (err) {
+        threw = err;
+      }
+      assert.ok(isAiTimeoutError(threw), String(threw));
+      assert.ok(
+        Date.now() - tCall < 3_000,
+        `hang mock took too long (${Date.now() - tCall}ms)`,
+      );
+      const t0 = Date.now();
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setTimeout(r, 30));
+      assert.ok(
+        Date.now() - t0 < 250,
+        `event loop blocked after child SIGKILL (${Date.now() - t0}ms)`,
+      );
+    },
+  );
+});
+
+await check("suggest call timeout helper hard-caps at 120s", async () => {
+  const {
+    getAiSuggestCallTimeoutMs,
+    getAiSuggestOverallBudgetMs,
+    DEFAULT_AI_SUGGEST_CALL_TIMEOUT_MS,
+    DEFAULT_AI_SUGGEST_OVERALL_MS,
+  } = await loadFresh("src/server/ai-tag-draft.ts");
+  assert.equal(DEFAULT_AI_SUGGEST_CALL_TIMEOUT_MS, 120_000);
+  assert.equal(DEFAULT_AI_SUGGEST_OVERALL_MS, 300_000);
+  assert.equal(getAiSuggestCallTimeoutMs(500_000), 120_000);
+  assert.equal(getAiSuggestCallTimeoutMs(30_000), 30_000);
+  assert.equal(getAiSuggestOverallBudgetMs(999_999), 300_000);
+});
+
 await check("mock 401 returns clear auth error", async () => {
   await withEnv(
     {

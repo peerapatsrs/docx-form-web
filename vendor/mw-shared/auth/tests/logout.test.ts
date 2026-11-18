@@ -50,6 +50,39 @@ describe("RP-initiated logout", () => {
     expect(res.body).toBeNull();
   });
 
+  it("loads id_token_hint from the server session when the cookie is absent", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const freshToken = unsignedJwt({
+      exp: now + 600,
+      iat: now,
+      sub: "u",
+    });
+    const { client, sessions } = await createTestClient({
+      postLogoutRedirectUri: "https://app.test/logged-out",
+      idTokenHintFreshnessSec: 60,
+    });
+    await sessions.create({
+      sessionId: "sess-server-hint",
+      userId: "u1",
+      sub: "sub-1",
+      sid: "sid-1",
+      idToken: freshToken,
+    });
+
+    const result = await client.logout({
+      sessionId: "sess-server-hint",
+      // No idTokenHint and no cookie — session store must supply the hint.
+    });
+    expect([302, 303]).toContain(result.status);
+    const url = new URL(result.redirectTo!);
+    expect(url.searchParams.get("id_token_hint")).toBe(freshToken);
+    expect(url.searchParams.get("client_id")).toBe("test-client");
+    expect(url.searchParams.get("post_logout_redirect_uri")).toBe(
+      "https://app.test/logged-out",
+    );
+    expect(await sessions.get("sess-server-hint")).toBeNull();
+  });
+
   it("omits id_token_hint when the token is stale (hub fallback)", async () => {
     const now = Math.floor(Date.now() / 1000);
     const staleToken = unsignedJwt({

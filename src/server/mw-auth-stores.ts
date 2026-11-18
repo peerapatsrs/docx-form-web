@@ -78,6 +78,11 @@ export async function ensureMwAuthStoresSchema(
           "updatedAt" timestamptz NOT NULL DEFAULT NOW()
         )
       `);
+      // Raw id_token for RP-initiated logout hint (cookie may be dropped when oversized).
+      await q(`
+        ALTER TABLE oidc_session_index
+          ADD COLUMN IF NOT EXISTS "idToken" text
+      `);
       await q(`
         CREATE INDEX IF NOT EXISTS oidc_session_index_sid_idx
           ON oidc_session_index (sid)
@@ -195,15 +200,16 @@ export function createPgSessionIndexStore(): SessionStore {
       await ensureMwAuthStoresSchema();
       await q(
         `INSERT INTO oidc_session_index
-           ("sessionId", "userId", sub, sid, "expiresAt", "updatedAt")
-         VALUES ($1, $2, $3, $4,
-           CASE WHEN $5::bigint IS NULL THEN NULL
-                ELSE to_timestamp($5 / 1000.0) END,
+           ("sessionId", "userId", sub, sid, "idToken", "expiresAt", "updatedAt")
+         VALUES ($1, $2, $3, $4, $5,
+           CASE WHEN $6::bigint IS NULL THEN NULL
+                ELSE to_timestamp($6 / 1000.0) END,
            NOW())
          ON CONFLICT ("sessionId") DO UPDATE SET
            "userId" = EXCLUDED."userId",
            sub = EXCLUDED.sub,
            sid = EXCLUDED.sid,
+           "idToken" = EXCLUDED."idToken",
            "expiresAt" = EXCLUDED."expiresAt",
            "updatedAt" = NOW()`,
         [
@@ -211,6 +217,7 @@ export function createPgSessionIndexStore(): SessionStore {
           session.userId,
           session.sub,
           session.sid ?? null,
+          session.idToken ?? null,
           session.expiresAt ?? null,
         ],
       );
@@ -224,10 +231,11 @@ export function createPgSessionIndexStore(): SessionStore {
         userId: string;
         sub: string;
         sid: string | null;
+        idToken: string | null;
         expiresAt: Date | null;
       }>(
         `SELECT "sessionId" as "sessionId", "userId" as "userId", sub, sid,
-                "expiresAt" as "expiresAt"
+                "idToken" as "idToken", "expiresAt" as "expiresAt"
          FROM oidc_session_index
          WHERE "sessionId" = $1
          LIMIT 1`,
@@ -240,6 +248,7 @@ export function createPgSessionIndexStore(): SessionStore {
         userId: row.userId,
         sub: row.sub,
         sid: row.sid,
+        idToken: row.idToken,
         expiresAt: row.expiresAt ? new Date(row.expiresAt).getTime() : null,
       };
     },
@@ -258,10 +267,11 @@ export function createPgSessionIndexStore(): SessionStore {
         userId: string;
         sub: string;
         sid: string | null;
+        idToken: string | null;
         expiresAt: Date | null;
       }>(
         `SELECT "sessionId" as "sessionId", "userId" as "userId", sub, sid,
-                "expiresAt" as "expiresAt"
+                "idToken" as "idToken", "expiresAt" as "expiresAt"
          FROM oidc_session_index
          WHERE sid = $1`,
         [sid],
@@ -271,6 +281,7 @@ export function createPgSessionIndexStore(): SessionStore {
         userId: row.userId,
         sub: row.sub,
         sid: row.sid,
+        idToken: row.idToken,
         expiresAt: row.expiresAt ? new Date(row.expiresAt).getTime() : null,
       }));
     },
@@ -282,10 +293,11 @@ export function createPgSessionIndexStore(): SessionStore {
         userId: string;
         sub: string;
         sid: string | null;
+        idToken: string | null;
         expiresAt: Date | null;
       }>(
         `SELECT "sessionId" as "sessionId", "userId" as "userId", sub, sid,
-                "expiresAt" as "expiresAt"
+                "idToken" as "idToken", "expiresAt" as "expiresAt"
          FROM oidc_session_index
          WHERE sub = $1`,
         [sub],
@@ -295,6 +307,7 @@ export function createPgSessionIndexStore(): SessionStore {
         userId: row.userId,
         sub: row.sub,
         sid: row.sid,
+        idToken: row.idToken,
         expiresAt: row.expiresAt ? new Date(row.expiresAt).getTime() : null,
       }));
     },

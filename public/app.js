@@ -4527,6 +4527,7 @@ async function runTaggerAiDraft() {
       const am = String(a?.mode || "").toLowerCase().replace(/_/g, "-");
       const bm = String(b?.mode || "").toLowerCase().replace(/_/g, "-");
       const rank = (k, m) => {
+        if (k === "delete-tr" || m === "delete-tr") return -1;
         if (k === "list" || k === "list-table" || m === "wrap" || m === "wrap-row") return 2;
         if (m === "fill-empty-tc" || m === "fill-empty") return 1;
         return 0;
@@ -4538,6 +4539,45 @@ async function runTaggerAiDraft() {
     const wrapOccByTag = new Map();
 
     for (const s of sortedRaw) {
+      const modeEarly = String(s.mode || "").toLowerCase().replace(/_/g, "-");
+      const kindEarly = String(s.kind || "").toLowerCase().replace(/_/g, "-");
+      // Server-emitted leftover sample-row removals after list-table wrap-row.
+      if (modeEarly === "delete-tr" || kindEarly === "delete-tr") {
+        const tableIndex = Number(s.tableIndex);
+        const rowIndexInTable = Number(s.rowIndexInTable);
+        if (
+          !Number.isFinite(tableIndex) ||
+          tableIndex < 0 ||
+          !Number.isFinite(rowIndexInTable) ||
+          rowIndexInTable < 0
+        ) {
+          continue;
+        }
+        const plain = String(s.plainText || "").trim() || `row_${rowIndexInTable}`;
+        let occ = Number(s.occurrence);
+        if (!Number.isFinite(occ) || occ < 0) occ = 0;
+        let plainStart =
+          typeof s.plainStart === "number" && s.plainStart >= 0
+            ? s.plainStart
+            : nthOccurrenceStart(original, plain, occ);
+        if (plainStart < 0) plainStart = 0;
+        const id = `ai_del_${Date.now().toString(36)}_${n++}_${tableIndex}_${rowIndexInTable}`;
+        toAdd.push({
+          id,
+          plainText: plain,
+          occurrence: occ,
+          plainStart,
+          tag: "",
+          mode: "delete-tr",
+          kind: "delete-tr",
+          label: "ลบแถวตาราง",
+          source: "ai",
+          tableIndex,
+          rowIndexInTable,
+        });
+        continue;
+      }
+
       const plain = String(s.plainText || "").trim();
       if (!plain) continue;
       let name = normalizeFieldName(String(s.name || "").replace(/^#+/, ""));
@@ -13735,9 +13775,11 @@ function buildValuesPayloadFrom(snap) {
         : String(snap.values[f.name] ?? "");
       for (const a of f.aliases || []) values[a] = values[f.name];
     } else if (f.type === "bool") {
+      // Send real booleans — server resolves arms. Never post falseText ("☐") as
+      // the value (non-empty strings were historically treated as truthy).
       const on = !snap.skip[f.name] && !!snap.values[f.name];
-      values[f.name] = on ? f.trueText : f.falseText;
-      for (const a of f.aliases || []) values[a] = values[f.name];
+      values[f.name] = on;
+      for (const a of f.aliases || []) values[a] = on;
     } else if (f.type === "auto") {
       values[f.name] = "1";
       for (const a of f.aliases || []) values[a] = values[f.name];
@@ -13759,7 +13801,7 @@ function buildValuesPayloadFrom(snap) {
             } else if (item.type === "bool") {
               const on =
                 !snap.rowSkip[listName]?.[idx]?.[item.name] && !!row[item.name];
-              out[item.name] = on ? item.trueText : item.falseText;
+              out[item.name] = on;
             } else if (item.type === "list") {
               const nested = Array.isArray(row[item.name]) ? row[item.name] : [];
               out[item.name] = nested.map((nr, nidx) =>

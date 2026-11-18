@@ -416,6 +416,46 @@ function compatRowSkipFlag(
 }
 
 /**
+ * Resolve a form/API bool value to on/off.
+ * Accepts: real booleans, true/false arm glyph strings (UI historically sent
+ * falseText like "☐"), and common true/false tokens. Never treat a non-empty
+ * false-arm string as truthy.
+ */
+export function resolveBoolFormValue(
+  raw: unknown,
+  trueText: string,
+  falseText: string,
+): boolean {
+  if (typeof raw === "boolean") return raw;
+  if (raw == null) return false;
+  if (typeof raw === "number") return raw !== 0 && !Number.isNaN(raw);
+
+  const s = String(raw);
+  const t = String(trueText ?? "");
+  const f = String(falseText ?? "");
+
+  // Prefer exact arm matches (UI may post √ / ☐ instead of booleans).
+  if (t !== "" && s === t) return true;
+  if (f !== "" && s === f) return false;
+
+  const low = s.trim().toLowerCase();
+  if (
+    low === "" ||
+    low === "false" ||
+    low === "0" ||
+    low === "off" ||
+    low === "no"
+  ) {
+    return false;
+  }
+  if (low === "true" || low === "1" || low === "on" || low === "yes") {
+    return true;
+  }
+  // Unknown non-empty string that isn't an arm: not a reliable "on".
+  return false;
+}
+
+/**
  * Convert draft values/skip into the payload shape expected by fillTemplate
  * (bool → trueText/falseText, auto row numbers, skipped → "" / [], nested lists).
  * Mirrors the browser buildValuesPayload(). Legacy NFKC value/skip keys resolve
@@ -443,7 +483,11 @@ export function toFillValues(
       } else if (item.type === "bool") {
         const on =
           !compatRowSkipFlag(rowSkip, listName, idx, item.name) &&
-          !!compatBagValue(rowBag, item.name);
+          resolveBoolFormValue(
+            compatBagValue(rowBag, item.name),
+            item.trueText,
+            item.falseText,
+          );
         writeAliased(rowOut, item, on ? item.trueText : item.falseText);
       } else if (item.type === "list") {
         if (
@@ -490,7 +534,12 @@ export function toFillValues(
     }
     if (f.type === "bool") {
       const on =
-        !compatSkipFlag(skip, f.name) && !!compatBagValue(values, f.name);
+        !compatSkipFlag(skip, f.name) &&
+        resolveBoolFormValue(
+          compatBagValue(values, f.name),
+          f.trueText,
+          f.falseText,
+        );
       writeAliased(out, f, on ? f.trueText : f.falseText);
       continue;
     }

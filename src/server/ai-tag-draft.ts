@@ -25,6 +25,7 @@ import {
 import { VAR_NAME_RE as NAME_RE } from "./field-names";
 import {
   extractTaggerPlainText,
+  listAllDataTableRows,
   listEmptyTableCellHints,
   listParagraphListHints,
   listPrototypeTableRowSpans,
@@ -33,13 +34,20 @@ import {
   validateListCloseTag,
   validateListOpenTag,
   validateTag,
+  type DataTableRowInfo,
   type ParagraphListHint,
   type PrototypeTableRowSpan,
   type TableEmptyCellHint,
   type TableSampleCellHint,
 } from "./template-tagger";
 
-export type AiTagDraftKind = "text" | "bool" | "auto" | "list" | "list-table";
+export type AiTagDraftKind =
+  | "text"
+  | "bool"
+  | "auto"
+  | "list"
+  | "list-table"
+  | "delete-tr";
 
 export type AiTagSuggestion = {
   plainText: string;
@@ -48,7 +56,7 @@ export type AiTagSuggestion = {
   name: string;
   kind: AiTagDraftKind;
   tag: string;
-  mode: "replace" | "wrap" | "wrap-row" | "fill-empty-tc";
+  mode: "replace" | "wrap" | "wrap-row" | "fill-empty-tc" | "delete-tr";
   closeTag?: string;
   trueText?: string;
   falseText?: string;
@@ -279,13 +287,39 @@ function resolveVarName(raw: string, lang: AiTagNameLanguage): string {
  */
 export function stripJunkNumericSuffix(name: string): string {
   let s = String(name || "").normalize("NFC").trim();
-  // Repeatedly peel trailing _digits (field_2_3 → field).
-  for (let i = 0; i < 4; i += 1) {
-    const next = s.replace(/_+\d+$/u, "").replace(/_+$/u, "");
+  // Peel trailing _digits and single-letter junk (_2, _ก, _a) repeatedly.
+  for (let i = 0; i < 6; i += 1) {
+    const next = s
+      .replace(/_+\d+$/u, "")
+      .replace(/_+[a-zA-Z]$/u, "")
+      .replace(/_+[ก-ฮ]$/u, "")
+      .replace(/_+$/u, "");
     if (next === s) break;
     s = next;
   }
   return s;
+}
+
+/**
+ * Reject OCR/garbled identifiers like 「ที่ทัที่_ที่」— short repeated syllables
+ * with almost no unique content.
+ */
+export function looksLikeGarbledName(name: string): boolean {
+  const s = String(name || "").normalize("NFC").trim();
+  if (!s) return true;
+  const parts = s.split(/[_/-]+/u).filter(Boolean);
+  if (!parts.length) return true;
+  // Many tiny parts that are near-duplicates of each other.
+  const short = parts.filter((p) => p.length <= 2);
+  if (parts.length >= 3 && short.length >= parts.length - 1) return true;
+  const joined = parts.join("");
+  if (joined.length >= 4) {
+    const uniq = new Set([...joined]);
+    if (uniq.size <= 2) return true;
+  }
+  // Alternating 1–2 char Thai noise: ที่ทัที่
+  if (/^(?:ที่|ทั|ทิ|ที){3,}/u.test(joined)) return true;
+  return false;
 }
 
 /**
@@ -363,39 +397,80 @@ export function normalizeBoolArms(
 }
 
 /**
- * auto / {{+name}} only for real running numbers (sequence column / short first-col digit).
- * Prices, survey pages, and other numeric-ish values stay text even inside loops.
+ * True when column cell values across body rows form a short integer run
+ * (1,2,3… or 0,1,2…). Detects numbering from the data itself — not from
+ * caption keywords.
+ */
+export function columnLooksLikeRunSequence(
+  rows: ReadonlyArray<{ cells: ReadonlyArray<{ text: string }> }>,
+  cellIndex: number,
+): boolean {
+  if (cellIndex < 0 || !rows.length) return false;
+  const nums: number[] = [];
+  for (const row of rows) {
+    const raw = String(row.cells[cellIndex]?.text ?? "").trim();
+    if (!raw) continue;
+    if (!/^\d{1,4}$/.test(raw)) return false;
+    nums.push(Number(raw));
+  }
+  if (nums.length < 2) return false;
+  const sorted = [...nums].sort((a, b) => a - b);
+  // Must be unique consecutive integers (allow start at 0 or 1).
+  for (let i = 1; i < sorted.length; i += 1) {
+    if (sorted[i] !== sorted[i - 1]! + 1) return false;
+  }
+  return sorted[0] === 0 || sorted[0] === 1;
+}
+
+/**
+ * Detect run-sequence column indexes for a table from its body rows.
+ */
+export function detectRunSequenceColumns(
+  rows: ReadonlyArray<{ cells: ReadonlyArray<{ text: string }> }>,
+): Set<number> {
+  const out = new Set<number>();
+  if (!rows.length) return out;
+  const width = Math.max(0, ...rows.map((r) => r.cells.length));
+  for (let ci = 0; ci < width; ci += 1) {
+    if (columnLooksLikeRunSequence(rows, ci)) out.add(ci);
+  }
+  return out;
+}
+
+/**
+ * auto / {{+name}} only for real running numbers.
+ * Prefer data-driven {@link isRunColumn} (sequential integers across rows).
+ * Latin generic markers (#/No/seq) are weak signals only when column evidence
+ * is unknown. Never key off language-specific caption words.
  */
 export function looksLikeRunSequence(opts: {
   header?: string | null;
   cellIndex?: number | null;
   cellText?: string | null;
+  /** True when this column's body values are sequential integers. */
+  isRunColumn?: boolean | null;
 }): boolean {
   const text = String(opts.cellText ?? "").trim();
   // Non-digit payloads (prices-as-text, labels) are never {{+}}.
   if (text && !/^\d{1,4}$/.test(text)) return false;
+  if (opts.isRunColumn === true) return true;
+  if (opts.isRunColumn === false) return false;
   const header = String(opts.header ?? "")
     .normalize("NFC")
     .trim();
-  if (header) {
-    if (/[#№]|no\.?\b|seq(uence)?\b|ordinal|\brun\b/i.test(header)) return true;
-    if (/ลำดับ/.test(header)) return true;
-    // Short captions that end with 「ที่」 (จำเลยที่ / โจทก์ที่) are run labels.
-    if (header.length <= 16 && /ที่\s*$/u.test(header)) return true;
-    if (/^(ที่|No\.?|#)$/iu.test(header.replace(/\s+/gu, ""))) return true;
+  // Weak Latin markers when column evidence is unavailable.
+  if (header && /[#№]|\bno\.?\b|\bseq(uence)?\b|\bordinal\b|\brun\b/i.test(header)) {
+    return true;
   }
-  // First body column + short digit (or empty fill-empty-tc in col 0)
-  // only when the header is absent or itself sequence-like — never for
-  // labeled price/qty/amount columns.
+  // Single-row / unknown columns cannot prove a sequence from data. Fall back to
+  // first-column short digit only (never language-specific caption words).
   if (
     typeof opts.cellIndex === "number" &&
     opts.cellIndex === 0 &&
-    (!text || /^\d{1,3}$/.test(text)) &&
-    !header
+    (!text || /^\d{1,3}$/.test(text))
   ) {
     return true;
   }
-  // Digit with no header and no cell index — not enough evidence for {{+}}.
   return false;
 }
 
@@ -747,8 +822,9 @@ function resolveFieldPlainHits(
 }
 
 /**
- * Claim a unique variable name. Never invent `_2` / `_3` disambiguators —
- * prefer contextual suffixes from labels/headers/parent wraps, then letter suffixes.
+ * Claim a unique variable name. Never invent `_2` / `_3` / `_ก` / `_a`
+ * disambiguators — prefer contextual suffixes from labels/headers/parent wraps.
+ * If no contextual candidate is free, drop the suggestion (return null).
  */
 function uniqueName(
   base: string,
@@ -757,7 +833,7 @@ function uniqueName(
   lang: AiTagNameLanguage = "th",
 ): string | null {
   const cleaned = stripJunkNumericSuffix(base);
-  if (!cleaned || !NAME_RE.test(cleaned)) return null;
+  if (!cleaned || !NAME_RE.test(cleaned) || looksLikeGarbledName(cleaned)) return null;
   if (!usedNames.has(cleaned)) return cleaned;
 
   const ctxNames: string[] = [];
@@ -777,15 +853,7 @@ function uniqueName(
   for (const cand of candidates) {
     if (!usedNames.has(cand)) return cand;
   }
-  // Last resort: alphabetic suffixes (never numeric _2/_3).
-  const alphabet =
-    lang === "en"
-      ? "abcdefghijklmnopqrstuvwxyz"
-      : "กขคงจฉชซฌญฎฏฐฑฒณดตถทธนบปผฝพฟภมยรลวศษสหฬอฮ";
-  for (let i = 0; i < alphabet.length; i += 1) {
-    const cand = `${cleaned}_${alphabet[i]}`;
-    if (NAME_RE.test(cand) && !usedNames.has(cand)) return cand;
-  }
+  // No opaque letter/digit suffixes — skip rather than invent junk.
   return null;
 }
 
@@ -863,16 +931,16 @@ function formatParagraphListHintsForPrompt(hints: ParagraphListHint[]): string {
 function nameLanguagePromptRule(lang: AiTagNameLanguage): string {
   if (lang === "en") {
     return `- name (REQUIRED language: English snake_case): ASCII letters, digits, underscore, dot, hyphen only — NO Thai characters.
-  Examples: defendant_no, district, seq, plaintiff_name, expense_amount.
-  From Thai headers: 「จำเลยที่」/「ลำดับ」→ defendant_no or seq; 「เขต / อำเภอ」→ district.
+  Examples: district, seq, party_name, amount, address.
+  From headers derive snake_case from the nearby label (「เขต / อำเภอ」→ district).
   Prefer short descriptive English identifiers grounded in the nearby label.
-  Never use numeric collision suffixes (_2/_3). Never emit bare generics (items/amount/list) when a label/role is available.`;
+  Never use numeric/letter collision suffixes (_2/_3/_a). Never emit bare generics (items/amount/list) when a label/role is available.`;
   }
   return `- name (REQUIRED language: Thai identifiers preferred): Thai and/or Latin letters, digits, underscore, dot, hyphen only (no spaces).
-  Examples: ลำดับ, เขต_อำเภอ, จำเลยที่, ชื่อ, รายการค่าใช้จ่าย.
-  From headers keep Thai when clear (「จำเลยที่」→ จำเลยที่ or ลำดับ; 「เขต / อำเภอ」→ เขต_อำเภอ).
+  Examples: เขต_อำเภอ, ชื่อ, วันที่, ที่อยู่.
+  From headers keep Thai when clear (「เขต / อำเภอ」→ เขต_อำเภอ).
   Prefer short descriptive names grounded in the nearby label/role.
-  Never use numeric collision suffixes (_2/_3). Never emit bare one-token names when the caption gives more context.`;
+  Never use numeric/letter collision suffixes (_2/_3/_ก). Never emit bare one-token names when the caption gives more context.`;
 }
 
 function buildSuggestPrompt(opts: {
@@ -907,13 +975,13 @@ function buildSuggestPrompt(opts: {
   const nameExample =
     opts.nameLanguage === "en"
       ? '{"plainText":"1","name":"seq","kind":"auto","mode":"replace"}'
-      : '{"plainText":"1","name":"ลำดับ","kind":"auto","mode":"replace"}';
+      : '{"plainText":"1","name":"seq","kind":"auto","mode":"replace"}';
   const listNameExample =
-    opts.nameLanguage === "en" ? "defendants" : "รายการจำเลย";
+    opts.nameLanguage === "en" ? "party_rows" : "รายการแถว";
   const outsideDigitExample =
     opts.nameLanguage === "en"
-      ? '{"plainText":"1","name":"defendant_no","kind":"text","mode":"replace"}'
-      : '{"plainText":"1","name":"จำเลยที่","kind":"text","mode":"replace"}';
+      ? '{"plainText":"1","name":"ref_no","kind":"text","mode":"replace"}'
+      : '{"plainText":"1","name":"เลขอ้างอิง","kind":"text","mode":"replace"}';
   const emptyNameExample =
     opts.nameLanguage === "en" ? "district" : "เขต_อำเภอ";
   const truncNotes = [
@@ -952,14 +1020,14 @@ How to split label vs value (use your judgment on the real text):
 Kinds / modes (schema the app understands — pick what fits the document):
 - "text" — one-off sample → {{name}} (replace), OR blank table cell (fill-empty-tc). Digits outside loops are text (e.g. ${outsideDigitExample}), never {{+name}} there. Prices, quantities, page refs, and other non-sequence numbers are text even inside loops.
 - "bool" — checkbox-like √/✓/☑ → always emit BOTH arms: {{name?√,☐}} (true glyph, unchecked glyph). Never leave falseText empty. Unchecked must render ☐ (or ×), never √.
-- "auto" — ONLY a running sequence number INSIDE an accepted list/list-table wrap (column labeled ลำดับ/ที่/No/seq, or first-column short run index) → {{+name}}. Forbidden for prices, rates, survey pages, amounts, case numbers outside that sequence column. 「จำเลยที่」alone is never auto.
+- "auto" — ONLY a running sequence number INSIDE an accepted list/list-table wrap when the column's body values are sequential integers (1,2,3…) → {{+name}}. Forbidden for prices, rates, quantities, page refs, amounts, and other non-sequence numbers. Digits outside loops are never auto.
 - "list" — repeating prose OUTSIDE tables: wrap the FIRST unit only (mode "wrap"). Name like "${listNameExample}". MUST also emit inner replace fields for every fill-in inside that first unit (name, address, ids, …). Leave later units untagged.
 - "list-table" — repeating TABLE rows: wrap ONLY the first body/data row (mode "wrap-row"). Skip headers and later sample rows. MUST emit replace/auto/bool for each non-empty sample cell on that prototype row (incl. first column), e.g. ${nameExample}. Empty meaningful cells → fill-empty-tc with cellIndex (name e.g. ${emptyNameExample}).
 - Prefer sample fill-in spots over headings/boilerplate as the replaced span (captions go in "label").
-- Distinct meanings → distinct names even when values look alike: buyer vs seller address, buyer vs seller tax id, document date vs document number, party A vs party B phone. Derive names from the nearby label/role (e.g. ที่อยู่ผู้ซื้อ / ที่อยู่ผู้ขาย). NEVER disambiguate with _2/_3/_47 numeric suffixes — use role/context words instead. Never emit bare one-word names when a nearby caption gives more context.
-- Leave fixed letterhead logos/court seals as plain text, BUT DO tag fillable letterhead/header values: case/black-red numbers, party names, phones, emails, addresses, and dates when they are user-fillable samples.
-- Cover typical fill blanks: letterhead/header fields, end dates, signature lines, name lines, amounts, defendant/plaintiff inners, and empty table cells. Tag unique footer/total figures when they are fill-ins. If you intentionally skip a blank, omit it only when it is clearly instructional/boilerplate.
-- Repeating table body rows MUST use kind "list-table" (wrap-row on the first data row). Do not emit a flat text tag per cell across every sample row. Later sample rows stay untagged (the app clones the prototype).
+- Distinct meanings → distinct names even when values look alike: role A vs role B address/tax id/phone, document date vs document number. Derive names from the nearby label/role. NEVER disambiguate with _2/_3/_ก letter/digit suffixes — use role/context words instead. Never emit bare one-word names when a nearby caption gives more context.
+- Leave fixed logos/seals as plain text, BUT DO tag fillable letterhead/header values: document numbers, party names, phones, emails, addresses, and dates when they are user-fillable samples.
+- Cover typical fill blanks: letterhead/header fields, end dates, signature lines, name lines, amounts, repeating-row inners, and empty table cells. Tag unique footer/total figures when they are fill-ins. If you intentionally skip a blank, omit it only when it is clearly instructional/boilerplate.
+- Repeating table body rows MUST use kind "list-table" (wrap-row on the first data row). Do not emit a flat text tag per cell across every sample row. Later sample rows are removed by the app after the prototype is tagged.
 - Nested lists are unsupported — one wrap level only. One wrap per repeating sample group / table.
 ${nameLanguagePromptRule(opts.nameLanguage)}
 ${truncNotes ? `\nNOTE: ${truncNotes}\n` : ""}
@@ -1035,7 +1103,7 @@ async function callGeminiSuggest(
         body: JSON.stringify({
           contents: [{ role: "user", parts }],
           generationConfig: {
-            temperature: 0.1,
+            temperature: 0,
             responseMimeType: "application/json",
           },
         }),
@@ -1091,7 +1159,7 @@ async function callOpenAiSuggest(
   };
   const body: Record<string, unknown> = {
     model: opts.model,
-    temperature: 0.1,
+    temperature: 0,
     messages: [{ role: "user", content: prompt }],
     response_format: { type: "json_object" },
   };
@@ -1174,7 +1242,7 @@ async function callAnthropicSuggest(
         body: JSON.stringify({
           model: opts.model,
           max_tokens: 8192,
-          temperature: 0.1,
+          temperature: 0,
           messages: [{ role: "user", content: prompt }],
         }),
         signal,
@@ -1279,6 +1347,7 @@ type SoftWrapSpan = OccupiedSpan & {
   wrapTag: string;
   wrapOccurrence: number;
   name: string;
+  tableIndex?: number;
 };
 
 function parseFillEmptyMode(raw: Record<string, unknown>): boolean {
@@ -1356,29 +1425,21 @@ function coerceFieldKindForWrap(
     header?: string | null;
     cellIndex?: number | null;
     cellText?: string | null;
+    isRunColumn?: boolean | null;
   },
 ): AiTagDraftKind {
   if (kind !== "auto") return kind;
   if (!findParentWrap(wraps, start, end)) return "text";
   const text = String(opts?.cellText ?? "").trim();
-  // Mis-tagged non-digit values (ราคา/หน่วย, หน้าสำรวจ, …) must not keep {{+}}.
+  // Mis-tagged non-digit values must not keep {{+}}.
   if (text && !/^\d{1,4}$/.test(text)) return "text";
   if (/^\d{1,4}$/.test(text)) {
-    // Explicit non-sequence header (price/qty/…) → text.
-    if (opts?.header) {
+    if (opts?.header || typeof opts?.cellIndex === "number") {
       return looksLikeRunSequence({
         header: opts.header,
         cellIndex: opts.cellIndex,
         cellText: text,
-      })
-        ? "auto"
-        : "text";
-    }
-    if (typeof opts?.cellIndex === "number") {
-      return looksLikeRunSequence({
-        header: null,
-        cellIndex: opts.cellIndex,
-        cellText: text,
+        isRunColumn: opts.isRunColumn,
       })
         ? "auto"
         : "text";
@@ -1391,6 +1452,7 @@ function coerceFieldKindForWrap(
     header: opts?.header,
     cellIndex: opts?.cellIndex,
     cellText: null,
+    isRunColumn: opts?.isRunColumn,
   })
     ? "auto"
     : "text";
@@ -1451,7 +1513,11 @@ function findCellTextInRow(
 
 function inferSampleFieldKind(
   cellText: string,
-  opts?: { header?: string | null; cellIndex?: number | null },
+  opts?: {
+    header?: string | null;
+    cellIndex?: number | null;
+    isRunColumn?: boolean | null;
+  },
 ): AiTagDraftKind {
   if (/^[✓√✔☑]$/u.test(cellText)) return "bool";
   if (
@@ -1460,6 +1526,7 @@ function inferSampleFieldKind(
       header: opts?.header,
       cellIndex: opts?.cellIndex,
       cellText,
+      isRunColumn: opts?.isRunColumn,
     })
   ) {
     return "auto";
@@ -1477,23 +1544,18 @@ function inventListTableName(
   const headers = [...samples, ...empties]
     .map((h) => h.header)
     .filter((h) => !!h);
-  const blob = headers.join(" ");
   if (lang === "en") {
-    if (/จำเล|จำลย|defendant/i.test(blob)) return "defendants";
-    if (/ทรัพย์|property/i.test(blob)) return "properties";
-    if (/ค่าใช้|expense|cost/i.test(blob)) return "expenses";
     const fromHeaders = headers
       .map((h) => resolveVarName(h, "en"))
       .filter((h) => h && h.length >= 2)
       .slice(0, 2);
-    if (fromHeaders.length) return sanitizeNameAscii(fromHeaders.join("_")).slice(0, 40) || "table_rows";
+    if (fromHeaders.length) {
+      return sanitizeNameAscii(fromHeaders.join("_")).slice(0, 40) || `table_loop_${tableIndex + 1}`;
+    }
     const cell = resolveVarName(String(samples[0]?.cellText || "").slice(0, 24), "en");
     if (cell) return sanitizeNameAscii(`rows_${cell}`).slice(0, 40);
-    return "table_rows";
+    return `table_loop_${tableIndex + 1}`;
   }
-  if (/จำเล|จำลย/.test(blob)) return "รายการจำเลย";
-  if (/ทรัพย์/.test(blob)) return "รายการทรัพย์";
-  if (/ค่าใช้/.test(blob)) return "รายการค่าใช้จ่าย";
   const fromHeaders = headers
     .map((h) => resolveVarName(h, "th"))
     .filter((h) => h && h.length >= 2)
@@ -1501,14 +1563,15 @@ function inventListTableName(
   if (fromHeaders.length) {
     const joined = sanitizeName(fromHeaders.join("_")).slice(0, 40);
     if (joined) {
-      return joined.startsWith("รายการ") ? joined : sanitizeName(`รายการ_${joined}`).slice(0, 40);
+      return joined.startsWith("รายการ")
+        ? joined
+        : sanitizeName(`รายการ_${joined}`).slice(0, 40);
     }
   }
   const cell = resolveVarName(String(samples[0]?.cellText || "").slice(0, 24), "th");
   if (cell) return sanitizeName(`รายการ_${cell}`).slice(0, 40);
-  // Stable non-numeric fallback (uniqueName adds context if multiple tables collide).
-  void tableIndex;
-  return "รายการตาราง";
+  // Structural fallback — table index, not opaque รายการ1/2/3.
+  return `table_loop_${tableIndex + 1}`;
 }
 
 /** True when [start,end) lies fully inside a first-data/prototype table row. */
@@ -1650,6 +1713,28 @@ export function validateAiTagSuggestions(
   const sampleHints = xml ? listSampleTableCellHints(xml) : [];
   const prototypes = xml ? listPrototypeTableRowSpans(xml) : [];
   const paraListHints = xml ? listParagraphListHints(xml) : [];
+  const allDataRows = xml ? listAllDataTableRows(xml) : [];
+  /** tableIndex → column indexes whose body values are sequential integers. */
+  const runColsByTable = new Map<number, Set<number>>();
+  {
+    const byTable = new Map<number, DataTableRowInfo[]>();
+    for (const row of allDataRows) {
+      const list = byTable.get(row.tableIndex) || [];
+      list.push(row);
+      byTable.set(row.tableIndex, list);
+    }
+    for (const [ti, rows] of byTable) {
+      runColsByTable.set(ti, detectRunSequenceColumns(rows));
+    }
+  }
+  const isRunCol = (tableIndex: number | null | undefined, cellIndex: number | null | undefined): boolean | null => {
+    if (typeof tableIndex !== "number" || typeof cellIndex !== "number") return null;
+    const rowsForTable = allDataRows.filter((r) => r.tableIndex === tableIndex);
+    // Fewer than 2 body rows → cannot prove sequence from data.
+    if (rowsForTable.length < 2) return null;
+    const set = runColsByTable.get(tableIndex) || new Set<number>();
+    return set.has(cellIndex);
+  };
   const usedPrototypeTables = new Set<number>();
   const usedParaListStems = new Set<string>();
   const lang = nameLanguage === "en" ? "en" : "th";
@@ -1897,17 +1982,21 @@ export function validateAiTagSuggestions(
             : {}),
         };
         occupied.push({ start: occupyStart, end: occupyEnd, soft: true });
-        softWraps.push({
-          start: occupyStart,
-          end: occupyEnd,
-          soft: true,
-          wrapTag: tag,
-          wrapOccurrence,
-          name,
-        });
-        if (resolvedKind === "list-table" && rowSpan) {
-          const proto = prototypeForSpan(rowSpan.start, rowSpan.end);
-          if (proto) usedPrototypeTables.add(proto.tableIndex);
+        {
+          const protoForWrap =
+            resolvedKind === "list-table" && rowSpan
+              ? prototypeForSpan(rowSpan.start, rowSpan.end)
+              : null;
+          softWraps.push({
+            start: occupyStart,
+            end: occupyEnd,
+            soft: true,
+            wrapTag: tag,
+            wrapOccurrence,
+            name,
+            ...(protoForWrap ? { tableIndex: protoForWrap.tableIndex } : {}),
+          });
+          if (protoForWrap) usedPrototypeTables.add(protoForWrap.tableIndex);
         }
         if (resolvedKind === "list") {
           const hint =
@@ -1954,6 +2043,14 @@ export function validateAiTagSuggestions(
             if (!parent) continue;
             const key = `wrap:${parent.wrapTag}:${parent.wrapOccurrence}:${ci}`;
             if (usedCells.has(key)) continue;
+            const wrapTi =
+              typeof parent.tableIndex === "number"
+                ? parent.tableIndex
+                : prototypes.find(
+                    (pr) =>
+                      rowSpan.start >= pr.plainStart &&
+                      rowSpan.end <= pr.plainEnd,
+                  )?.tableIndex;
             const fieldKind = coerceFieldKindForWrap(
               kind,
               softWraps,
@@ -1961,9 +2058,10 @@ export function validateAiTagSuggestions(
               rowSpan.end,
               {
                 cellIndex: ci,
-                // Empty cell — run detection uses header / column index only.
+                // Empty cell — run detection uses column evidence / index.
                 cellText: null,
                 header: headerHintEarly || null,
+                isRunColumn: isRunCol(wrapTi, ci),
               },
             );
             const tag = buildTag(fieldKind, name, trueText, falseText);
@@ -1996,6 +2094,7 @@ export function validateAiTagSuggestions(
               cellIndex: hint.cellIndex,
               cellText: null,
               header: hint.header || headerHintEarly || null,
+              isRunColumn: isRunCol(hint.tableIndex, hint.cellIndex),
             },
           );
           const tag = buildTag(fieldKind, name, trueText, falseText);
@@ -2069,6 +2168,9 @@ export function validateAiTagSuggestions(
           header: sampleMeta?.header || headerHintEarly || anchorLabel || null,
           cellIndex: sampleMeta?.cellIndex ?? null,
           cellText: matchPlain,
+          isRunColumn: sampleMeta
+            ? isRunCol(sampleMeta.tableIndex, sampleMeta.cellIndex)
+            : null,
         });
         const tag = buildTag(fieldKind, name, trueText, falseText);
         if (validateTag(tag)) continue;
@@ -2115,7 +2217,9 @@ export function validateAiTagSuggestions(
       if (!parent) continue;
       const baseName =
         resolveVarName(hint.header, lang) ||
-        (lang === "en" ? `col_${hint.cellIndex}` : "");
+        (lang === "en"
+          ? `col_${hint.cellIndex}`
+          : `คอลัมน์_${hint.cellIndex + 1}`);
       const name = uniqueName(
         baseName,
         usedNames,
@@ -2169,11 +2273,14 @@ export function validateAiTagSuggestions(
       const fieldKind = inferSampleFieldKind(hint.cellText, {
         header: hint.header,
         cellIndex: hint.cellIndex,
+        isRunColumn: isRunCol(hint.tableIndex, hint.cellIndex),
       });
       const baseName =
         resolveVarName(hint.header, lang) ||
         resolveVarName(hint.cellText, lang) ||
-        (lang === "en" ? `col_${hint.cellIndex}` : "");
+        (lang === "en"
+          ? `col_${hint.cellIndex}`
+          : `คอลัมน์_${hint.cellIndex + 1}`);
       const name = uniqueName(
         baseName,
         usedNames,
@@ -2236,11 +2343,149 @@ export function validateAiTagSuggestions(
     }
   }
 
+  // Coverage repair: when soft wraps exist but prototype cells are sparsely
+  // tagged, force another pass over sample/empty hints (deterministic, no AI).
+  if (xml && softWraps.length) {
+    const expectedCells = sampleHints.length + emptyHints.length;
+    const taggedCells = out.filter(
+      (s) =>
+        (s.mode === "replace" || s.mode === "fill-empty-tc") &&
+        typeof s.cellIndex === "number",
+    ).length;
+    const coverage =
+      expectedCells > 0 ? taggedCells / expectedCells : 1;
+    if (coverage < 0.6 && expectedCells > 0) {
+      for (const hint of [...sampleHints, ...emptyHints]) {
+        if (out.length >= MAX_SUGGESTIONS + CONTACT_ENRICH_SLACK) break;
+        const key = cellKey(hint.tableIndex, hint.rowIndexInTable, hint.cellIndex);
+        if (usedCells.has(key)) continue;
+        const parent = findParentWrap(softWraps, hint.plainStart, hint.plainEnd);
+        if (!parent) continue;
+        const sampleText =
+          "cellText" in hint ? String((hint as TableSampleCellHint).cellText || "") : "";
+        const fieldKind = sampleText
+          ? inferSampleFieldKind(sampleText, {
+              header: hint.header,
+              cellIndex: hint.cellIndex,
+              isRunColumn: isRunCol(hint.tableIndex, hint.cellIndex),
+            })
+          : "text";
+        const baseName =
+          resolveVarName(hint.header, lang) ||
+          resolveVarName(sampleText, lang) ||
+          (lang === "en" ? `col_${hint.cellIndex}` : `คอลัมน์_${hint.cellIndex + 1}`);
+        const name = uniqueName(
+          baseName,
+          usedNames,
+          [hint.header, parent.name].filter(Boolean),
+          lang,
+        );
+        if (!name) continue;
+        const boolArms =
+          fieldKind === "bool"
+            ? normalizeBoolArms(sampleText || DEFAULT_BOOL_TRUE_TEXT, "")
+            : { trueText: "", falseText: "" };
+        const tag = buildTag(fieldKind, name, boolArms.trueText, boolArms.falseText);
+        if (validateTag(tag)) continue;
+        usedNames.add(name);
+        usedCells.add(key);
+        if (sampleText) {
+          const loc = findCellTextInRow(
+            plainText,
+            sampleText,
+            hint.plainStart,
+            hint.plainEnd,
+          );
+          if (loc && fieldSpanAllowed(loc.start, loc.end, occupied)) {
+            occupied.push({ start: loc.start, end: loc.end });
+            out.push({
+              plainText: sampleText,
+              occurrence: loc.occurrence,
+              plainStart: loc.start,
+              name,
+              kind: fieldKind,
+              tag,
+              mode: "replace",
+              wrapTag: parent.wrapTag,
+              wrapOccurrence: parent.wrapOccurrence,
+              cellIndex: hint.cellIndex,
+              tableIndex: hint.tableIndex,
+              rowIndexInTable: hint.rowIndexInTable,
+              headerHint: hint.header,
+              ...(fieldKind === "bool"
+                ? { trueText: boolArms.trueText, falseText: boolArms.falseText }
+                : {}),
+            });
+            continue;
+          }
+        }
+        out.push({
+          plainText: hint.rowAnchor,
+          occurrence: hint.occurrence,
+          plainStart: hint.plainStart,
+          name,
+          kind: fieldKind,
+          tag,
+          mode: "fill-empty-tc",
+          cellIndex: hint.cellIndex,
+          tableIndex: hint.tableIndex,
+          rowIndexInTable: hint.rowIndexInTable,
+          wrapTag: parent.wrapTag,
+          wrapOccurrence: parent.wrapOccurrence,
+          headerHint: hint.header,
+          ...(fieldKind === "bool"
+            ? { trueText: boolArms.trueText, falseText: boolArms.falseText }
+            : {}),
+        });
+      }
+    }
+  }
+
+  // After list-table wraps are accepted: remove leftover sample rows (not
+  // summary/total rows). Summary rows with unique amounts stay for tagging.
+  if (xml && usedPrototypeTables.size) {
+    const protoRowByTable = new Map(
+      prototypes.map((pr) => [pr.tableIndex, pr.rowIndexInTable]),
+    );
+    for (const row of allDataRows) {
+      if (!usedPrototypeTables.has(row.tableIndex)) continue;
+      const protoRi = protoRowByTable.get(row.tableIndex);
+      if (typeof protoRi !== "number") continue;
+      if (row.rowIndexInTable <= protoRi) continue;
+      const rowText = plainText.slice(row.plainStart, row.plainEnd);
+      const isSummary =
+        SUMMARY_FIELD_RE.test(rowText) ||
+        row.headers.some((h) => SUMMARY_FIELD_RE.test(h)) ||
+        row.cells.some((c) => SUMMARY_FIELD_RE.test(c.text));
+      if (isSummary) {
+        // Unique total figures outside the prototype may still be tagged above;
+        // do not delete the summary row.
+        continue;
+      }
+      out.push({
+        plainText: row.rowAnchor || rowText.slice(0, 80) || `row_${row.rowIndexInTable}`,
+        occurrence: row.occurrence >= 0 ? row.occurrence : 0,
+        plainStart: row.plainStart >= 0 ? row.plainStart : 0,
+        name: `delete_tr_${row.tableIndex}_${row.rowIndexInTable}`,
+        kind: "delete-tr",
+        tag: "",
+        mode: "delete-tr",
+        tableIndex: row.tableIndex,
+        rowIndexInTable: row.rowIndexInTable,
+      });
+    }
+  }
+
   // Enrich: letterhead/footer phones & emails the model often skips.
   enrichContactFieldsFromPlain(plainText, out, occupied, usedNames, lang);
 
   out.sort((a, b) => {
+    // Apply deletes after wraps/fields at the same locus; stable by plainStart.
     if (a.plainStart !== b.plainStart) return a.plainStart - b.plainStart;
+    const rank = (s: AiTagSuggestion) =>
+      s.mode === "delete-tr" ? 2 : s.mode === "wrap-row" || s.mode === "wrap" ? 0 : 1;
+    const rd = rank(a) - rank(b);
+    if (rd) return rd;
     const ac = typeof a.cellIndex === "number" ? a.cellIndex : -1;
     const bc = typeof b.cellIndex === "number" ? b.cellIndex : -1;
     return ac - bc;

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:tbl>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>No</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>Item</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>Amt</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>1</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>AlphaWidget</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>100</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>2</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>BetaWidget</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>200</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>3</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>GammaWidget</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>300</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t></w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>Total</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>600</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+  </w:body>
+</w:document>

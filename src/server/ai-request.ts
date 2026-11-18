@@ -52,13 +52,18 @@ export class AiTimeoutError extends Error {
   }
 }
 
-function parseEnvInt(
+/**
+ * Parse a clamped int from env. Unset / blank MUST return {@link fallback}
+ * (do not treat Number("") === 0 as a deliberate zero when min allows 0).
+ */
+export function parseEnvInt(
   envName: string,
   fallback: number,
   min: number,
   max: number,
 ): number {
-  const raw = String(process.env[envName] || "").trim();
+  const raw = String(process.env[envName] ?? "").trim();
+  if (raw === "") return fallback;
   const n = Number(raw);
   if (Number.isFinite(n) && n >= min && n <= max) {
     return Math.floor(n);

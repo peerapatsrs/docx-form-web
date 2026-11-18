@@ -64,6 +64,37 @@ await check("getAiTimeoutMs reads DOCX_FORM_AI_TIMEOUT_MS", async () => {
   });
 });
 
+await check("parseEnvInt: unset/blank uses fallback (retries default 2)", async () => {
+  await withEnv({ DOCX_FORM_AI_RETRY_MAX: undefined }, async () => {
+    const { getAiRetryMax, parseEnvInt, DEFAULT_AI_RETRY_MAX } = await loadFresh(
+      "src/server/ai-request.ts",
+    );
+    assert.equal(getAiRetryMax(), DEFAULT_AI_RETRY_MAX);
+    assert.equal(DEFAULT_AI_RETRY_MAX, 2);
+    assert.equal(parseEnvInt("DOCX_FORM_AI_RETRY_MAX", 2, 0, 4), 2);
+  });
+  await withEnv({ DOCX_FORM_AI_RETRY_MAX: "" }, async () => {
+    const { getAiRetryMax, DEFAULT_AI_RETRY_MAX } = await loadFresh(
+      "src/server/ai-request.ts",
+    );
+    assert.equal(getAiRetryMax(), DEFAULT_AI_RETRY_MAX);
+  });
+  await withEnv({ DOCX_FORM_AI_RETRY_MAX: "   " }, async () => {
+    const { getAiRetryMax, DEFAULT_AI_RETRY_MAX } = await loadFresh(
+      "src/server/ai-request.ts",
+    );
+    assert.equal(getAiRetryMax(), DEFAULT_AI_RETRY_MAX);
+  });
+  await withEnv({ DOCX_FORM_AI_RETRY_MAX: "0" }, async () => {
+    const { getAiRetryMax } = await loadFresh("src/server/ai-request.ts");
+    assert.equal(getAiRetryMax(), 0, "explicit 0 still allowed");
+  });
+  await withEnv({ DOCX_FORM_AI_RETRY_MAX: "3" }, async () => {
+    const { getAiRetryMax } = await loadFresh("src/server/ai-request.ts");
+    assert.equal(getAiRetryMax(), 3);
+  });
+});
+
 await check("withAiTimeout aborts never-resolving work with AI_TIMEOUT", async () => {
   const { withAiTimeout, isAiTimeoutError, AiTimeoutError } = await loadFresh(
     "src/server/ai-request.ts",

@@ -3567,28 +3567,19 @@ export function createApi(options: {
           const buffer = templateBuffers[i];
           const skip = items[i]?.skip;
           const rowSkip = items[i]?.rowSkip;
-          let fillValues = values;
-          if (
-            (skip && typeof skip === "object") ||
-            (rowSkip && typeof rowSkip === "object")
-          ) {
-            const { toFillValues } = await import("./source-map");
-            const parsed = await parseTemplate(buffer);
-            fillValues = toFillValues(
-              parsed.fields,
-              values,
-              skip && typeof skip === "object" ? skip : {},
-              rowSkip && typeof rowSkip === "object" ? rowSkip : {},
-            );
-          } else {
-            // Empty loop tables are allowed — missing list keys become [].
-            const parsed = await parseTemplate(buffer);
-            for (const f of parsed.fields) {
-              if (f.type === "list" && fillValues[f.name] == null) {
-                fillValues[f.name] = [];
-              }
+          const { toFillValues } = await import("./source-map");
+          const parsed = await parseTemplate(buffer);
+          for (const f of parsed.fields) {
+            if (f.type === "list" && values[f.name] == null) {
+              values[f.name] = [];
             }
           }
+          const fillValues = toFillValues(
+            parsed.fields,
+            values,
+            skip && typeof skip === "object" ? skip : {},
+            rowSkip && typeof rowSkip === "object" ? rowSkip : {},
+          );
           const out = await fillTemplate({
             template: buffer,
             values: fillValues,
@@ -3777,37 +3768,25 @@ export function createApi(options: {
         return c.json(unsupportedFileTypeBody(), 400);
       }
       const parsed = await parseTemplate(template);
-      const hasSkipMaps =
-        Object.keys(skip).length > 0 || Object.keys(rowSkip).length > 0;
-      // Always run through toFillValues when skip maps are present so empty
-      // loop tables ([]) and skipped fields render cleanly with no leftover tags.
-      // When skip maps are absent, keep legacy behaviour (client pre-transformed
-      // values) but still normalise empty arrays for list fields found in the
-      // template so generating with [] is never rejected.
       const { toFillValues } = await import("./source-map");
-      let fillValues = values;
-      if (hasSkipMaps) {
-        fillValues = toFillValues(parsed.fields, values, skip, rowSkip);
-      } else {
-        // Honour empty loop tables already in values (Frontend may send []).
-        for (const f of parsed.fields) {
-          if (f.type !== "list") continue;
-          const v = values[f.name];
-          if (v == null) {
-            // Missing list key → treat as empty loop (no leftover tags).
-            values[f.name] = [];
-          } else if (!Array.isArray(v)) {
-            return c.json(
-              {
-                error: `ฟิลด์ลิสต์「${f.name}」ต้องเป็นอาร์เรย์ (ว่างได้เมื่อข้าม)`,
-                code: "FILL_LIST_NOT_ARRAY",
-              },
-              400,
-            );
-          }
+      // Always normalize via toFillValues so bool arms (√/☐) and booleans
+      // resolve consistently whether or not skip maps are present.
+      for (const f of parsed.fields) {
+        if (f.type !== "list") continue;
+        const v = values[f.name];
+        if (v == null) {
+          values[f.name] = [];
+        } else if (!Array.isArray(v)) {
+          return c.json(
+            {
+              error: `ฟิลด์ลิสต์「${f.name}」ต้องเป็นอาร์เรย์ (ว่างได้เมื่อข้าม)`,
+              code: "FILL_LIST_NOT_ARRAY",
+            },
+            400,
+          );
         }
-        fillValues = values;
       }
+      const fillValues = toFillValues(parsed.fields, values, skip, rowSkip);
 
       const out = await fillTemplate({
         template,

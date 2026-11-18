@@ -34,27 +34,31 @@ async function load() {
 
 console.log("ai-tag-draft-name-quality-unit-test");
 
-await check("stripJunkNumericSuffix peels _2/_3 collision noise", async () => {
-  const { stripJunkNumericSuffix } = await load();
-  assert.equal(stripJunkNumericSuffix("เขต_อำเภอ_2"), "เขต_อำเภอ");
-  assert.equal(stripJunkNumericSuffix("โทรศัพท์_3"), "โทรศัพท์");
-  assert.equal(stripJunkNumericSuffix("รายการค่าใช้จ่าย_2"), "รายการค่าใช้จ่าย");
+await check("stripJunkNumericSuffix peels _2/_3/_ก/_a collision noise", async () => {
+  const { stripJunkNumericSuffix, looksLikeGarbledName } = await load();
+  assert.equal(stripJunkNumericSuffix("zone_label_2"), "zone_label");
+  assert.equal(stripJunkNumericSuffix("phone_field_3"), "phone_field");
+  assert.equal(stripJunkNumericSuffix("item_list_2"), "item_list");
+  assert.equal(stripJunkNumericSuffix("field_ก"), "field");
+  assert.equal(stripJunkNumericSuffix("field_a"), "field");
   assert.equal(stripJunkNumericSuffix("ลำดับ"), "ลำดับ");
+  assert.equal(looksLikeGarbledName("ที่ทัที่_ที่"), true);
+  assert.equal(looksLikeGarbledName("เขต_อำเภอ"), false);
 });
 
 await check("preferContextualNameSource upgrades bare model names from labels", async () => {
   const { preferContextualNameSource } = await load();
   assert.equal(
-    preferContextualNameSource("จำนวน", "จำนวนค่าใช้จ่าย"),
-    "จำนวนค่าใช้จ่าย",
+    preferContextualNameSource("amount", "amount_total"),
+    "amount_total",
   );
   assert.equal(
-    preferContextualNameSource("รายการ", "รายการจำเลย"),
-    "รายการจำเลย",
+    preferContextualNameSource("items", "items_party"),
+    "items_party",
   );
   assert.equal(
-    preferContextualNameSource("เขต_อำเภอ_2", "เขต / อำเภอ"),
-    "เขต / อำเภอ",
+    preferContextualNameSource("zone_2", "zone / district"),
+    "zone / district",
   );
 });
 
@@ -72,21 +76,33 @@ await check("normalizeBoolArms defaults unchecked glyph", async () => {
   assert.equal(b.falseText, "☐");
 });
 
-await check("looksLikeRunSequence: sequence yes, price/page no", async () => {
+await check("looksLikeRunSequence: data-driven column, not caption keywords", async () => {
   const { looksLikeRunSequence } = await load();
   assert.equal(
-    looksLikeRunSequence({ header: "ลำดับ", cellIndex: 0, cellText: "1" }),
+    looksLikeRunSequence({
+      header: "ลำดับ",
+      cellIndex: 0,
+      cellText: "1",
+      isRunColumn: true,
+    }),
     true,
   );
   assert.equal(
-    looksLikeRunSequence({ header: "จำเลยที่", cellIndex: 0, cellText: "1" }),
-    true,
+    looksLikeRunSequence({
+      header: "จำเลยที่",
+      cellIndex: 1,
+      cellText: "1",
+      isRunColumn: null,
+    }),
+    false,
+    "Thai caption alone is not enough on non-first columns",
   );
   assert.equal(
     looksLikeRunSequence({
       header: "ราคา/หน่วย",
       cellIndex: 2,
       cellText: "1500",
+      isRunColumn: false,
     }),
     false,
   );
@@ -95,6 +111,7 @@ await check("looksLikeRunSequence: sequence yes, price/page no", async () => {
       header: "ราคา",
       cellIndex: 0,
       cellText: "100",
+      isRunColumn: false,
     }),
     false,
     "col-0 price header must not count as run sequence",
@@ -120,28 +137,28 @@ await check("validate: strips _2, demotes misused +, bool gets ☐", async () =>
     [
       {
         plainText: "1สมชาย1500หน้าหนึ่ง",
-        name: "รายการค่าใช้จ่าย_2",
+        name: "item_rows_2",
         kind: "list-table",
         mode: "wrap-row",
       },
-      { plainText: "1", name: "ลำดับ", kind: "auto", mode: "replace" },
+      { plainText: "1", name: "seq", kind: "auto", mode: "replace" },
       {
         plainText: "1500",
-        name: "ราคา/หน่วย",
+        name: "unit_price",
         kind: "auto",
         mode: "replace",
         label: "ราคา/หน่วย",
       },
       {
         plainText: "หน้าหนึ่ง",
-        name: "+หน้าสำรวจ",
+        name: "+survey_page",
         kind: "auto",
         mode: "replace",
         label: "หน้าสำรวจ",
       },
       {
         plainText: "√",
-        name: "ไม่พบทรัพย์",
+        name: "flag_missing",
         kind: "bool",
         mode: "replace",
         trueText: "√",

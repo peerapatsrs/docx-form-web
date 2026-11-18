@@ -848,6 +848,18 @@ function scanDataRowsWithHeaders(
   return out;
 }
 
+/** Body/data row scan result (prototype and later samples). */
+export type DataTableRowInfo = {
+  cells: { text: string }[];
+  plainStart: number;
+  plainEnd: number;
+  rowIndexInTable: number;
+  tableIndex: number;
+  headers: string[];
+  rowAnchor: string;
+  occurrence: number;
+};
+
 /** First body/data row per table — the list-table prototype the manual tagger wraps. */
 export type PrototypeTableRowSpan = {
   plainStart: number;
@@ -866,6 +878,24 @@ export function listPrototypeTableRowSpans(xml: string): PrototypeTableRowSpan[]
     plainEnd: row.plainEnd,
     tableIndex: row.tableIndex,
     rowIndexInTable: row.rowIndexInTable,
+  }));
+}
+
+/**
+ * All body/data rows per table (prototype + later samples/footers).
+ * Used to emit delete-tr for leftover sample rows after wrap-row, and to
+ * detect run-sequence columns from sequential integers across rows.
+ */
+export function listAllDataTableRows(xml: string): DataTableRowInfo[] {
+  return scanDataRowsWithHeaders(xml, { firstDataRowOnly: false }).map((row) => ({
+    cells: row.cells,
+    plainStart: row.plainStart,
+    plainEnd: row.plainEnd,
+    rowIndexInTable: row.rowIndexInTable,
+    tableIndex: row.tableIndex,
+    headers: row.headers,
+    rowAnchor: row.rowAnchor,
+    occurrence: row.occurrence,
   }));
 }
 
@@ -1305,8 +1335,8 @@ function ensureTableLoopOpenTags(xml: string): string {
       start -= delta;
       end -= delta;
     } else {
-      // Document order: first headless table → รายการ1
-      openTag = `{{#รายการ${ti + 1}}}`;
+      // Structural fallback — never รายการ1/2/3 (opaque numbered generics).
+      openTag = `{{#table_loop_${ti + 1}}}`;
     }
 
     const row = rows[tmplIdx];

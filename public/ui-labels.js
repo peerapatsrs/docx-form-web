@@ -371,6 +371,42 @@ export function seedListRowsIfEmpty(current) {
   return current;
 }
 
+/** `{{+ลำดับ}}` tags — auto row index, never user-filled. */
+export function isAutoFieldName(name) {
+  return String(name || "").trim().startsWith("+");
+}
+
+/**
+ * List column that the user can type into (excludes bool, auto, +tags).
+ * @param {{ name?: string, type?: string } | null | undefined} item
+ */
+export function shouldValidateListItem(item) {
+  if (!item || item.type === "bool" || item.type === "auto") return false;
+  if (isAutoFieldName(item.name)) return false;
+  return item.type === "text" || item.type === "email" || item.type === "image";
+}
+
+/**
+ * @param {Array<{ name?: string, type?: string }> | null | undefined} itemFields
+ */
+export function fillableListItemFields(itemFields) {
+  return (Array.isArray(itemFields) ? itemFields : []).filter(shouldValidateListItem);
+}
+
+/**
+ * Root-level field included in generate validation / missing counts.
+ * @param {{ name?: string, type?: string, itemFields?: unknown[] } | null | undefined} field
+ */
+export function shouldValidateRootField(field) {
+  if (!field) return false;
+  if (field.type === "bool" || field.type === "auto") return false;
+  if (isAutoFieldName(field.name)) return false;
+  if (field.type === "list") {
+    return fillableListItemFields(field.itemFields).length > 0;
+  }
+  return field.type === "text" || field.type === "email" || field.type === "image";
+}
+
 /**
  * A list/table row is fully empty when every text/email cell is blank.
  * Bool/auto columns are ignored (they always have a value).
@@ -378,11 +414,8 @@ export function seedListRowsIfEmpty(current) {
  * @param {Array<{ name?: string, type?: string }> | null | undefined} itemFields
  */
 export function isListRowEmpty(row, itemFields) {
-  const fields = Array.isArray(itemFields) ? itemFields : [];
+  const textFields = fillableListItemFields(itemFields);
   const data = row && typeof row === "object" ? row : {};
-  const textFields = fields.filter(
-    (f) => f && f.type !== "bool" && f.type !== "auto",
-  );
   if (textFields.length === 0) {
     // No fillable cells — treat as empty so seeded rows do not count as filled.
     return true;
@@ -413,12 +446,15 @@ export function listHasFilledRow(rows, itemFields) {
  *   labelMap?: Map<string, string> | Record<string, string> | null,
  *   emailInvalid?: (raw: string) => boolean,
  *   isEmailField?: (name: string, field: { name?: string, type?: string }) => boolean,
+ *   listName?: string,
  * }} opts
- * @returns {{ missing: string[], mode: "need-row" | "cells" }}
+ * @returns {{ missing: string[], targets: ValidationJumpTarget[], mode: "need-row" | "cells" }}
  */
 export function collectMissingListValidation(opts) {
   const fieldLabel = String(opts?.fieldLabel || "").trim();
+  const listName = String(opts?.listName || "").trim();
   const itemFields = Array.isArray(opts?.itemFields) ? opts.itemFields : [];
+  const fillable = fillableListItemFields(itemFields);
   const rows = Array.isArray(opts?.rows) ? opts.rows : [];
   const rowSkip = opts?.rowSkip || null;
   const labelMap = opts?.labelMap || null;
@@ -426,27 +462,45 @@ export function collectMissingListValidation(opts) {
     UI_LABELS.validationListNeedFilledRow || UI_LABELS.validationListMinRows;
 
   if (opts?.listSkipped) {
-    return { missing: [], mode: "cells" };
+    return { missing: [], targets: [], mode: "cells" };
+  }
+
+  if (!fillable.length) {
+    return { missing: [], targets: [], mode: "cells" };
   }
 
   if (!listHasFilledRow(rows, itemFields)) {
     return {
       missing: [formatMissingFieldLabel(fieldLabel, needRowNote)],
+      targets: listName
+        ? [{ kind: "list", list: listName, row: 0, item: "" }]
+        : [],
       mode: "need-row",
     };
   }
 
   /** @type {string[]} */
   const missing = [];
+  /** @type {ValidationJumpTarget[]} */
+  const targets = [];
   rows.forEach((row, idx) => {
     if (isListRowEmpty(row, itemFields)) return;
-    for (const item of itemFields) {
-      if (!item || item.type === "bool" || item.type === "auto") continue;
+    for (const item of fillable) {
       if (rowSkip?.[idx]?.[item.name]) continue;
+      if (
+        typeof opts.hasListItemControl === "function" &&
+        listName &&
+        !opts.hasListItemControl(listName, idx, item.name)
+      ) {
+        continue;
+      }
       const itemLabel = fieldDisplayLabel(item, labelMap, item.name);
       const raw = String(row?.[item.name] ?? "").trim();
       if (!raw) {
         missing.push(UI_LABELS.validationRowPrefix(fieldLabel, idx + 1, itemLabel));
+        if (listName) {
+          targets.push({ kind: "list-item", list: listName, row: idx, item: item.name });
+        }
       } else if (
         typeof opts.isEmailField === "function" &&
         typeof opts.emailInvalid === "function" &&
@@ -458,10 +512,106 @@ export function collectMissingListValidation(opts) {
             UI_LABELS.validationRowPrefix(fieldLabel, idx + 1, itemLabel),
           ),
         );
+        if (listName) {
+          targets.push({ kind: "list-item", list: listName, row: idx, item: item.name });
+        }
       }
     }
   });
-  return { missing, mode: "cells" };
+  return { missing, targets, mode: "cells" };
+}
+
+/**
+ * @typedef {{ kind: "field", name: string } | { kind: "list-item", list: string, row: number, item: string } | { kind: "list", list: string, row: number, item: string }} ValidationJumpTarget
+ */
+
+/**
+ * Same rules as the fill form renderer — only user-fillable fields count.
+ * @param {{
+ *   fields: Array<{ name?: string, type?: string, label?: string, itemFields?: unknown[] }>,
+ *   values: Record<string, unknown>,
+ *   images?: Record<string, unknown>,
+ *   skip?: Record<string, boolean>,
+ *   rowSkip?: Record<string, Record<string, boolean>[]>,
+ *   labelMap?: Map<string, string> | Record<string, string> | null,
+ *   isEmailField?: (name: string, field: { name?: string, type?: string }) => boolean,
+ *   emailInvalid?: (raw: string) => boolean,
+ *   hasControl?: (name: string, field: { name?: string, type?: string }) => boolean,
+ *   hasListItemControl?: (list: string, row: number, item: string) => boolean,
+ * }} opts
+ * @returns {{ missing: string[], targets: ValidationJumpTarget[] }}
+ */
+export function collectFormValidationMissing(opts) {
+  const fields = Array.isArray(opts?.fields) ? opts.fields : [];
+  const values = opts?.values && typeof opts.values === "object" ? opts.values : {};
+  const images = opts?.images && typeof opts.images === "object" ? opts.images : {};
+  const skip = opts?.skip && typeof opts.skip === "object" ? opts.skip : {};
+  const rowSkip =
+    opts?.rowSkip && typeof opts.rowSkip === "object" ? opts.rowSkip : {};
+  const labelMap = opts?.labelMap || null;
+
+  /** @type {string[]} */
+  const missing = [];
+  /** @type {ValidationJumpTarget[]} */
+  const targets = [];
+
+  for (const f of fields) {
+    if (!f?.name || skip[f.name]) continue;
+    if (!shouldValidateRootField(f)) continue;
+    if (
+      typeof opts.hasControl === "function" &&
+      (f.type === "text" || f.type === "email" || f.type === "image") &&
+      !opts.hasControl(f.name, f)
+    ) {
+      continue;
+    }
+    const fieldLabel = fieldDisplayLabel(f, labelMap, f.name);
+
+    if (f.type === "text" || f.type === "email") {
+      const raw = String(values[f.name] ?? "").trim();
+      if (!raw) {
+        missing.push(formatMissingFieldLabel(fieldLabel, undefined, f.name));
+        targets.push({ kind: "field", name: f.name });
+      } else if (
+        typeof opts.isEmailField === "function" &&
+        typeof opts.emailInvalid === "function" &&
+        opts.isEmailField(f.name, f) &&
+        opts.emailInvalid(raw)
+      ) {
+        missing.push(formatInvalidEmailMissing(fieldLabel, f.name));
+        targets.push({ kind: "field", name: f.name });
+      }
+    } else if (f.type === "image") {
+      if (!images[f.name]) {
+        missing.push(formatMissingFieldLabel(fieldLabel, undefined, f.name));
+        targets.push({ kind: "field", name: f.name });
+      }
+    } else if (f.type === "list") {
+      const listResult = collectMissingListValidation({
+        fieldLabel,
+        listName: f.name,
+        itemFields: f.itemFields,
+        rows: values[f.name] || [],
+        rowSkip: rowSkip[f.name],
+        labelMap,
+        isEmailField: opts.isEmailField,
+        emailInvalid: opts.emailInvalid,
+        hasListItemControl: opts.hasListItemControl,
+      });
+      missing.push(...listResult.missing);
+      targets.push(...listResult.targets);
+    }
+  }
+  return { missing, targets };
+}
+
+/** Label used for list cell inputs — keyed by field id, not column header text. */
+export function listCellControlLabel(itemField, labelMap, fallbackName = "") {
+  return fieldDisplayLabel(
+    itemField,
+    labelMap,
+    fallbackName || itemField?.name || "",
+  );
 }
 
 /**

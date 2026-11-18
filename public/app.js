@@ -9,6 +9,9 @@ import {
   seedListRowsIfEmpty,
   isListRowEmpty,
   collectMissingListValidation,
+  collectFormValidationMissing,
+  shouldValidateRootField,
+  listCellControlLabel,
   shouldShowSkipFirstUseTip,
   buildLayoutLabelMap,
   layoutBlocksToPlainText,
@@ -29,6 +32,7 @@ import {
   fieldTableLocation,
   isStackableStaticTable,
   mergeMissingTextFields,
+  normalizeFormFields,
   renderCellTemplateHtml,
 } from "./doc-table-fields.js";
 import {
@@ -1223,6 +1227,10 @@ function explainSkippedTemplates(opts) {
 /** True while the visible banner is a field-validation summary. */
 let validationBannerActive = false;
 
+/** Parallel to validation banner items — used by per-item jump buttons. */
+/** @type {import("./ui-labels.js").ValidationJumpTarget[]} */
+let lastValidationJumpTargets = [];
+
 function hideBanner() {
   if (!banner) return;
   banner.hidden = true;
@@ -1367,7 +1375,10 @@ function showBanner(message, kind = "error", opts = {}) {
     banner.querySelectorAll("[data-validation-jump]").forEach((btn) => {
       btn.addEventListener("click", (ev) => {
         ev.preventDefault();
-        scrollToFirstFieldError();
+        const idx = Number(
+          /** @type {HTMLButtonElement} */ (btn).dataset.validationJump,
+        );
+        scrollToValidationJump(Number.isFinite(idx) ? idx : 0);
       });
     });
   } else {
@@ -1882,11 +1893,67 @@ function markFieldError(inputSelector, name, listRef = null) {
 
 /** Scroll first highlighted empty field into view. */
 function scrollToFirstFieldError() {
-  const target =
-    app.querySelector(".has-error") ||
-    app.querySelector("[aria-invalid='true']");
-  if (!target || typeof target.scrollIntoView !== "function") return;
-  target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+  scrollToValidationJump(0);
+}
+
+/**
+ * @param {import("./ui-labels.js").ValidationJumpTarget | undefined} jump
+ * @returns {HTMLElement | null}
+ */
+function resolveValidationJumpElement(jump) {
+  if (!jump || !app) return null;
+  if (jump.kind === "field") {
+    return (
+      app.querySelector(`#f-${cssId(jump.name)}`) ||
+      app.querySelector(`[data-doc-field="${cssAttrSelector(jump.name)}"]`) ||
+      app.querySelector(`[data-image-field="${cssAttrSelector(jump.name)}"] input, [data-image-field="${cssAttrSelector(jump.name)}"] .image-drop`)
+    );
+  }
+  if (jump.kind === "list" || jump.kind === "list-item") {
+    const listRoot = app.querySelector(
+      `[data-list-field="${cssAttrSelector(jump.list)}"]`,
+    );
+    listRoot?.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
+    if (jump.kind === "list" && !jump.item) {
+      return (
+        listRoot?.querySelector(".add-row") ||
+        listRoot?.querySelector("[data-skip-field]")
+      );
+    }
+    return (
+      app.querySelector(
+        `[data-list="${cssAttrSelector(jump.list)}"][data-row="${jump.row}"][data-item="${cssAttrSelector(jump.item)}"]`,
+      ) ||
+      app.querySelector(`#l-${cssId(jump.list)}-${jump.row}-${cssId(jump.item)}`)
+    );
+  }
+  return null;
+}
+
+/** Scroll/focus the field that matches a validation banner item index. */
+function scrollToValidationJump(index) {
+  const jump = lastValidationJumpTargets[index];
+  let el = resolveValidationJumpElement(jump);
+  if (!el) {
+    el =
+      app.querySelector(".has-error [aria-invalid='true'], .has-error input, .has-error textarea") ||
+      app.querySelector("[aria-invalid='true']");
+  }
+  if (!el) return;
+  const focusable =
+    el.matches("input, textarea, select, button, [tabindex]")
+      ? el
+      : el.querySelector?.('input:not([type="hidden"]), textarea, select, button, [tabindex]');
+  const target = /** @type {HTMLElement | null} */ (focusable || el);
+  target?.closest?.("details")?.setAttribute("open", "");
+  target?.scrollIntoView?.({ behavior: "smooth", block: "center", inline: "nearest" });
+  if (target && typeof target.focus === "function") {
+    try {
+      target.focus({ preventScroll: true });
+    } catch {
+      target.focus();
+    }
+  }
 }
 
 /**
@@ -1927,33 +1994,36 @@ function markFieldErrorMessage(inputSelector, name, message, listRef = null) {
 /** Highlight empty / mistyped required fields and return their display names. */
 function validateBeforeSubmit() {
   clearFieldErrors();
-  /** @type {string[]} */
-  const missing = [];
   const labelMap = currentFieldLabelMap();
+  const controlOpts = {
+    hasControl: (name) => {
+      const f = state.fields.find((x) => x.name === name);
+      return f ? fieldHasRenderedControl(f) : false;
+    },
+    hasListItemControl: (list, row, item) =>
+      !!app.querySelector(
+        `[data-list="${cssAttrSelector(list)}"][data-row="${row}"][data-item="${cssAttrSelector(item)}"]`,
+      ),
+  };
+  const { missing, targets } = collectFormValidationMissing({
+    fields: state.fields,
+    values: state.values,
+    images: state.images,
+    skip: state.skip,
+    rowSkip: state.rowSkip,
+    labelMap,
+    isEmailField: isEmailTypedField,
+    emailInvalid: (raw) => !isValidEmailValue(raw),
+    ...controlOpts,
+  });
+  lastValidationJumpTargets = targets;
 
-  for (const f of state.fields) {
-    if (state.skip[f.name]) continue;
-    const fieldLabel = fieldDisplayLabel(f, labelMap, f.name);
-
-    if (f.type === "text" || f.type === "email") {
-      const raw = String(state.values[f.name] ?? "").trim();
-      if (!raw) {
-        missing.push(formatMissingFieldLabel(fieldLabel, undefined, f.name));
-        markFieldError(`#f-${cssId(f.name)}`, f.name);
-      } else if (isEmailTypedField(f.name, f) && !isValidEmailValue(raw)) {
-        missing.push(formatInvalidEmailMissing(fieldLabel, f.name));
-        markFieldErrorMessage(
-          `#f-${cssId(f.name)}`,
-          f.name,
-          UI_LABELS.invalidEmailFieldError,
-        );
-      }
-    } else if (f.type === "bool") {
-      // always true/false — no required check
-    } else if (f.type === "image") {
-      if (!state.images[f.name]) {
-        missing.push(formatMissingFieldLabel(fieldLabel, undefined, f.name));
-        const wrap = app.querySelector(`[data-image-field="${cssAttrSelector(f.name)}"]`);
+  for (const t of targets) {
+    if (t.kind === "field") {
+      const f = state.fields.find((x) => x.name === t.name);
+      const raw = String(state.values[t.name] ?? "").trim();
+      if (f?.type === "image" && !state.images[t.name]) {
+        const wrap = app.querySelector(`[data-image-field="${cssAttrSelector(t.name)}"]`);
         if (wrap) {
           wrap.classList.add("has-error");
           if (!wrap.querySelector(".field-error")) {
@@ -1963,59 +2033,69 @@ function validateBeforeSubmit() {
             );
           }
         }
-      }
-    } else if (f.type === "list") {
-      const rows = state.values[f.name] || [];
-      const listResult = collectMissingListValidation({
-        fieldLabel,
-        itemFields: f.itemFields,
-        rows,
-        rowSkip: state.rowSkip[f.name],
-        labelMap,
-        isEmailField: isEmailTypedField,
-        emailInvalid: (raw) => !isValidEmailValue(raw),
-      });
-      missing.push(...listResult.missing);
-      if (listResult.mode === "need-row") {
-        const rep = app.querySelector(`[data-list-field="${cssAttrSelector(f.name)}"]`);
-        if (rep) {
-          rep.classList.add("has-error");
-          if (!rep.querySelector(".field-error")) {
-            rep.insertAdjacentHTML(
-              "beforeend",
-              `<p class="field-error">${escapeHtml(UI_LABELS.fieldErrorAddRowOrSkip)}</p>`,
-            );
-          }
-        }
         continue;
       }
-      rows.forEach((row, idx) => {
-        if (isListRowEmpty(row, f.itemFields)) return;
-        for (const item of f.itemFields) {
-          if (item.type === "bool" || item.type === "auto") continue;
-          if (state.rowSkip[f.name]?.[idx]?.[item.name]) continue;
-          const raw = String(row[item.name] ?? "").trim();
-          if (!raw) {
-            markFieldError(
-              `#l-${cssId(f.name)}-${idx}-${cssId(item.name)}`,
-              item.name,
-              { list: f.name, row: idx, item: item.name },
-            );
-          } else if (isEmailTypedField(item.name, item) && !isValidEmailValue(raw)) {
-            markFieldErrorMessage(
-              `#l-${cssId(f.name)}-${idx}-${cssId(item.name)}`,
-              item.name,
-              UI_LABELS.invalidEmailFieldError,
-              { list: f.name, row: idx, item: item.name },
-            );
-          }
+      if (raw && f && isEmailTypedField(t.name, f) && !isValidEmailValue(raw)) {
+        markFieldErrorMessage(
+          `#f-${cssId(t.name)}`,
+          t.name,
+          UI_LABELS.invalidEmailFieldError,
+        );
+      } else {
+        markFieldError(`#f-${cssId(t.name)}`, t.name);
+      }
+    } else if (t.kind === "list") {
+      const rep = app.querySelector(`[data-list-field="${cssAttrSelector(t.list)}"]`);
+      if (rep) {
+        rep.classList.add("has-error");
+        if (!rep.querySelector(".field-error")) {
+          rep.insertAdjacentHTML(
+            "beforeend",
+            `<p class="field-error">${escapeHtml(UI_LABELS.fieldErrorAddRowOrSkip)}</p>`,
+          );
         }
-      });
+      }
+    } else if (t.kind === "list-item") {
+      const raw = String(state.values[t.list]?.[t.row]?.[t.item] ?? "").trim();
+      const listField = state.fields.find((x) => x.name === t.list);
+      const itemField = listField?.type === "list"
+        ? listField.itemFields.find((x) => x.name === t.item)
+        : null;
+      if (raw && itemField && isEmailTypedField(t.item, itemField) && !isValidEmailValue(raw)) {
+        markFieldErrorMessage(
+          `#l-${cssId(t.list)}-${t.row}-${cssId(t.item)}`,
+          t.item,
+          UI_LABELS.invalidEmailFieldError,
+          { list: t.list, row: t.row, item: t.item },
+        );
+      } else {
+        markFieldError(
+          `#l-${cssId(t.list)}-${t.row}-${cssId(t.item)}`,
+          t.item,
+          { list: t.list, row: t.row, item: t.item },
+        );
+      }
     }
   }
 
-  if (missing.length) scrollToFirstFieldError();
+  if (missing.length) scrollToValidationJump(0);
   return missing;
+}
+
+/** Only count inputs the form actually renders (same rules as submit validation). */
+function fieldHasRenderedControl(field) {
+  if (!shouldValidateRootField(field)) return false;
+  if (!app) return true;
+  if (field.type === "text" || field.type === "email") {
+    return !!app.querySelector(`[data-doc-field="${cssAttrSelector(field.name)}"]`);
+  }
+  if (field.type === "image") {
+    return !!app.querySelector(`[data-image-field="${cssAttrSelector(field.name)}"]`);
+  }
+  if (field.type === "list") {
+    return !!app.querySelector(`[data-list-field="${cssAttrSelector(field.name)}"]`);
+  }
+  return false;
 }
 
 function cssAttrSelector(value) {
@@ -3546,29 +3626,29 @@ function countUnfilledFields() {
   try {
     if (!state.file || !state.fields?.length) return 0;
     const labelMap = currentFieldLabelMap();
-    let n = 0;
-    for (const f of state.fields) {
-      if (state.skip[f.name]) continue;
-      if (f.type === "text" || f.type === "email") {
-        const raw = String(state.values[f.name] ?? "").trim();
-        if (!raw) n += 1;
-        else if (isEmailTypedField(f.name, f) && !isValidEmailValue(raw)) n += 1;
-      } else if (f.type === "image") {
-        if (!state.images[f.name]) n += 1;
-      } else if (f.type === "list") {
-        const listResult = collectMissingListValidation({
-          fieldLabel: fieldDisplayLabel(f, labelMap, f.name),
-          itemFields: f.itemFields,
-          rows: state.values[f.name] || [],
-          rowSkip: state.rowSkip[f.name],
-          labelMap,
-          isEmailField: isEmailTypedField,
-          emailInvalid: (raw) => !isValidEmailValue(raw),
-        });
-        n += listResult.missing.length;
-      }
-    }
-    return n;
+    const { missing } = collectFormValidationMissing({
+      fields: state.fields,
+      values: state.values,
+      images: state.images,
+      skip: state.skip,
+      rowSkip: state.rowSkip,
+      labelMap,
+      isEmailField: isEmailTypedField,
+      emailInvalid: (raw) => !isValidEmailValue(raw),
+      ...(app?.querySelector("#fillForm")
+        ? {
+            hasControl: (name) => {
+              const f = state.fields.find((x) => x.name === name);
+              return f ? fieldHasRenderedControl(f) : false;
+            },
+            hasListItemControl: (list, row, item) =>
+              !!app.querySelector(
+                `[data-list="${cssAttrSelector(list)}"][data-row="${row}"][data-item="${cssAttrSelector(item)}"]`,
+              ),
+          }
+        : {}),
+    });
+    return missing.length;
   } catch {
     return 0;
   }
@@ -10071,7 +10151,7 @@ async function parseFile(file, errorEl) {
     state.showFullContent = preferContent;
     state.file = parsed.file;
     state.filename = parsed.filename;
-    state.fields = parsed.fields;
+    state.fields = normalizeFormFields(parsed.fields);
     state.values = parsed.values;
     state.images = parsed.images;
     state.skip = parsed.skip;
@@ -10866,10 +10946,10 @@ function ensureFieldsFromLayoutTags() {
   ];
   const { fields, added } = mergeMissingTextFields(state.fields || [], tags);
   if (!added.length) {
-    state.fields = fields;
+    state.fields = normalizeFormFields(fields);
     return;
   }
-  state.fields = fields;
+  state.fields = normalizeFormFields(fields);
   for (const name of added) {
     if (!(name in state.values)) state.values[name] = "";
     if (!(name in state.skip)) state.skip[name] = false;
@@ -10888,7 +10968,7 @@ function ensureFieldsFromLayoutTagsForSlot(slot) {
     ...collectSelfTagsFromText(slot.fileContent || ""),
   ];
   const { fields, added } = mergeMissingTextFields(slot.fields || [], tags);
-  slot.fields = fields;
+  slot.fields = normalizeFormFields(fields);
   if (!added.length) return;
   for (const name of added) {
     if (!(name in slot.values)) slot.values[name] = "";
@@ -12449,6 +12529,19 @@ function renderWordTableBlock(block) {
     })
     .join("");
 
+  const trailingBody = (block.trailingRows || [])
+    .map((r) => {
+      const cells = (r || [])
+        .map((c) => {
+          const cellObj = typeof c === "string" ? { text: c } : c;
+          const { attrs } = layoutCellAttrs(cellObj);
+          return `<td${attrs}>${renderLayoutCellInner(cellObj)}</td>`;
+        })
+        .join("");
+      return `<tr class="doc-table-trailing">${cells}</tr>`;
+    })
+    .join("");
+
   const colCount = (block.templateCells || []).length + 1;
   return `<div class="doc-list doc-list-table" data-list-field="${escapeAttr(listName)}">
     ${renderListToolbarHtml(listName, field, { badge: UI_LABELS.listBadgeFromFile })}
@@ -12460,6 +12553,7 @@ function renderWordTableBlock(block) {
         </thead>
         <tbody>
           ${bodyRows || `<tr><td colspan="${colCount}" class="row-empty">${escapeHtml(UI_LABELS.emptyRows)}</td></tr>`}
+          ${trailingBody}
         </tbody>
       </table>
     </div>
@@ -12893,8 +12987,10 @@ function renderAutoRunDisplay(label, rowIdx) {
 
 function renderListCellControl(listName, row, idx, item, itemField, displayOverride) {
   const itemSkipped = !!state.rowSkip[listName]?.[idx]?.[item];
+  const labelMap = currentFieldLabelMap();
+  const cellLabel = listCellControlLabel(itemField, labelMap, item);
   if (itemField?.type === "auto") {
-    return renderAutoRunDisplay(itemField.label || displayOverride || item, idx);
+    return renderAutoRunDisplay(itemField.label || cellLabel || item, idx);
   }
   if (itemField?.type === "bool") {
     const checked = coerceBoolValue(row[item]);
@@ -12903,18 +12999,17 @@ function renderListCellControl(listName, row, idx, item, itemField, displayOverr
       skipped: itemSkipped,
       trueText: itemField.trueText,
       falseText: itemField.falseText,
-      label: itemField.label || displayOverride || item,
+      label: itemField.label || cellLabel || item,
       inputAttrs: `data-kind="bool" data-list="${escapeAttr(listName)}" data-row="${idx}" data-item="${escapeAttr(item)}"`,
       skipAttrs: `data-skip-list="${escapeAttr(listName)}" data-skip-row="${idx}" data-skip-item="${escapeAttr(item)}"`,
     });
   }
   const cellVal = row[item] ?? "";
-  const cellLabel = String(displayOverride || "").trim() || itemFieldLabel(itemField) || item;
-  return `<span class="doc-blank-wrap doc-table-cell-wrap ${itemSkipped ? "is-skipped" : ""} ${shouldUseTextarea(cellVal) ? "is-multiline" : ""}">
+  return `<span class="doc-blank-wrap doc-table-cell-wrap ${itemSkipped ? "is-skipped" : ""} ${shouldUseTextarea(cellVal) ? "is-multiline" : ""}" data-field-id="${escapeAttr(item)}">
     ${renderTextValueControl({
       value: cellVal,
       className: "doc-blank doc-table-input",
-      attrs: `data-list="${escapeAttr(listName)}" data-row="${idx}" data-item="${escapeAttr(item)}"`,
+      attrs: `data-list="${escapeAttr(listName)}" data-row="${idx}" data-item="${escapeAttr(item)}" data-field-id="${escapeAttr(item)}"`,
       placeholder: formatExamplePlaceholder(cellLabel, item),
       disabled: itemSkipped,
       ariaLabel: cellLabel,
@@ -13701,34 +13796,19 @@ function buildValuesPayload() {
  * @param {typeof multiSlots[number]} slot
  */
 function missingFieldsForSlot(slot) {
-  /** @type {string[]} */
-  const missing = [];
   const plain = layoutBlocksToPlainText(slot.fileLayout || [], slot.fileContent || "");
   const labelMap = buildLayoutLabelMap(plain, slot.fields || []);
-  for (const f of slot.fields) {
-    if (slot.skip[f.name]) continue;
-    const fieldLabel = fieldDisplayLabel(f, labelMap, f.name);
-    if (f.type === "text" || f.type === "email") {
-      if (!String(slot.values[f.name] ?? "").trim()) {
-        missing.push(`${slot.filename}: ${fieldLabel}`);
-      }
-    } else if (f.type === "image") {
-      if (!slot.images[f.name]) missing.push(`${slot.filename}: ${fieldLabel}`);
-    } else if (f.type === "list") {
-      const rows = slot.values[f.name] || [];
-      const listResult = collectMissingListValidation({
-        fieldLabel,
-        itemFields: f.itemFields,
-        rows,
-        rowSkip: slot.rowSkip[f.name],
-        labelMap,
-      });
-      for (const label of listResult.missing) {
-        missing.push(`${slot.filename}: ${label}`);
-      }
-    }
-  }
-  return missing;
+  const { missing } = collectFormValidationMissing({
+    fields: slot.fields || [],
+    values: slot.values || {},
+    images: slot.images || {},
+    skip: slot.skip || {},
+    rowSkip: slot.rowSkip || {},
+    labelMap,
+    isEmailField: isEmailTypedField,
+    emailInvalid: (raw) => !isValidEmailValue(raw),
+  });
+  return missing.map((label) => `${slot.filename}: ${label}`);
 }
 
 async function createAllTemplatesZip() {

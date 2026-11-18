@@ -179,6 +179,15 @@ assert.deepEqual(emptySeeded.missing, [
   formatMissingFieldLabel("รายการสินค้า", UI_LABELS.validationListNeedFilledRow),
 ]);
 assert.equal(emptySeeded.missing.length, 1);
+assert.ok(Array.isArray(emptySeeded.targets));
+
+const autoOnlyLoop = collectMissingListValidation({
+  fieldLabel: "ลูป",
+  listName: "ลูป",
+  itemFields: [{ name: "+ลำดับ", type: "auto", label: "ลำดับ" }],
+  rows: [{}],
+});
+assert.deepEqual(autoOnlyLoop.missing, []);
 
 const partial = collectMissingListValidation({
   fieldLabel: "รายการสินค้า",

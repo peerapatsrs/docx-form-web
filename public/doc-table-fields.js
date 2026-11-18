@@ -134,11 +134,36 @@ export function mergeMissingTextFields(fields, tagNames) {
     if (!name || known.has(name)) continue;
     // Skip loop wrappers / bool-ish cores already covered by full tag names.
     if (name.startsWith("#") || name.startsWith("/")) continue;
-    list.push({ name, type: "text" });
+    if (name.startsWith("+")) {
+      list.push({ name, type: "auto", label: name.slice(1).trim() || name });
+    } else {
+      list.push({ name, type: "text" });
+    }
     known.add(name);
     added.push(name);
   }
   return { fields: list, added };
+}
+
+/**
+ * Coerce merged/legacy fields: `{{+name}}` must be type auto (not text).
+ * @param {any[]} fields
+ */
+export function normalizeFormFields(fields) {
+  const fix = (f) => {
+    if (!f || typeof f !== "object") return f;
+    const next = { ...f };
+    const n = String(next.name || "").trim();
+    if (n.startsWith("+")) {
+      next.type = "auto";
+      if (!next.label) next.label = n.slice(1).trim() || n;
+    }
+    if (next.type === "list" && Array.isArray(next.itemFields)) {
+      next.itemFields = next.itemFields.map(fix);
+    }
+    return next;
+  };
+  return (Array.isArray(fields) ? fields : []).map(fix);
 }
 
 /**

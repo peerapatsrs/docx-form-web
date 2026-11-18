@@ -692,7 +692,31 @@ function normalizeTcPlain(s: string): string {
 }
 
 function isNoiseHeaderLabel(text: string): boolean {
-  return !text || /^[✓√✖×xX\-–—·.•]+$/u.test(text);
+  // Dash/bullet placeholders only — checkbox glyphs are real sample tokens
+  // (blank templates with ☐ must still wrap + emit bool fields).
+  return !text || /^[\-–—·.•]+$/u.test(text);
+}
+
+/** Digit / checkbox / CamelCase / long Thai prose / parenthetical note. */
+/** Strong sample tokens: digits, checkboxes, CamelCase — not long label captions. */
+function looksLikeStrongSampleCell(text: string): boolean {
+  const t = String(text || "").trim();
+  if (!t) return false;
+  if (/^[✓√✔☑☐□☒✖×xX]$/u.test(t)) return true;
+  if (/\d/.test(t)) return true;
+  if (/[A-Za-z]{3,}/.test(t) && /[a-z][A-Z]/.test(t)) return true;
+  return false;
+}
+
+function looksLikeSampleOrFillCell(text: string): boolean {
+  const t = String(text || "").trim();
+  if (!t) return false;
+  if (looksLikeStrongSampleCell(t)) return true;
+  if (/^[\(（][^\)）]{4,}[\)）]$/u.test(t)) return true;
+  if (/^[\u0E00-\u0E7F]{12,}$/u.test(t)) return true;
+  // Spaced prose — not slash-joined header captions (「เขต / อำเภอ」).
+  if (/\s/.test(t) && t.length >= 8 && !/\//.test(t)) return true;
+  return false;
 }
 
 type TableRowScanInfo = {
@@ -767,11 +791,9 @@ function scanDataRowsWithHeaders(
       if (r.isTblHeader) return true;
       const filled = r.cells.map((c) => c.text).filter(Boolean);
       if (!filled.length) return false;
-      const hasSample = filled.some(
-        (t) => /\d/.test(t) || /^[✓√✔☑✖×xX]$/u.test(t),
-      );
-      if (hasSample) return false;
-      // Caption/header row: every filled cell is a short label (not a blank clone).
+      // Digit/checkbox/CamelCase → body. Long Thai / slash captions can still
+      // be sub-header bands above the first strong sample row.
+      if (filled.some((t) => looksLikeStrongSampleCell(t))) return false;
       return filled.every((t) => t.length > 0 && t.length <= 80 && !isNoiseHeaderLabel(t));
     };
 
@@ -800,28 +822,44 @@ function scanDataRowsWithHeaders(
       // Skip pure header-like rows (no digit/checkbox/sample token).
       // Short label-only rows (「ลำดับ」「ชื่อ」「เขต / อำเภอ」) are headers even
       // without w:tblHeader — don't treat them as the list-table prototype.
-      // Long merged titles (「สืบตามเขตอำนาจศาล / ภูมิลำเนา…」) also lack
-      // tblHeader; when a later row has digits/checkboxes, keep skipping.
-      const hasSampleToken = nonEmpty.some(
-        (c) =>
-          /\d/.test(c.text) ||
-          /^[✓√✔☑✖×xX]$/u.test(c.text),
+      // Long merged titles / sub-header bands (「สืบตามเขต…」「สำนักงานที่ดิน…」)
+      // also lack tblHeader; when a later row has digits/checkboxes, skip them.
+      const hasStrongSample = nonEmpty.some((c) =>
+        looksLikeStrongSampleCell(c.text),
       );
+      const hasSampleToken = nonEmpty.some((c) =>
+        looksLikeSampleOrFillCell(c.text),
+      );
+      if (!hasStrongSample && !blankTemplateBody) {
+        const laterHasStrong = rows.slice(ri + 1).some((later) =>
+          later.cells.some(
+            (c) => !!c.text && looksLikeStrongSampleCell(c.text),
+          ),
+        );
+        // Weak-only rows (long Thai labels, slash captions) yield to a later
+        // digit/checkbox body row — multi-header tables need the true prototype.
+        if (laterHasStrong) continue;
+      }
       if (!hasSampleToken && !blankTemplateBody) {
         const laterHasSample = rows.slice(ri + 1).some((later) =>
           later.cells.some(
-            (c) =>
-              !!c.text &&
-              (/\d/.test(c.text) || /^[✓√✔☑✖×xX]$/u.test(c.text)),
+            (c) => !!c.text && looksLikeSampleOrFillCell(c.text),
           ),
         );
         if (laterHasSample) continue;
       }
+      // Short label-only rows are headers. Long Thai prose / parenthetical notes
+      // (baht-text, (…บาทถ้วน)) are fill values even without digits.
       const looksLikeLabelOnly =
         !hasSampleToken &&
         !blankTemplateBody &&
         nonEmpty.length > 0 &&
-        nonEmpty.every((c) => c.text.length > 0 && c.text.length <= 80);
+        nonEmpty.every(
+          (c) =>
+            c.text.length > 0 &&
+            c.text.length <= 80 &&
+            !looksLikeSampleOrFillCell(c.text),
+        );
       if (looksLikeLabelOnly) continue;
       const looksLikeData =
         blankTemplateBody ||
@@ -831,9 +869,18 @@ function scanDataRowsWithHeaders(
       if (firstOnly && emittedDataRow) continue;
 
       const headers = row.cells.map((_, ci) => {
+        // Nearest prior non-noise, non-strong-sample cell — sub-header bands
+        // (「เขต / อำเภอ」) beat distant title rows. After a digit/checkbox
+        // body row has appeared, skip fill-like cells (baht-text / notes).
         for (let hj = ri - 1; hj >= 0; hj -= 1) {
-          const ht = rows[hj].cells[ci]?.text || "";
-          if (!isNoiseHeaderLabel(ht)) return ht;
+          const ht = rows[hj]!.cells[ci]?.text || "";
+          if (!ht || isNoiseHeaderLabel(ht)) continue;
+          if (looksLikeStrongSampleCell(ht)) continue;
+          const bodyAbove = rows.slice(0, hj).some((r) =>
+            r.cells.some((c) => looksLikeStrongSampleCell(String(c.text || ""))),
+          );
+          if (bodyAbove && looksLikeSampleOrFillCell(ht)) continue;
+          return ht;
         }
         return "";
       });
@@ -1516,6 +1563,72 @@ function ensureTableLoopOpenTags(xml: string): string {
   return out;
 }
 
+/** Append `text` to the last <w:t> inside [sliceStart, sliceEnd). */
+function appendToLastWt(
+  xml: string,
+  sliceStart: number,
+  sliceEnd: number,
+  text: string,
+): string {
+  const slice = xml.slice(sliceStart, sliceEnd);
+  const wtMatches = [...slice.matchAll(/<w:t(\s[^>]*)?>([^<]*)<\/w:t>/g)];
+  const last = wtMatches[wtMatches.length - 1];
+  if (!last || last.index == null) {
+    return prependToFirstWt(xml, sliceStart, sliceEnd, text);
+  }
+  const absWt = sliceStart + last.index;
+  const attrs = last[1] || "";
+  const body = decodeXmlEntities(last[2] || "") + text;
+  const open = buildOpenTag(attrs, body);
+  return (
+    xml.slice(0, absWt) +
+    `${open}${encodeXmlEntities(body)}</w:t>` +
+    xml.slice(absWt + last[0].length)
+  );
+}
+
+/**
+ * Append {{/}} to any table template row that has {{#…}} but no closer.
+ * Defends against fill/replace paths that still strip the wrap-row close tag.
+ */
+function ensureTableLoopCloseTags(xml: string): string {
+  const tables: { start: number; end: number }[] = [];
+  const re = /<w:tbl[\s>][\s\S]*?<\/w:tbl>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    tables.push({ start: m.index, end: m.index + m[0].length });
+  }
+  let out = xml;
+  for (let ti = tables.length - 1; ti >= 0; ti -= 1) {
+    const { start, end } = tables[ti]!;
+    const tblXml = out.slice(start, end);
+    const trRe = /<w:tr[\s>][\s\S]*?<\/w:tr>/g;
+    const rows: { localStart: number; localEnd: number; plain: string }[] = [];
+    let tr: RegExpExecArray | null;
+    while ((tr = trRe.exec(tblXml)) !== null) {
+      rows.push({
+        localStart: tr.index,
+        localEnd: tr.index + tr[0].length,
+        plain: trPlainText(tr[0]),
+      });
+    }
+    const openIdx = rows.findIndex((r) => /\{\{#[^{}]*\}\}/.test(r.plain));
+    if (openIdx < 0) continue;
+    const hasClose = rows.some(
+      (r) => /\{\{\/\}/.test(r.plain) || /\{\{\/[^}]*\}\}/.test(r.plain),
+    );
+    if (hasClose) continue;
+    const row = rows[openIdx]!;
+    out = appendToLastWt(
+      out,
+      start + row.localStart,
+      start + row.localEnd,
+      "{{/}}",
+    );
+  }
+  return out;
+}
+
 /**
  * When a table already has {{#…}} on a non-first row, mark rows above as
  * Word repeating header rows (<w:tblHeader/>).
@@ -1770,15 +1883,24 @@ function setTcContentInRow(
   const cellAbsEnd = trOpen + span.end;
   const cellXml = xml.slice(cellAbsStart, cellAbsEnd);
 
-  const encoded = encodeXmlEntities(tag);
+  // wrap-row inserts {{#…}} at the first cell and {{/}} at the last cell of the
+  // prototype row. fill-empty-tc runs afterward and must not wipe those markers
+  // or /api/parse fails with unclosed {{#…}}.
+  const existingPlain = trPlainText(cellXml);
+  const loopOpen = existingPlain.match(/^\{\{#[^{}]*\}\}/)?.[0] || "";
+  const loopClose = existingPlain.match(/\{\{\/[^{}]*\}\}\s*$/)?.[0] || "";
+  const tagIsLoopMarker = /^\{\{[#/]/.test(tag);
+  const finalTag = tagIsLoopMarker ? tag : `${loopOpen}${tag}${loopClose}`;
+
+  const encoded = encodeXmlEntities(finalTag);
   let newCell: string;
   if (/<w:t\b[^>]*>[^<]*<\/w:t>/.test(cellXml)) {
     let first = true;
     newCell = cellXml.replace(/<w:t(\s[^>]*)?>([^<]*)<\/w:t>/g, (_m, attrs = "") => {
       if (first) {
         first = false;
-        const open = needsXmlSpace(tag)
-          ? buildOpenTag(attrs || "", tag)
+        const open = needsXmlSpace(finalTag)
+          ? buildOpenTag(attrs || "", finalTag)
           : `<w:t${attrs || ""}>`;
         return `${open}${encoded}</w:t>`;
       }
@@ -1787,7 +1909,8 @@ function setTcContentInRow(
   } else if (/<w:p\b[^>]*>/.test(cellXml)) {
     newCell = cellXml.replace(
       /(<w:p\b[^>]*>)(\s*<w:pPr\b[^>]*>[\s\S]*?<\/w:pPr>)?/,
-      (_m, pOpen: string, pPr = "") => `${pOpen}${pPr || ""}<w:r><w:t>${encoded}</w:t></w:r>`,
+      (_m, pOpen: string, pPr = "") =>
+        `${pOpen}${pPr || ""}<w:r><w:t>${encoded}</w:t></w:r>`,
     );
   } else {
     newCell = cellXml.replace(
@@ -2064,7 +2187,8 @@ export async function tagTemplate(
       xml = removeXmlSpan(xml, d.xmlStart as number, d.xmlEnd as number);
     }
 
-    // 2) Shift remaining tag ops past deleted plain spans, then apply end → start.
+    // 2) Field replaces first (not wraps). Wraps are applied AFTER fill-empty-tc
+    // so cell overwrites cannot wipe {{#…}} / {{/}} markers on the prototype row.
     const deletedPlain = deletes
       .map((d) => ({ start: d.start, end: d.end }))
       .sort((a, b) => a.start - b.start);
@@ -2076,33 +2200,15 @@ export async function tagTemplate(
       kind: "insert" | "replace";
       preferEnd?: boolean;
     };
-    const atomics: Atomic[] = [];
+    const replaceAtomics: Atomic[] = [];
     for (const r of resolved) {
-      if (isDeleteMode(r.mode)) continue;
+      if (isDeleteMode(r.mode) || isWrapMode(r.mode)) continue;
       const start = shiftPastDeletes(r.start, deletedPlain);
       const end = shiftPastDeletes(r.end, deletedPlain);
-      if (isWrapMode(r.mode)) {
-        atomics.push({
-          pos: end,
-          end,
-          text: r.closeTag,
-          kind: "insert",
-          preferEnd: true,
-        });
-        atomics.push({
-          pos: start,
-          end: start,
-          text: r.tag,
-          kind: "insert",
-          preferEnd: false,
-        });
-      } else {
-        atomics.push({ pos: start, end, text: r.tag, kind: "replace" });
-      }
+      replaceAtomics.push({ pos: start, end, text: r.tag, kind: "replace" });
     }
-    atomics.sort((a, b) => b.pos - a.pos || b.end - a.end);
-
-    for (const op of atomics) {
+    replaceAtomics.sort((a, b) => b.pos - a.pos || b.end - a.end);
+    for (const op of replaceAtomics) {
       const { nodes: currentNodes } = collectWtNodes(xml);
       xml = applyRangeReplace(
         xml,
@@ -2110,14 +2216,12 @@ export async function tagTemplate(
         op.pos,
         op.end,
         op.text,
-        op.kind === "insert" ? !!op.preferEnd : false,
+        false,
       );
     }
 
-    // Keep rows below wrap-row (may be footer / extra samples) — delete manually via delete-tr.
-
-    // 3) Fill empty <w:tc> last — locate the owning wrap-row (wrapTag + occurrence),
-    // not the first {{#…}} in the document (that skipped empty cells in later tables).
+    // 3) Fill empty <w:tc> before wrap markers. Prefer tableIndex+rowIndex pins
+    // (wrap open is not in the document yet). Fall back to row-anchor plainText.
     const wrapOpenTags = resolved
       .filter((r) => r.mode === "wrap-row")
       .map((r) => r.tag)
@@ -2125,38 +2229,50 @@ export async function tagTemplate(
     for (const f of pendingFills) {
       const { nodes: fillNodes, plainText: fillPlain } = collectWtNodes(xml);
       let range: { start: number; end: number } | null = null;
-      const locTag = f.wrapTag || "";
-      const locOcc = f.wrapOccurrence || 0;
-      if (locTag) {
-        try {
-          range = findOccurrenceRange(fillPlain, locTag, locOcc);
-        } catch {
-          range = null;
+      // Prefer pinned table/row — wraps are not inserted yet.
+      if (
+        !(
+          typeof f.tableIndex === "number" &&
+          typeof f.rowIndexInTable === "number"
+        )
+      ) {
+        const locTag = f.wrapTag || "";
+        const locOcc = f.wrapOccurrence || 0;
+        if (locTag) {
+          try {
+            range = findOccurrenceRange(fillPlain, locTag, locOcc);
+          } catch {
+            range = null;
+          }
+        }
+        if (!range) {
+          try {
+            range = findOccurrenceRange(fillPlain, f.plainText, f.occurrence);
+          } catch {
+            range = null;
+          }
+        }
+        if (!range && wrapOpenTags.length) {
+          for (const openTag of wrapOpenTags) {
+            try {
+              range = findOccurrenceRange(fillPlain, openTag, 0);
+              break;
+            } catch {
+              /* try next */
+            }
+          }
         }
       }
       if (!range) {
         try {
           range = findOccurrenceRange(fillPlain, f.plainText, f.occurrence);
         } catch {
-          range = null;
+          range = { start: 0, end: 0 };
         }
       }
-      if (!range && wrapOpenTags.length) {
-        for (const openTag of wrapOpenTags) {
-          try {
-            range = findOccurrenceRange(fillPlain, openTag, 0);
-            break;
-          } catch {
-            /* try next */
-          }
-        }
-      }
-      if (!range) {
-        range = { start: 0, end: 0 };
-      }
+      const locTag = f.wrapTag || "";
+      const locOcc = f.wrapOccurrence || 0;
       const locators = locTag ? [locTag] : wrapOpenTags;
-      // Deletes already applied — shift original row index down by earlier deletes
-      // in the same table so the pin still hits the intended <w:tr>.
       let fillRow = f.rowIndexInTable;
       if (typeof f.tableIndex === "number" && typeof fillRow === "number") {
         const earlier = deletePins.filter(
@@ -2179,20 +2295,86 @@ export async function tagTemplate(
           fillRow,
         );
       } catch (err) {
-        // Don't fail the whole batch when one empty-cell index can't be placed
-        // (wrong row / colspan) — wrap + other fields still apply.
         const msg = err instanceof Error ? err.message : String(err);
         console.warn(`[tagTemplate] skip fill-empty-tc ${f.id}: ${msg}`);
         fillWarnings.push(`เซลล์ว่าง ${f.cellIndex + 1} (${f.tag}): ${msg}`);
       }
     }
 
+    // 4) Wrap open/close last so fill-empty cannot wipe them.
+    // Re-resolve wrap plain spans from the (possibly rewritten) document when
+    // table/row pins are available; else use the pre-delete-shifted positions.
+    const wrapAtomics: Atomic[] = [];
+    for (const r of resolved) {
+      if (!isWrapMode(r.mode)) continue;
+      let start = shiftPastDeletes(r.start, deletedPlain);
+      let end = shiftPastDeletes(r.end, deletedPlain);
+      if (r.mode === "wrap-row") {
+        const pinned = list.find(
+          (raw) =>
+            (raw?.mode || "") === "wrap-row" &&
+            String(raw?.tag || "").trim() === r.tag,
+        );
+        const ti = Number(pinned?.tableIndex);
+        const ri = Number(pinned?.rowIndexInTable);
+        if (Number.isFinite(ti) && Number.isFinite(ri)) {
+          try {
+            const { nodes: n2 } = collectWtNodes(xml);
+            const expanded = expandToTableRowByIndex(
+              xml,
+              n2,
+              ti,
+              // Deletes already removed earlier rows — adjust pin.
+              (() => {
+                const earlier = deletePins.filter(
+                  (d) => d.tableIndex === ti && d.rowIndexInTable < ri,
+                ).length;
+                return ri - earlier;
+              })(),
+              start,
+              end,
+            );
+            start = expanded.start;
+            end = expanded.end;
+          } catch {
+            /* keep shifted range */
+          }
+        }
+      }
+      wrapAtomics.push({
+        pos: end,
+        end,
+        text: r.closeTag || "{{/}}",
+        kind: "insert",
+        preferEnd: true,
+      });
+      wrapAtomics.push({
+        pos: start,
+        end: start,
+        text: r.tag,
+        kind: "insert",
+        preferEnd: false,
+      });
+    }
+    wrapAtomics.sort((a, b) => b.pos - a.pos || b.end - a.end);
+    for (const op of wrapAtomics) {
+      const { nodes: currentNodes } = collectWtNodes(xml);
+      xml = applyRangeReplace(
+        xml,
+        currentNodes,
+        op.pos,
+        op.end,
+        op.text,
+        op.kind === "insert" ? !!op.preferEnd : false,
+      );
+    }
   }
 
   // Tables that got {{/}} without a {{#…}} on the same table (open left in a
   // paragraph above) look headless in Word — repair even when there are no new
   // replacements (re-download of an already-tagged file).
   xml = ensureTableLoopOpenTags(xml);
+  xml = ensureTableLoopCloseTags(xml);
   xml = ensureTableListHeaders(xml);
   zip.file("word/document.xml", xml);
 

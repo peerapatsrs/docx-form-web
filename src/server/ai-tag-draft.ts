@@ -78,6 +78,8 @@ export type AiTagDraftOpts = {
   /** Prefer Thai (`ลำดับ`) or English snake_case (`defendant_no`) names. Default th. */
   nameLanguage?: AiTagNameLanguage | string | null;
   signal?: AbortSignal;
+  /** Per-attempt processing budget (ms); defaults to DOCX_FORM_AI_TIMEOUT_MS. */
+  timeoutMs?: number;
 };
 
 export function parseAiTagNameLanguage(raw: unknown): AiTagNameLanguage {
@@ -836,6 +838,7 @@ async function callGeminiSuggest(
     docxBuffer?: Buffer;
     filename?: string;
     signal?: AbortSignal;
+    timeoutMs?: number;
   },
 ): Promise<SuggestCallResult> {
   const url = `${getGeminiApiBase()}/v1beta/models/${encodeURIComponent(opts.model)}:generateContent?key=${encodeURIComponent(opts.apiKey)}`;
@@ -898,6 +901,7 @@ async function callGeminiSuggest(
     },
     {
       signal: opts.signal,
+      timeoutMs: opts.timeoutMs,
       route: "suggest-tags.gemini",
       provider: "google",
       model: opts.model,
@@ -908,7 +912,12 @@ async function callGeminiSuggest(
 async function callOpenAiSuggest(
   providerId: string,
   prompt: string,
-  opts: { apiKey: string; model: string; signal?: AbortSignal },
+  opts: {
+    apiKey: string;
+    model: string;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  },
 ): Promise<SuggestCallResult> {
   const provider = getAiProvider(providerId);
   if (!provider || provider.apiFamily !== "openai" || !provider.baseUrl) {
@@ -974,6 +983,7 @@ async function callOpenAiSuggest(
     },
     {
       signal: opts.signal,
+      timeoutMs: opts.timeoutMs,
       route: "suggest-tags.openai",
       provider: providerId,
       model: opts.model,
@@ -983,7 +993,12 @@ async function callOpenAiSuggest(
 
 async function callAnthropicSuggest(
   prompt: string,
-  opts: { apiKey: string; model: string; signal?: AbortSignal },
+  opts: {
+    apiKey: string;
+    model: string;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  },
 ): Promise<SuggestCallResult> {
   const { withAiTimeout } = await import("./ai-request");
   return withAiTimeout(
@@ -1024,6 +1039,7 @@ async function callAnthropicSuggest(
     },
     {
       signal: opts.signal,
+      timeoutMs: opts.timeoutMs,
       route: "suggest-tags.anthropic",
       provider: "anthropic",
       model: opts.model,
@@ -2105,6 +2121,7 @@ export async function suggestTemplateTags(
       docxBuffer: attachDocx ? buffer : undefined,
       filename,
       signal: opts?.signal,
+      timeoutMs: opts?.timeoutMs,
     });
   } else if (provider.apiFamily === "cursor") {
     const cursorKey = getCursorApiKey(apiKey);
@@ -2115,6 +2132,7 @@ export async function suggestTemplateTags(
       apiKey: cursorKey,
       model,
       signal: opts?.signal,
+      timeoutMs: opts?.timeoutMs,
       route: "suggest-tags.cursor",
     });
     callResult = {
@@ -2126,12 +2144,14 @@ export async function suggestTemplateTags(
       apiKey,
       model,
       signal: opts?.signal,
+      timeoutMs: opts?.timeoutMs,
     });
   } else {
     callResult = await callOpenAiSuggest(provider.id, prompt, {
       apiKey,
       model,
       signal: opts?.signal,
+      timeoutMs: opts?.timeoutMs,
     });
   }
 

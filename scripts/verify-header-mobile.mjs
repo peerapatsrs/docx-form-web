@@ -275,12 +275,12 @@ async function runViewport(browserType, label, width, height, opts = {}) {
       // Escape closes
       await page.keyboard.press("Escape");
       await page.waitForSelector(".auth-bar-menu", { state: "detached", timeout: 5000 });
-    } else if (assertLayout && width < 640) {
-      pageFailures.push(`${label}: expected visible .auth-bar-avatar-btn under 640px`);
+    } else if (assertLayout && width < 1280) {
+      pageFailures.push(`${label}: expected visible .auth-bar-avatar-btn under 1280px`);
     }
 
     // Desktop: avatar menu must stay hidden
-    if (assertLayout && width >= 1024) {
+    if (assertLayout && width >= 1280) {
       if ((await avatarBtn.count()) > 0 && (await avatarBtn.isVisible())) {
         pageFailures.push(`${label}: avatar menu button should be hidden on desktop`);
       }
@@ -325,8 +325,8 @@ async function main() {
     allFailures.push(...r.failures);
   }
 
-  // Chromium 360 / 430
-  for (const w of [360, 430]) {
+  // Chromium 360 / 390 / 768 / 1024 / 430
+  for (const w of [360, 390, 768, 1024, 430]) {
     const r = await runViewport(chromium, `chromium-${w}`, w, 800, {
       isMobile: true,
       hasTouch: true,

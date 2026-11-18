@@ -7,7 +7,7 @@
     "y": 0,
     "width": 1280,
     "height": 64,
-    "text": "docx-formv0.1.0PPeerapat Surasingจ่ายแล้วAdminออกจากระบบPเมนูบัญชีAI ยังไม่พร้อม · ยังไม่มีคีย์"
+    "text": "docx-formv0.1.0PPeerapat Surasingจ่ายแล้วAdminออกจากระบบPเมนูบัญชียังไม่มีคีย์ AI"
   },
   "brand": {
     "x": 32,
@@ -38,9 +38,9 @@
     "text": "Pเมนูบัญชี"
   },
   "name": {
-    "x": 706.53125,
+    "x": 786.328125,
     "y": 23.046875,
-    "width": 120,
+    "width": 104,
     "height": 16.890625,
     "text": "Peerapat Surasing"
   },

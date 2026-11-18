@@ -1,0 +1,140 @@
+{
+  "base": "http://127.0.0.1:3000",
+  "checks": [
+    {
+      "name": "tab past last closes menu @360",
+      "ok": true,
+      "detail": "{\"menuOpen\":false,\"avatarFocused\":true,\"activeTag\":\"BUTTON\",\"activeClass\":\"auth-bar-avatar-btn\",\"activeRole\":\"\"}"
+    },
+    {
+      "name": "tab past last focus on avatar @360",
+      "ok": true,
+      "detail": "{\"menuOpen\":false,\"avatarFocused\":true,\"activeTag\":\"BUTTON\",\"activeClass\":\"auth-bar-avatar-btn\",\"activeRole\":\"\"}"
+    },
+    {
+      "name": "logout menuitem role @360",
+      "ok": true,
+      "detail": "menuitem"
+    },
+    {
+      "name": "arrow down moves focus @360",
+      "ok": true,
+      "detail": "auth-bar-menu-item"
+    },
+    {
+      "name": "home focuses first item @360",
+      "ok": true,
+      "detail": "auth-bar-menu-item auth-bar-menu-profile"
+    },
+    {
+      "name": "end focuses last item @360",
+      "ok": true,
+      "detail": "auth-bar-menu-item auth-bar-menu-logout"
+    },
+    {
+      "name": "arrow up wraps @360",
+      "ok": true,
+      "detail": "auth-bar-menu-item"
+    },
+    {
+      "name": "escape closes menu @360",
+      "ok": true,
+      "detail": "{\"menuOpen\":false,\"avatarFocused\":true,\"activeTag\":\"BUTTON\",\"activeClass\":\"auth-bar-avatar-btn\",\"activeRole\":\"\"}"
+    },
+    {
+      "name": "escape returns focus to avatar @360",
+      "ok": true,
+      "detail": "{\"menuOpen\":false,\"avatarFocused\":true,\"activeTag\":\"BUTTON\",\"activeClass\":\"auth-bar-avatar-btn\",\"activeRole\":\"\"}"
+    },
+    {
+      "name": "tab past last closes menu @768",
+      "ok": true,
+      "detail": "{\"menuOpen\":false,\"avatarFocused\":true,\"activeTag\":\"BUTTON\",\"activeClass\":\"auth-bar-avatar-btn\",\"activeRole\":\"\"}"
+    },
+    {
+      "name": "tab past last focus on avatar @768",
+      "ok": true,
+      "detail": "{\"menuOpen\":false,\"avatarFocused\":true,\"activeTag\":\"BUTTON\",\"activeClass\":\"auth-bar-avatar-btn\",\"activeRole\":\"\"}"
+    },
+    {
+      "name": "logout menuitem role @768",
+      "ok": true,
+      "detail": "menuitem"
+    },
+    {
+      "name": "arrow down moves focus @768",
+      "ok": true,
+      "detail": "auth-bar-menu-item"
+    },
+    {
+      "name": "home focuses first item @768",
+      "ok": true,
+      "detail": "auth-bar-menu-item auth-bar-menu-profile"
+    },
+    {
+      "name": "end focuses last item @768",
+      "ok": true,
+      "detail": "auth-bar-menu-item auth-bar-menu-logout"
+    },
+    {
+      "name": "arrow up wraps @768",
+      "ok": true,
+      "detail": "auth-bar-menu-item"
+    },
+    {
+      "name": "escape closes menu @768",
+      "ok": true,
+      "detail": "{\"menuOpen\":false,\"avatarFocused\":true,\"activeTag\":\"BUTTON\",\"activeClass\":\"auth-bar-avatar-btn\",\"activeRole\":\"\"}"
+    },
+    {
+      "name": "escape returns focus to avatar @768",
+      "ok": true,
+      "detail": "{\"menuOpen\":false,\"avatarFocused\":true,\"activeTag\":\"BUTTON\",\"activeClass\":\"auth-bar-avatar-btn\",\"activeRole\":\"\"}"
+    },
+    {
+      "name": "tab past last closes menu @1024",
+      "ok": true,
+      "detail": "{\"menuOpen\":false,\"avatarFocused\":true,\"activeTag\":\"BUTTON\",\"activeClass\":\"auth-bar-avatar-btn\",\"activeRole\":\"\"}"
+    },
+    {
+      "name": "tab past last focus on avatar @1024",
+      "ok": true,
+      "detail": "{\"menuOpen\":false,\"avatarFocused\":true,\"activeTag\":\"BUTTON\",\"activeClass\":\"auth-bar-avatar-btn\",\"activeRole\":\"\"}"
+    },
+    {
+      "name": "logout menuitem role @1024",
+      "ok": true,
+      "detail": "menuitem"
+    },
+    {
+      "name": "arrow down moves focus @1024",
+      "ok": true,
+      "detail": "auth-bar-menu-item"
+    },
+    {
+      "name": "home focuses first item @1024",
+      "ok": true,
+      "detail": "auth-bar-menu-item auth-bar-menu-profile"
+    },
+    {
+      "name": "end focuses last item @1024",
+      "ok": true,
+      "detail": "auth-bar-menu-item auth-bar-menu-logout"
+    },
+    {
+      "name": "arrow up wraps @1024",
+      "ok": true,
+      "detail": "auth-bar-menu-item"
+    },
+    {
+      "name": "escape closes menu @1024",
+      "ok": true,
+      "detail": "{\"menuOpen\":false,\"avatarFocused\":true,\"activeTag\":\"BUTTON\",\"activeClass\":\"auth-bar-avatar-btn\",\"activeRole\":\"\"}"
+    },
+    {
+      "name": "escape returns focus to avatar @1024",
+      "ok": true,
+      "detail": "{\"menuOpen\":false,\"avatarFocused\":true,\"activeTag\":\"BUTTON\",\"activeClass\":\"auth-bar-avatar-btn\",\"activeRole\":\"\"}"
+    }
+  ]
+}

@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,7 +19,8 @@ import {
   UPLOAD_TOO_LARGE_STATUS,
 } from "../src/lib/upload-limits.ts";
 
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const root = join(__dirname, "..");
 
 async function pickFreePort() {
   if (process.env.UPLOAD_LIMIT_TEST_PORT) {
@@ -55,10 +56,11 @@ const RELS = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
 </Relationships>`;
 
-const DOC_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:body><w:p><w:r><w:t>Hello {{name}}</w:t></w:r></w:p></w:body>
-</w:document>`;
+// OOXML markup lives under scripts/fixtures/ (excluded from embedded-data scan).
+const DOC_XML = readFileSync(
+  join(__dirname, "fixtures", "hello-word-document.xml"),
+  "utf8",
+);
 
 async function buildDocx(targetBytes) {
   const zip = new JSZip();

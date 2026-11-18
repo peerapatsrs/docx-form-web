@@ -3574,6 +3574,23 @@ function countUnfilledFields() {
   }
 }
 
+/** Tooltip + aria for the header status pill (full status line + manage-keys action). */
+function applyStatusPillAccess(pill, statusLine) {
+  if (!pill) return;
+  const line = String(statusLine || "").trim();
+  const action = UI_LABELS.aiStatusManageKeys;
+  const label = line ? `${line} — ${action}` : action;
+  pill.title = label;
+  pill.setAttribute("aria-label", label);
+}
+
+function setStatusPillLine(line) {
+  if (!statusText) return;
+  const text = String(line ?? "");
+  statusText.textContent = text;
+  applyStatusPillAccess(document.getElementById("status"), text);
+}
+
 /** Status pill: personal key → ready; shared server key → คีย์เซิร์ฟเวอร์; else no key. */
 function syncAiStatusPill() {
   if (!statusText || !statusDot) return;
@@ -3582,7 +3599,6 @@ function syncAiStatusPill() {
     pill.classList.add("is-clickable");
     pill.setAttribute("role", "button");
     pill.tabIndex = 0;
-    pill.title = "จัดการคีย์ AI";
     if (!pill.dataset.aiClickWired) {
       pill.dataset.aiClickWired = "1";
       const openKeys = (ev) => {
@@ -3606,7 +3622,7 @@ function syncAiStatusPill() {
         !aiKeyChoiceStatus &&
         hasSharedServerAiCredentials()));
   if (!choiceReady) {
-    statusText.textContent = UI_LABELS.aiStatusNoKey;
+    setStatusPillLine(UI_LABELS.aiStatusNoKey);
     statusDot.classList.remove("ok");
     statusDot.classList.add("bad");
     return;
@@ -3617,22 +3633,24 @@ function syncAiStatusPill() {
     const provider =
       aiStatus.providerLabel || providerLabel(getClientAiProvider());
     const model = aiStatus.effectiveModel || aiStatus.model || "";
-    statusText.textContent = model
-      ? `คีย์เซิร์ฟเวอร์ · ${provider} · ${model}`
-      : `คีย์เซิร์ฟเวอร์ · ${provider}`;
+    setStatusPillLine(
+      model
+        ? `คีย์เซิร์ฟเวอร์ · ${provider} · ${model}`
+        : `คีย์เซิร์ฟเวอร์ · ${provider}`,
+    );
     return;
   }
   if (!hasFile) {
-    statusText.textContent = UI_LABELS.aiStatusNoFile;
+    setStatusPillLine(UI_LABELS.aiStatusNoFile);
     return;
   }
   const missing = countUnfilledFields();
   if (missing > 0) {
-    statusText.textContent = UI_LABELS.aiStatusNotReadyCount(missing);
+    setStatusPillLine(UI_LABELS.aiStatusNotReadyCount(missing));
     return;
   }
   const provider = getClientAiLabel() || aiStatus.providerLabel || providerLabel(getClientAiProvider());
-  statusText.textContent = UI_LABELS.aiStatusReady(provider);
+  setStatusPillLine(UI_LABELS.aiStatusReady(provider));
 }
 
 async function checkHealth() {
@@ -3718,7 +3736,7 @@ async function checkHealth() {
       statusDot.classList.remove("ok");
       statusDot.classList.add("bad");
     }
-    if (statusText) statusText.textContent = UI_LABELS.connectFailed;
+    if (statusText) setStatusPillLine(UI_LABELS.connectFailed);
     showBanner(UI_LABELS.connectFailed, "error", {
       action: {
         label: UI_LABELS.connectRetry,

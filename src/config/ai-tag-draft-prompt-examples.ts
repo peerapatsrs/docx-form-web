@@ -1,14 +1,15 @@
 /**
  * Illustrative label/value examples for the AI tag-draft system prompt.
  * Kept out of server modules so embedded-data CI can allowlist via config/.
+ * Examples are generic (not copied from production/QA forms).
  */
 export const LABEL_VALUE_SPLIT_EXAMPLES = `
-  ประเภทหนี้\\t\\tกู้ยืม → {"plainText":"กู้ยืม","label":"ประเภทหนี้",...}
-  มอบหมายให้ บริษัท กฎหมาย บีไอจี จำกัด (ตัวอย่าง) → {"plainText":"บริษัท กฎหมาย บีไอจี จำกัด","label":"มอบหมายให้",...}
-  มอบหมายให้บริษัท กฎหมาย บีไอจี จำกัด… (flush) → same split
-  (โทร02-023-2599) / (โทร02-023-2599,02-023-2591) / (โทรสำนักงานใหญ่)
-    → plainText = the value body (digits OR text); label = "โทร"
+  Caption\\t\\tValue → {"plainText":"Value","label":"Caption",...}
+  Prefix Longer value text (note) → {"plainText":"Longer value text","label":"Prefix",...}
+  PrefixLonger value… (flush, no separator) → same split
+  (Stem012-345-6789) / (Stem012-345-6789,012-345-6790) / (Stem office)
+    → plainText = the value body (digits OR text); label = "Stem"
 `.trim();
 
 export const CONTACT_TAGGING_EXAMPLE =
-  "e.g. 02-023-2599,096-392-3963); also tag emails like biglegal@…";
+  "e.g. 012-345-6789,098-765-4321); also tag emails like name@example.com";

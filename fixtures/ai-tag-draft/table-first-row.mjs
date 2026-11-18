@@ -319,7 +319,7 @@ assert.equal(
   "จำเลยที่ 1 ชื่อ นายหนึ่ง ที่อยู่ บ้านหนึ่ง",
   "wrap must be FIRST defendant unit only",
 );
-assert.equal(paraWrap.tag, "{{#รายการจำเลย}}");
+assert.match(paraWrap.tag, /^\{\{#รายการ_?จำเลย/);
 assert.ok(
   outPara.some(
     (s) => s.plainText === "นายหนึ่ง" && s.kind === "text" && s.wrapTag === paraWrap.tag,

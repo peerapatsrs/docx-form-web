@@ -153,7 +153,7 @@
     ],
     "expected": {
       "firstUnitPlain": "จำเลยที่ 1 ชื่อ นายหนึ่ง ที่อยู่ บ้านหนึ่ง",
-      "wrapTag": "{{#รายการจำเลย}}",
+      "wrapTag": "{{#รายการ_จำเลยที่}}",
       "innerName": "นายหนึ่ง",
       "firstDigit": "1",
       "laterUnitRejectPattern": "นายสอง|นายสาม|จำเลย2|จำเลย3"

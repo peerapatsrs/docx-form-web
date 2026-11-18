@@ -80,10 +80,15 @@ await check("validate emits delete-tr for leftover sample rows", async () => {
         d.rowIndexInTable > 0,
     ),
   );
-  // Total row must NOT be deleted.
+  // Distinct-shape Total row must NOT be deleted.
   assert.ok(
     !deletes.some((d) => String(d.plainText || "").includes("Total")),
-    "summary row must stay",
+    "distinct-shape total row must stay",
+  );
+  // Unique amount on that row should be tagged.
+  assert.ok(
+    out.some((s) => s.plainText === "600" && s.mode === "replace"),
+    `expected total amount tagged; got ${out.map((s) => s.tag + ":" + s.plainText).join(" | ")}`,
   );
   // Later sample tokens should not be tagged as replace fields.
   assert.ok(!out.some((s) => s.plainText === "BetaWidget" && s.mode === "replace"));
@@ -128,7 +133,17 @@ await check("looksLikeRunSequence uses isRunColumn, not Thai keywords", async ()
       isRunColumn: null,
     }),
     true,
-    "Latin No. marker still a weak signal when column unknown",
+    "col-0 short digit remains weak fallback when column evidence unknown",
+  );
+  assert.equal(
+    looksLikeRunSequence({
+      header: "No",
+      cellIndex: 2,
+      cellText: "1",
+      isRunColumn: null,
+    }),
+    false,
+    "Latin caption alone on non-first col is not enough",
   );
 });
 
